@@ -210,20 +210,21 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         false
     }
 
-    pub fn handle_insert_text(&self, text: &str) {
+    pub fn handle_insert_text(&self, text: &str) -> bool {
         if self.syncing.get() || self.suppress_insert.get() {
             debug_log("insert:skip-syncing");
-            return;
+            return false;
         }
         if self.skip_next_insert.replace(false) {
             debug_log("insert:skip");
-            return;
+            return false;
         }
         if text.is_empty() {
-            return;
+            return false;
         }
         debug_log(&format!("insert:{text}"));
         self.terminal.feed_child(text.as_bytes());
+        true
     }
 
     pub fn sync_from_terminal(&self) {
@@ -310,8 +311,9 @@ pub fn wire_keys(
 
     let insert_bridge = bridge.clone();
     entry.connect_insert_text(move |entry_widget, text, _| {
-        insert_bridge.handle_insert_text(text);
-        entry_widget.stop_signal_emission_by_name("insert-text");
+        if insert_bridge.handle_insert_text(text) {
+            entry_widget.stop_signal_emission_by_name("insert-text");
+        }
     });
 }
 

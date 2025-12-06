@@ -225,7 +225,7 @@ fn insert_text_feeds_terminal() {
     let ghost = FakeLabel::default();
     let term = FakeTerminal::with_line("");
     let bridge = InputBridge::new(entry, ghost, term.clone());
-    bridge.handle_insert_text("abc");
+    assert!(bridge.handle_insert_text("abc"));
     assert_eq!(term.fed.borrow().as_slice(), b"abc");
 }
 
@@ -236,7 +236,7 @@ fn insert_text_is_skipped_when_syncing() {
     let term = FakeTerminal::with_line("");
     let bridge = InputBridge::new(entry, ghost, term.clone());
     bridge.set_syncing_for_test(true);
-    bridge.handle_insert_text("abc");
+    assert!(!bridge.handle_insert_text("abc"));
     assert!(term.fed.borrow().is_empty());
 }
 
@@ -247,7 +247,7 @@ fn insert_text_is_skipped_when_suppressed() {
     let term = FakeTerminal::with_line("");
     let bridge = InputBridge::new(entry, ghost, term.clone());
     bridge.set_suppress_insert_for_test(true);
-    bridge.handle_insert_text("abc");
+    assert!(!bridge.handle_insert_text("abc"));
     assert!(term.fed.borrow().is_empty());
 }
 

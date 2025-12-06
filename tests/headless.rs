@@ -39,7 +39,8 @@ fn headless_cat_roundtrip() {
             }
         });
 
-        bridge.handle_insert_text("abc");
+        let fed = bridge.handle_insert_text("abc");
+        assert!(fed, "insert was skipped");
         bridge.handle_key(gdk::Key::Return, gdk::ModifierType::empty());
         terminal.feed(b"abc\n");
         for _ in 0..10 {
