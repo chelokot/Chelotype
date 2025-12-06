@@ -229,6 +229,7 @@ struct InputBridge<E: EntryHandle + 'static, L: LabelHandle + 'static, T: Termin
     ghost: L,
     terminal: T,
     syncing: Rc<Cell<bool>>,
+    suppress_cursor_notify: Rc<Cell<bool>>,
 }
 
 impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> InputBridge<E, L, T> {
@@ -238,6 +239,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             ghost,
             terminal,
             syncing: Rc::new(Cell::new(false)),
+            suppress_cursor_notify: Rc::new(Cell::new(false)),
         }
     }
 
@@ -312,14 +314,16 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         self.ghost.set_markup(markup.as_str());
         self.entry.set_text(&text);
 
+        self.suppress_cursor_notify.set(true);
         let (cursor_col, _) = self.terminal.cursor_position();
         let cursor_pos = i32::try_from(cursor_col).unwrap_or(0);
         self.entry.set_position(cursor_pos);
+        self.suppress_cursor_notify.set(false);
         self.syncing.set(false);
     }
 
     fn move_cursor_to(&self, target: i32) {
-        if self.syncing.get() {
+        if self.syncing.get() || self.suppress_cursor_notify.get() {
             return;
         }
         let (_, row) = self.terminal.cursor_position();
@@ -351,7 +355,7 @@ fn wire_keys(
             } else {
                 glib::Propagation::Proceed
             }
-            });
+        });
         controller
     });
 
