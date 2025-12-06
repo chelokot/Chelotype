@@ -234,6 +234,7 @@ struct InputBridge<E: EntryHandle + 'static, L: LabelHandle + 'static, T: Termin
     terminal: T,
     syncing: Rc<Cell<bool>>,
     suppress_cursor_notify: Rc<Cell<bool>>,
+    skip_next_insert: Rc<Cell<bool>>,
 }
 
 impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> InputBridge<E, L, T> {
@@ -244,6 +245,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             terminal,
             syncing: Rc::new(Cell::new(false)),
             suppress_cursor_notify: Rc::new(Cell::new(false)),
+            skip_next_insert: Rc::new(Cell::new(false)),
         }
     }
 
@@ -271,13 +273,14 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             gtk::gdk::Key::End => Some(b"\x1b[F".to_vec()),
             gtk::gdk::Key::Delete => Some(b"\x1b[3~".to_vec()),
             _ => {
-                if let Some(ch) = key.to_unicode() {
-                    let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-                    let alt = state.intersects(
-                        gtk::gdk::ModifierType::ALT_MASK
-                            | gtk::gdk::ModifierType::META_MASK
-                            | gtk::gdk::ModifierType::SUPER_MASK,
-                    );
+                let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                let alt = state.intersects(
+                    gtk::gdk::ModifierType::ALT_MASK
+                        | gtk::gdk::ModifierType::META_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK,
+                );
+                if (ctrl || alt) && key.to_unicode().is_some() {
+                    let ch = key.to_unicode().unwrap();
                     let mut out = Vec::new();
                     if ctrl {
                         let upper = ch.to_ascii_uppercase();
@@ -290,10 +293,10 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
                     if alt {
                         let mut prefixed = b"\x1b".to_vec();
                         prefixed.extend_from_slice(&out);
-                        Some(prefixed)
-                    } else {
-                        Some(out)
+                        out = prefixed;
                     }
+                    self.skip_next_insert.set(true);
+                    Some(out)
                 } else {
                     None
                 }
@@ -304,6 +307,16 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             return true;
         }
         false
+    }
+
+    fn handle_insert_text(&self, text: &str) {
+        if self.skip_next_insert.replace(false) {
+            return;
+        }
+        if text.is_empty() {
+            return;
+        }
+        self.terminal.feed_child(text.as_bytes());
     }
 
     fn sync_from_terminal(&self) {
@@ -357,10 +370,9 @@ fn wire_keys(
         let controller = gtk::EventControllerKey::new();
         let bridge_clone = bridge.clone();
         controller.connect_key_pressed(move |_controller, key, _code, state| {
-            if bridge_clone.handle_key(key, state) {
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
+            match bridge_clone.handle_key(key, state) {
+                true => glib::Propagation::Stop,
+                false => glib::Propagation::Proceed,
             }
         });
         controller
@@ -369,6 +381,12 @@ fn wire_keys(
     let cursor_bridge = bridge.clone();
     entry.connect_cursor_position_notify(move |entry_widget| {
         cursor_bridge.move_cursor_to(entry_widget.position());
+    });
+
+    let insert_bridge = bridge.clone();
+    entry.connect_insert_text(move |entry_widget, text, _| {
+        insert_bridge.handle_insert_text(text);
+        entry_widget.stop_signal_emission_by_name("insert-text");
     });
 }
 
@@ -587,16 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_forwards_text() {
-        let entry = FakeEntry::default();
-        let ghost = FakeLabel::default();
-        let term = FakeTerminal::with_line("");
-        let bridge = InputBridge::new(entry, ghost, term.clone());
-        assert!(bridge.handle_key(gtk::gdk::Key::a, gtk::gdk::ModifierType::empty()));
-        assert_eq!(term.fed.borrow().as_slice(), b"a");
-    }
-
-    #[test]
     fn handle_key_forwards_enter() {
         let entry = FakeEntry::default();
         let ghost = FakeLabel::default();
@@ -617,6 +625,16 @@ mod tests {
     }
 
     #[test]
+    fn handle_key_plain_text_is_not_consumed() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        assert!(!bridge.handle_key(gtk::gdk::Key::a, gtk::gdk::ModifierType::empty()));
+        assert!(term.fed.borrow().is_empty());
+    }
+
+    #[test]
     fn handle_key_alt_prefix() {
         let entry = FakeEntry::default();
         let ghost = FakeLabel::default();
@@ -624,6 +642,27 @@ mod tests {
         let bridge = InputBridge::new(entry, ghost, term.clone());
         assert!(bridge.handle_key(gtk::gdk::Key::a, gtk::gdk::ModifierType::ALT_MASK));
         assert_eq!(term.fed.borrow().as_slice(), b"\x1ba");
+    }
+
+    #[test]
+    fn alt_key_sets_skip_for_insert() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        assert!(bridge.handle_key(gtk::gdk::Key::b, gtk::gdk::ModifierType::ALT_MASK));
+        bridge.handle_insert_text("b");
+        assert_eq!(term.fed.borrow().as_slice(), b"\x1bb");
+    }
+
+    #[test]
+    fn insert_text_feeds_terminal() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        bridge.handle_insert_text("abc");
+        assert_eq!(term.fed.borrow().as_slice(), b"abc");
     }
 
     #[test]
