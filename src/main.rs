@@ -3,6 +3,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use regex::Regex;
 use std::cell::Cell;
+use std::rc::Rc;
 use vte::prelude::*;
 use vte::{PtyFlags, Terminal};
 
@@ -22,7 +23,7 @@ fn build_ui(app: &Application) {
         .build();
 
     let terminal = Terminal::builder()
-        .input_enabled(false)
+        .input_enabled(true)
         .can_focus(false)
         .build();
     terminal.set_scrollback_lines(20000);
@@ -34,6 +35,7 @@ fn build_ui(app: &Application) {
     entry.add_css_class("monospace");
     entry.add_css_class("overlay-input");
     entry.set_placeholder_text(Some("Type command"));
+
     let ghost = gtk::Label::builder()
         .halign(gtk::Align::Start)
         .valign(gtk::Align::Center)
@@ -41,6 +43,8 @@ fn build_ui(app: &Application) {
         .build();
     ghost.set_can_target(false);
     ghost.add_css_class("monospace");
+    ghost.set_hexpand(true);
+    ghost.set_halign(gtk::Align::Fill);
 
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&entry));
@@ -51,7 +55,14 @@ fn build_ui(app: &Application) {
     overlay.set_margin_bottom(12);
 
     apply_overlay_style(&entry);
-    wire_input(&entry, &ghost, &terminal);
+
+    let entry_handle = GtkEntryHandle::new(entry.clone());
+    let label_handle = GtkLabelHandle::new(ghost.clone());
+    let terminal_adapter = VteTerminalAdapter::new(terminal.clone());
+    let bridge = InputBridge::new(entry_handle, label_handle, terminal_adapter);
+    bridge.sync_from_terminal();
+    bridge.attach_to_terminal(&terminal);
+    wire_keys(&entry, bridge.clone());
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&header);
@@ -92,141 +103,13 @@ fn start_shell(terminal: &Terminal) {
     );
 }
 
-fn wire_input(entry: &gtk::Entry, ghost: &gtk::Label, terminal: &Terminal) {
-    let syncing = std::rc::Rc::new(Cell::new(false));
-    sync_input(entry, ghost, terminal, &syncing);
-
-    let entry_key_terminal = terminal.clone();
-    let entry_key_entry = entry.clone();
-    let entry_key_ghost = ghost.clone();
-    let entry_key_sync = syncing.clone();
-    entry.add_controller({
-        let controller = gtk::EventControllerKey::new();
-        controller.connect_key_pressed(move |_controller, key, _, state| {
-            if forward_key(&entry_key_terminal, key, state) {
-                sync_input(
-                    &entry_key_entry,
-                    &entry_key_ghost,
-                    &entry_key_terminal,
-                    &entry_key_sync,
-                );
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
-            }
-        });
-        controller
-    });
-
-    let click_sync = syncing.clone();
-    let click_terminal = terminal.clone();
-    let click_ghost = ghost.clone();
-    let click_entry = entry.clone();
-    entry.connect_cursor_position_notify(move |field| {
-        if click_sync.get() {
-            return;
-        }
-        let target = field.position();
-        let (current, _) = click_terminal.cursor_position();
-        let current_i = i32::try_from(current).unwrap_or(0);
-        let delta = target - current_i;
-        if delta > 0 {
-            for _ in 0..delta {
-                click_terminal.feed_child(b"\x1b[C");
-            }
-        } else if delta < 0 {
-            for _ in 0..(-delta) {
-                click_terminal.feed_child(b"\x1b[D");
-            }
-        }
-        sync_input(&click_entry, &click_ghost, &click_terminal, &click_sync);
-    });
-
-    let terminal_change_entry = entry.clone();
-    let terminal_change_ghost = ghost.clone();
-    let terminal_change_terminal = terminal.clone();
-    let terminal_change_sync = syncing.clone();
-    terminal.connect_contents_changed(move |_| {
-        sync_input(
-            &terminal_change_entry,
-            &terminal_change_ghost,
-            &terminal_change_terminal,
-            &terminal_change_sync,
-        );
-    });
-    let terminal_cursor_entry = entry.clone();
-    let terminal_cursor_ghost = ghost.clone();
-    let terminal_cursor_terminal = terminal.clone();
-    let terminal_cursor_sync = syncing.clone();
-    terminal.connect_cursor_moved(move |_| {
-        sync_input(
-            &terminal_cursor_entry,
-            &terminal_cursor_ghost,
-            &terminal_cursor_terminal,
-            &terminal_cursor_sync,
-        );
-    });
-}
-
-fn forward_key(terminal: &Terminal, key: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool {
-    if state.contains(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK) {
-        return false;
-    }
-    let text = match key {
-        gtk::gdk::Key::Return => "\n".to_string(),
-        gtk::gdk::Key::BackSpace => "\u{7f}".to_string(),
-        gtk::gdk::Key::Tab => "\t".to_string(),
-        gtk::gdk::Key::Left => "\u{1b}[D".to_string(),
-        gtk::gdk::Key::Right => "\u{1b}[C".to_string(),
-        gtk::gdk::Key::Up => "\u{1b}[A".to_string(),
-        gtk::gdk::Key::Down => "\u{1b}[B".to_string(),
-        gtk::gdk::Key::Home => "\u{1b}[H".to_string(),
-        gtk::gdk::Key::End => "\u{1b}[F".to_string(),
-        gtk::gdk::Key::Delete => "\u{1b}[3~".to_string(),
-        _ => {
-            if let Some(ch) = key.to_unicode() {
-                ch.to_string()
-            } else {
-                return false;
-            }
-        }
-    };
-    terminal.feed_child(text.as_bytes());
-    true
-}
-
-fn sync_input(
-    entry: &gtk::Entry,
-    ghost: &gtk::Label,
-    terminal: &Terminal,
-    syncing: &std::rc::Rc<Cell<bool>>,
-) {
-    syncing.set(true);
-    let (_, row) = terminal.cursor_position();
-    let col_limit = terminal.column_count();
-    let end_col = if col_limit > 0 { col_limit - 1 } else { 0 };
-    let (line_html, _) = terminal.text_range_format(vte::Format::Html, row, 0, row, end_col);
-    let (line_text, _) = terminal.text_range_format(vte::Format::Text, row, 0, row, end_col);
-
-    let markup = html_to_pango(&line_html.unwrap_or_else(|| "".into()));
-    ghost.set_markup(markup.as_str());
-
-    let text = line_text.unwrap_or_else(|| "".into());
-    entry.set_text(&text);
-
-    let (cursor_col, _) = terminal.cursor_position();
-    let cursor_pos = i32::try_from(cursor_col).unwrap_or(0);
-    entry.set_position(cursor_pos);
-    syncing.set(false);
-}
-
 fn apply_overlay_style(entry: &gtk::Entry) {
     let css = "
         entry.overlay-input {
             background: transparent;
             border-radius: 8px;
             padding: 10px 12px;
-            color: @theme_fg_color;
+            color: transparent;
             caret-color: @theme_fg_color;
             box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
         }
@@ -241,6 +124,241 @@ fn apply_overlay_style(entry: &gtk::Entry) {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+}
+
+#[derive(Clone)]
+struct GtkEntryHandle {
+    widget: gtk::Entry,
+}
+
+impl GtkEntryHandle {
+    fn new(widget: gtk::Entry) -> Self {
+        Self { widget }
+    }
+}
+
+#[derive(Clone)]
+struct GtkLabelHandle {
+    widget: gtk::Label,
+}
+
+impl GtkLabelHandle {
+    fn new(widget: gtk::Label) -> Self {
+        Self { widget }
+    }
+}
+
+trait EntryHandle: Clone {
+    fn set_text(&self, text: &str);
+    fn set_position(&self, pos: i32);
+}
+
+trait LabelHandle: Clone {
+    fn set_markup(&self, markup: &str);
+}
+
+impl EntryHandle for GtkEntryHandle {
+    fn set_text(&self, text: &str) {
+        self.widget.set_text(text);
+    }
+
+    fn set_position(&self, pos: i32) {
+        self.widget.set_position(pos);
+    }
+}
+
+impl LabelHandle for GtkLabelHandle {
+    fn set_markup(&self, markup: &str) {
+        self.widget.set_markup(markup);
+    }
+}
+
+#[derive(Clone)]
+struct VteTerminalAdapter {
+    terminal: Terminal,
+}
+
+impl VteTerminalAdapter {
+    fn new(terminal: Terminal) -> Self {
+        Self { terminal }
+    }
+}
+
+trait TerminalAdapter: Clone + 'static {
+    fn feed_child(&self, bytes: &[u8]);
+    fn cursor_position(&self) -> (i64, i64);
+    fn line_html(&self, row: i64) -> String;
+    fn line_text(&self, row: i64) -> String;
+}
+
+impl TerminalAdapter for VteTerminalAdapter {
+    fn feed_child(&self, bytes: &[u8]) {
+        self.terminal.feed_child(bytes);
+    }
+
+    fn cursor_position(&self) -> (i64, i64) {
+        self.terminal.cursor_position()
+    }
+
+    fn line_html(&self, row: i64) -> String {
+        let (html, _) = self.terminal.text_range_format(
+            vte::Format::Html,
+            row,
+            0,
+            row,
+            self.terminal.column_count(),
+        );
+        html.map(|v| v.to_string()).unwrap_or_default()
+    }
+
+    fn line_text(&self, row: i64) -> String {
+        let (text, _) = self.terminal.text_range_format(
+            vte::Format::Text,
+            row,
+            0,
+            row,
+            self.terminal.column_count(),
+        );
+        text.map(|v| v.to_string()).unwrap_or_default()
+    }
+}
+
+#[derive(Clone)]
+struct InputBridge<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> {
+    entry: E,
+    ghost: L,
+    terminal: T,
+    syncing: Rc<Cell<bool>>,
+}
+
+impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> InputBridge<E, L, T> {
+    fn new(entry: E, ghost: L, terminal: T) -> Self {
+        Self {
+            entry,
+            ghost,
+            terminal,
+            syncing: Rc::new(Cell::new(false)),
+        }
+    }
+
+    fn attach_to_terminal(&self, term_widget: &Terminal) {
+        let contents_self = self.clone();
+        term_widget.connect_contents_changed(move |_| {
+            contents_self.sync_from_terminal();
+        });
+        let cursor_self = self.clone();
+        term_widget.connect_cursor_moved(move |_| {
+            cursor_self.sync_from_terminal();
+        });
+    }
+
+    fn handle_key(&self, key: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool {
+        let bytes = match key {
+            gtk::gdk::Key::Return => Some(b"\n".to_vec()),
+            gtk::gdk::Key::BackSpace => Some(vec![0x7f]),
+            gtk::gdk::Key::Tab => Some(b"\t".to_vec()),
+            gtk::gdk::Key::Left => Some(b"\x1b[D".to_vec()),
+            gtk::gdk::Key::Right => Some(b"\x1b[C".to_vec()),
+            gtk::gdk::Key::Up => Some(b"\x1b[A".to_vec()),
+            gtk::gdk::Key::Down => Some(b"\x1b[B".to_vec()),
+            gtk::gdk::Key::Home => Some(b"\x1b[H".to_vec()),
+            gtk::gdk::Key::End => Some(b"\x1b[F".to_vec()),
+            gtk::gdk::Key::Delete => Some(b"\x1b[3~".to_vec()),
+            _ => {
+                if let Some(ch) = key.to_unicode() {
+                    let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                    let alt = state.intersects(
+                        gtk::gdk::ModifierType::ALT_MASK
+                            | gtk::gdk::ModifierType::META_MASK
+                            | gtk::gdk::ModifierType::SUPER_MASK,
+                    );
+                    let mut out = Vec::new();
+                    if ctrl {
+                        let upper = ch.to_ascii_uppercase();
+                        let ctrl_byte = (upper as u8) & 0x1f;
+                        out.push(ctrl_byte);
+                    } else {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
+                    if alt {
+                        let mut prefixed = b"\x1b".to_vec();
+                        prefixed.extend_from_slice(&out);
+                        Some(prefixed)
+                    } else {
+                        Some(out)
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(data) = bytes {
+            self.terminal.feed_child(&data);
+            return true;
+        }
+        false
+    }
+
+    fn sync_from_terminal(&self) {
+        if self.syncing.get() {
+            return;
+        }
+        self.syncing.set(true);
+        let (_, row) = self.terminal.cursor_position();
+        let html = self.terminal.line_html(row);
+        let text = self.terminal.line_text(row);
+        let markup = html_to_pango(&html);
+        self.ghost.set_markup(markup.as_str());
+        self.entry.set_text(&text);
+
+        let (cursor_col, _) = self.terminal.cursor_position();
+        let cursor_pos = i32::try_from(cursor_col).unwrap_or(0);
+        self.entry.set_position(cursor_pos);
+        self.syncing.set(false);
+    }
+
+    fn move_cursor_to(&self, target: i32) {
+        if self.syncing.get() {
+            return;
+        }
+        let (_, row) = self.terminal.cursor_position();
+        let max_len = self.terminal.line_text(row).chars().count() as i32;
+        let clamped = target.clamp(0, max_len);
+        let current = self.terminal.cursor_position().0.try_into().unwrap_or(0);
+        let delta = clamped - current;
+        let move_left = b"\x1b[D";
+        let move_right = b"\x1b[C";
+        let seq = if delta > 0 { move_right } else { move_left };
+        let steps = delta.abs();
+        for _ in 0..steps {
+            self.terminal.feed_child(seq);
+        }
+        self.sync_from_terminal();
+    }
+}
+
+fn wire_keys(
+    entry: &gtk::Entry,
+    bridge: InputBridge<GtkEntryHandle, GtkLabelHandle, VteTerminalAdapter>,
+) {
+    entry.add_controller({
+        let controller = gtk::EventControllerKey::new();
+        let bridge_clone = bridge.clone();
+        controller.connect_key_pressed(move |_controller, key, _code, state| {
+            if bridge_clone.handle_key(key, state) {
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+            });
+        controller
+    });
+
+    let cursor_bridge = bridge.clone();
+    entry.connect_cursor_position_notify(move |entry_widget| {
+        cursor_bridge.move_cursor_to(entry_widget.position());
+    });
 }
 
 fn html_to_pango(input: &str) -> String {
@@ -282,6 +400,89 @@ fn html_to_pango(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Clone, Default)]
+    struct FakeEntry {
+        text: Rc<RefCell<String>>,
+        position: Rc<Cell<i32>>,
+    }
+
+    impl FakeEntry {
+        fn text_value(&self) -> String {
+            self.text.borrow().clone()
+        }
+
+        fn position_value(&self) -> i32 {
+            self.position.get()
+        }
+    }
+
+    impl EntryHandle for FakeEntry {
+        fn set_text(&self, text: &str) {
+            self.text.borrow_mut().clear();
+            self.text.borrow_mut().push_str(text);
+        }
+
+        fn set_position(&self, pos: i32) {
+            self.position.set(pos);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeLabel {
+        markup: Rc<RefCell<String>>,
+    }
+
+    impl LabelHandle for FakeLabel {
+        fn set_markup(&self, markup: &str) {
+            self.markup.borrow_mut().clear();
+            self.markup.borrow_mut().push_str(markup);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeTerminal {
+        fed: Rc<RefCell<Vec<u8>>>,
+        line_html: Rc<RefCell<String>>,
+        line_text: Rc<RefCell<String>>,
+        cursor: Rc<RefCell<(i64, i64)>>,
+    }
+
+    impl FakeTerminal {
+        fn with_line(text: &str) -> Self {
+            Self {
+                fed: Rc::new(RefCell::new(Vec::new())),
+                line_html: Rc::new(RefCell::new(text.to_string())),
+                line_text: Rc::new(RefCell::new(text.to_string())),
+                cursor: Rc::new(RefCell::new((text.len() as i64, 0))),
+            }
+        }
+
+        fn set_line(&self, text: &str, html: Option<&str>, cursor: i64) {
+            *self.line_text.borrow_mut() = text.to_string();
+            *self.line_html.borrow_mut() = html.unwrap_or(text).to_string();
+            *self.cursor.borrow_mut() = (cursor, 0);
+        }
+    }
+
+    impl TerminalAdapter for FakeTerminal {
+        fn feed_child(&self, bytes: &[u8]) {
+            self.fed.borrow_mut().extend_from_slice(bytes);
+        }
+
+        fn cursor_position(&self) -> (i64, i64) {
+            *self.cursor.borrow()
+        }
+
+        fn line_html(&self, _row: i64) -> String {
+            self.line_html.borrow().clone()
+        }
+
+        fn line_text(&self, _row: i64) -> String {
+            self.line_text.borrow().clone()
+        }
+    }
 
     #[test]
     fn converts_font_color_to_span() {
@@ -302,5 +503,120 @@ mod tests {
         let input = r##"<span style="color:#123456">val</span>"##;
         let output = html_to_pango(input);
         assert_eq!(output, r##"<span foreground="#123456">val</span>"##);
+    }
+
+    #[test]
+    fn sync_applies_markup_and_text() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("<font color=\"#ff0000\">x</font>");
+        let bridge = InputBridge::new(entry.clone(), ghost.clone(), term.clone());
+        bridge.sync_from_terminal();
+        assert_eq!(
+            ghost.markup.borrow().as_str(),
+            "<span foreground=\"#ff0000\">x</span>"
+        );
+        assert_eq!(
+            entry.text_value().as_str(),
+            "<font color=\"#ff0000\">x</font>"
+        );
+    }
+
+    #[test]
+    fn handle_key_forwards_text() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        assert!(bridge.handle_key(gtk::gdk::Key::a, gtk::gdk::ModifierType::empty()));
+        assert_eq!(term.fed.borrow().as_slice(), b"a");
+    }
+
+    #[test]
+    fn handle_key_forwards_enter() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        assert!(bridge.handle_key(gtk::gdk::Key::Return, gtk::gdk::ModifierType::empty()));
+        assert_eq!(term.fed.borrow().as_slice(), b"\n");
+    }
+
+    #[test]
+    fn handle_key_allows_ctrl_c() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        assert!(bridge.handle_key(gtk::gdk::Key::c, gtk::gdk::ModifierType::CONTROL_MASK));
+        assert_eq!(term.fed.borrow().as_slice(), &[0x03]);
+    }
+
+    #[test]
+    fn handle_key_alt_prefix() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        assert!(bridge.handle_key(gtk::gdk::Key::a, gtk::gdk::ModifierType::ALT_MASK));
+        assert_eq!(term.fed.borrow().as_slice(), b"\x1ba");
+    }
+
+    #[test]
+    fn sync_sets_cursor_position() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("abc");
+        term.set_line("abc", None, 2);
+        let bridge = InputBridge::new(entry.clone(), ghost, term);
+        bridge.sync_from_terminal();
+        assert_eq!(entry.position_value(), 2);
+    }
+
+    #[test]
+    fn sync_empty_line_safe() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry.clone(), ghost.clone(), term);
+        bridge.sync_from_terminal();
+        assert_eq!(entry.text_value().as_str(), "");
+        assert_eq!(ghost.markup.borrow().as_str(), "");
+    }
+
+    #[test]
+    fn arrow_keys_send_escape() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        bridge.handle_key(gtk::gdk::Key::Left, gtk::gdk::ModifierType::empty());
+        assert_eq!(term.fed.borrow().as_slice(), b"\x1b[D");
+    }
+
+    #[test]
+    fn delete_sends_sequence() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        bridge.handle_key(gtk::gdk::Key::Delete, gtk::gdk::ModifierType::empty());
+        assert_eq!(term.fed.borrow().as_slice(), b"\x1b[3~");
+    }
+
+    #[test]
+    fn sync_after_typing_updates_markup() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry.clone(), ghost.clone(), term.clone());
+        bridge.handle_key(gtk::gdk::Key::t, gtk::gdk::ModifierType::empty());
+        term.set_line("t", Some("<font color=\"#00ff00\">t</font>"), 1);
+        bridge.sync_from_terminal();
+        assert_eq!(
+            ghost.markup.borrow().as_str(),
+            "<span foreground=\"#00ff00\">t</span>"
+        );
+        assert_eq!(entry.text_value().as_str(), "t");
     }
 }
