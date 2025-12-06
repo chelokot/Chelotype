@@ -85,12 +85,16 @@ fn build_ui(app: &Application) {
 fn start_shell(terminal: &Terminal) {
     let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
     let argv = [shell_path.as_str()];
+    let envv_owned: Vec<String> = std::env::vars()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    let envv: Vec<&str> = envv_owned.iter().map(String::as_str).collect();
 
     terminal.spawn_async(
         PtyFlags::DEFAULT,
         None::<&str>,
         &argv,
-        &[],
+        &envv,
         glib::SpawnFlags::SEARCH_PATH,
         || {},
         -1,
@@ -307,6 +311,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             return;
         }
         self.syncing.set(true);
+        self.suppress_cursor_notify.set(true);
         let (_, row) = self.terminal.cursor_position();
         let html = self.terminal.line_html(row);
         let text = self.terminal.line_text(row);
@@ -314,7 +319,6 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         self.ghost.set_markup(markup.as_str());
         self.entry.set_text(&text);
 
-        self.suppress_cursor_notify.set(true);
         let (cursor_col, _) = self.terminal.cursor_position();
         let cursor_pos = i32::try_from(cursor_col).unwrap_or(0);
         self.entry.set_position(cursor_pos);
@@ -330,6 +334,9 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         let max_len = self.terminal.line_text(row).chars().count() as i32;
         let clamped = target.clamp(0, max_len);
         let current = self.terminal.cursor_position().0.try_into().unwrap_or(0);
+        if clamped == current {
+            return;
+        }
         let delta = clamped - current;
         let move_left = b"\x1b[D";
         let move_right = b"\x1b[C";
@@ -366,22 +373,30 @@ fn wire_keys(
 }
 
 fn html_to_pango(input: &str) -> String {
-    let mut output = input.replace("<pre>", "").replace("</pre>", "");
-    output = output.replace("<div>", "").replace("</div>", "");
-    let font_open = Regex::new(r#"<font\s+color="([^"]+)">"#).unwrap();
+    let strip_tag = |value: String, tag: &str| {
+        let open = Regex::new(&format!(r#"(?i)<{tag}[^>]*>"#)).unwrap();
+        let close = Regex::new(&format!(r#"(?i)</{tag}>"#)).unwrap();
+        let without_open = open.replace_all(&value, "");
+        close.replace_all(&without_open, "").to_string()
+    };
+
+    let mut output = strip_tag(input.to_string(), "pre");
+    output = strip_tag(output, "div");
+    let font_open = Regex::new(r#"(?i)<font\s+color="([^"]+)">"#).unwrap();
     output = font_open
         .replace_all(&output, |caps: &regex::Captures| {
             format!(r#"<span foreground="{}">"#, &caps[1])
         })
         .to_string();
-    output = output.replace("</font>", "</span>");
-    let span_style = Regex::new(r#"<span\s+style="[^"]*color:\s*([^;"\s]+)[^"]*">"#).unwrap();
+    let font_close = Regex::new(r"(?i)</font>").unwrap();
+    output = font_close.replace_all(&output, "</span>").to_string();
+    let span_style = Regex::new(r#"(?i)<span\s+style="[^"]*color:\s*([^;"\s]+)[^"]*">"#).unwrap();
     output = span_style
         .replace_all(&output, |caps: &regex::Captures| {
             format!(r#"<span foreground="{}">"#, &caps[1])
         })
         .to_string();
-    let span_foreground = Regex::new(r#"<span[^>]*foreground="([^"]+)"[^>]*>"#).unwrap();
+    let span_foreground = Regex::new(r#"(?i)<span[^>]*foreground="([^"]+)"[^>]*>"#).unwrap();
     output = span_foreground
         .replace_all(&output, |caps: &regex::Captures| {
             format!(r#"<span foreground="{}">"#, &caps[1])
@@ -446,6 +461,37 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
+    struct NotifyingEntry {
+        text: Rc<RefCell<String>>,
+        position: Rc<Cell<i32>>,
+        on_position: Rc<RefCell<Option<Box<dyn Fn(i32)>>>>,
+    }
+
+    impl NotifyingEntry {
+        fn set_on_position<F: Fn(i32) + 'static>(&self, handler: F) {
+            self.on_position.replace(Some(Box::new(handler)));
+        }
+
+        fn position_value(&self) -> i32 {
+            self.position.get()
+        }
+    }
+
+    impl EntryHandle for NotifyingEntry {
+        fn set_text(&self, text: &str) {
+            self.text.borrow_mut().clear();
+            self.text.borrow_mut().push_str(text);
+        }
+
+        fn set_position(&self, pos: i32) {
+            self.position.set(pos);
+            if let Some(cb) = self.on_position.borrow().as_ref() {
+                cb(pos);
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
     struct FakeTerminal {
         fed: Rc<RefCell<Vec<u8>>>,
         line_html: Rc<RefCell<String>>,
@@ -496,10 +542,24 @@ mod tests {
     }
 
     #[test]
+    fn converts_font_color_case_insensitive() {
+        let input = r##"<PRE><FONT COLOR="#00ffcc">ok</FONT></PRE>"##;
+        let output = html_to_pango(input);
+        assert_eq!(output, r##"<span foreground="#00ffcc">ok</span>"##);
+    }
+
+    #[test]
     fn strips_div_and_pre() {
         let input = "<div><pre>text</pre></div>";
         let output = html_to_pango(input);
         assert_eq!(output, "text");
+    }
+
+    #[test]
+    fn strips_pre_with_attributes() {
+        let input = r#"<pre style="padding:4px"><span style="color:#00ff00">ok</span></pre>"#;
+        let output = html_to_pango(input);
+        assert_eq!(output, r##"<span foreground="#00ff00">ok</span>"##);
     }
 
     #[test]
@@ -622,5 +682,52 @@ mod tests {
             "<span foreground=\"#00ff00\">t</span>"
         );
         assert_eq!(entry.text_value().as_str(), "t");
+    }
+
+    #[test]
+    fn cursor_notify_from_programmatic_position_does_not_spin() {
+        let entry = NotifyingEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("abc");
+        let bridge = InputBridge::new(entry.clone(), ghost, term.clone());
+        let loop_counter = Rc::new(Cell::new(0));
+        entry.set_on_position({
+            let bridge = bridge.clone();
+            let counter = loop_counter.clone();
+            move |pos| {
+                let count = counter.get();
+                if count > 32 {
+                    panic!("cursor notify loop");
+                }
+                counter.set(count + 1);
+                bridge.move_cursor_to(pos);
+            }
+        });
+        term.set_line("abc", None, 1);
+        bridge.sync_from_terminal();
+        assert_eq!(loop_counter.get(), 1);
+        assert_eq!(entry.position_value(), 1);
+    }
+
+    #[test]
+    fn move_cursor_to_clamps_and_moves() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("abc");
+        term.set_line("abc", None, 1);
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        bridge.move_cursor_to(5);
+        assert_eq!(term.fed.borrow().as_slice(), b"\x1b[C\x1b[C");
+    }
+
+    #[test]
+    fn move_cursor_to_ignores_same_position() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("abc");
+        term.set_line("abc", None, 2);
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        bridge.move_cursor_to(2);
+        assert!(term.fed.borrow().is_empty());
     }
 }
