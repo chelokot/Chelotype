@@ -88,6 +88,10 @@ fn build_ui(app: &Application) {
 fn start_shell(terminal: &Terminal) {
     let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
     let argv = [shell_path.as_str()];
+    spawn_process(terminal, &argv);
+}
+
+fn spawn_process(terminal: &Terminal, argv: &[&str]) {
     let envv_owned: Vec<String> = std::env::vars()
         .map(|(key, value)| format!("{key}={value}"))
         .collect();
@@ -96,7 +100,7 @@ fn start_shell(terminal: &Terminal) {
     terminal.spawn_async(
         PtyFlags::DEFAULT,
         None::<&str>,
-        &argv,
+        argv,
         &envv,
         glib::SpawnFlags::SEARCH_PATH,
         || {},
@@ -104,12 +108,11 @@ fn start_shell(terminal: &Terminal) {
         None::<&gio::Cancellable>,
         |result| {
             if let Err(error) = result {
-                eprintln!("Failed to start shell: {error}");
+                eprintln!("Failed to start process: {error}");
             }
         },
     );
 }
-
 fn apply_overlay_style(entry: &gtk::Entry) {
     let css = "
         entry.overlay-input {
@@ -866,5 +869,37 @@ mod tests {
         let bridge = InputBridge::new(entry, ghost, term.clone());
         bridge.move_cursor_to(2);
         assert!(term.fed.borrow().is_empty());
+    }
+
+    #[test]
+    #[ignore = "needs live VTE feed; keep as integration probe"]
+    fn headless_cat_roundtrip() {
+        gtk::init().expect("gtk init failed");
+        let ctx = glib::MainContext::default();
+        let _ = ctx.with_thread_default(|| {
+            let terminal = Terminal::builder()
+                .input_enabled(true)
+                .can_focus(false)
+                .build();
+            terminal.set_size(80, 24);
+            terminal.set_scrollback_lines(2000);
+            let entry = gtk::Entry::new();
+            let ghost = gtk::Label::new(None);
+            let bridge = InputBridge::new(
+                GtkEntryHandle::new(entry.clone()),
+                GtkLabelHandle::new(ghost.clone()),
+                VteTerminalAdapter::new(terminal.clone()),
+            );
+            bridge.attach_to_terminal(&terminal);
+            wire_keys(&entry, bridge.clone());
+            bridge.handle_insert_text("abc");
+            bridge.handle_key(gtk::gdk::Key::Return, gtk::gdk::ModifierType::empty());
+            terminal.feed(b"abc\n");
+            while ctx.iteration(false) {}
+            let (text, _) =
+                terminal.text_range_format(vte::Format::Text, 0, 0, 0, terminal.column_count());
+            let content = text.map(|t| t.to_string()).unwrap_or_default();
+            assert!(content.contains("abc"), "terminal did not echo text");
+        });
     }
 }
