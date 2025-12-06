@@ -3,7 +3,7 @@ use chelotype::bridge::{
 };
 use chelotype::terminal::spawn_process;
 use gtk::{gdk, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use vte::prelude::*;
 
@@ -32,10 +32,16 @@ fn headless_cat_roundtrip() {
 
         let captured = Rc::new(RefCell::new(String::new()));
         let captured_clone = captured.clone();
+        let done = Rc::new(Cell::new(false));
+        let done_clone = done.clone();
         terminal.connect_contents_changed(move |term| {
-            let (text, _) = term.text_range_format(vte::Format::Text, 0, 0, 0, term.column_count());
+            let (text, _) =
+                term.text_range_format(vte::Format::Text, 0, 0, 10, term.column_count());
             if let Some(txt) = text {
                 *captured_clone.borrow_mut() = txt.to_string();
+                if captured_clone.borrow().contains("abc") {
+                    done_clone.set(true);
+                }
             }
         });
 
@@ -43,14 +49,30 @@ fn headless_cat_roundtrip() {
         assert!(fed, "insert was skipped");
         bridge.handle_key(gdk::Key::Return, gdk::ModifierType::empty());
         terminal.feed(b"abc\n");
-        for _ in 0..10 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+
+        let loop_ref = glib::MainLoop::new(Some(&ctx), false);
+        let loop_clone = loop_ref.clone();
+        let done_check = done.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            if done_check.get() {
+                loop_clone.quit();
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
+        glib::timeout_add_local(std::time::Duration::from_secs(3), {
+            let loop_clone = loop_ref.clone();
+            move || {
+                loop_clone.quit();
+                glib::ControlFlow::Break
+            }
+        });
+        loop_ref.run();
 
         assert!(
-            captured.borrow().contains("abc"),
-            "terminal did not echo text"
+            done.get(),
+            "terminal did not echo text; buffer: {}",
+            captured.borrow()
         );
     });
 }
