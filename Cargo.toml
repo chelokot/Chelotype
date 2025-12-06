@@ -1,0 +1,10 @@
+[package]
+name = "chelotype"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+adw = { version = "0.8", package = "libadwaita" }
+gtk = { version = "0.10", package = "gtk4" }
+vte = { version = "0.9", package = "vte4", features = ["v0_72"] }
+regex = "1.11"
