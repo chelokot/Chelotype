@@ -3,7 +3,10 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use regex::Regex;
 use std::cell::Cell;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 use vte::prelude::*;
 use vte::{PtyFlags, Terminal};
 
@@ -130,6 +133,35 @@ fn apply_overlay_style(entry: &gtk::Entry) {
     );
 }
 
+fn debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("CHELOTYPE_DEBUG") == Ok("1".to_string()))
+}
+
+fn debug_file() -> Option<&'static Mutex<File>> {
+    static FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/chelotype.log")
+            .map(Mutex::new)
+            .ok()
+    })
+    .as_ref()
+}
+
+fn debug_log(event: &str) {
+    if !debug_enabled() {
+        return;
+    }
+    if let Some(file) = debug_file() {
+        if let Ok(mut guard) = file.lock() {
+            let _ = writeln!(guard, "{event}");
+        }
+    }
+}
+
 #[derive(Clone)]
 struct GtkEntryHandle {
     widget: gtk::Entry,
@@ -252,15 +284,18 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
     fn attach_to_terminal(&self, term_widget: &Terminal) {
         let contents_self = self.clone();
         term_widget.connect_contents_changed(move |_| {
+            debug_log("terminal:contents-changed");
             contents_self.sync_from_terminal();
         });
         let cursor_self = self.clone();
         term_widget.connect_cursor_moved(move |_| {
+            debug_log("terminal:cursor-moved");
             cursor_self.sync_from_terminal();
         });
     }
 
     fn handle_key(&self, key: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool {
+        debug_log(&format!("key:{key:?}:state:{state:?}"));
         let bytes = match key {
             gtk::gdk::Key::Return => Some(b"\n".to_vec()),
             gtk::gdk::Key::BackSpace => Some(vec![0x7f]),
@@ -303,6 +338,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             }
         };
         if let Some(data) = bytes {
+            debug_log(&format!("feed:{data:?}"));
             self.terminal.feed_child(&data);
             return true;
         }
@@ -311,11 +347,13 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
 
     fn handle_insert_text(&self, text: &str) {
         if self.skip_next_insert.replace(false) {
+            debug_log("insert:skip");
             return;
         }
         if text.is_empty() {
             return;
         }
+        debug_log(&format!("insert:{text}"));
         self.terminal.feed_child(text.as_bytes());
     }
 
@@ -325,6 +363,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         }
         self.syncing.set(true);
         self.suppress_cursor_notify.set(true);
+        debug_log("sync:start");
         let (_, row) = self.terminal.cursor_position();
         let html = self.terminal.line_html(row);
         let text = self.terminal.line_text(row);
@@ -343,6 +382,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         if self.syncing.get() || self.suppress_cursor_notify.get() {
             return;
         }
+        debug_log(&format!("cursor:move:{target}"));
         let (_, row) = self.terminal.cursor_position();
         let max_len = self.terminal.line_text(row).chars().count() as i32;
         let clamped = target.clamp(0, max_len);
