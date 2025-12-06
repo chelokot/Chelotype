@@ -267,6 +267,7 @@ struct InputBridge<E: EntryHandle + 'static, L: LabelHandle + 'static, T: Termin
     syncing: Rc<Cell<bool>>,
     suppress_cursor_notify: Rc<Cell<bool>>,
     skip_next_insert: Rc<Cell<bool>>,
+    suppress_insert: Rc<Cell<bool>>,
 }
 
 impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> InputBridge<E, L, T> {
@@ -278,7 +279,22 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             syncing: Rc::new(Cell::new(false)),
             suppress_cursor_notify: Rc::new(Cell::new(false)),
             skip_next_insert: Rc::new(Cell::new(false)),
+            suppress_insert: Rc::new(Cell::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    fn set_syncing_for_test(&self, value: bool) {
+        self.syncing.set(value);
+    }
+
+    #[cfg(test)]
+    fn set_suppress_insert_for_test(&self, value: bool) {
+        self.suppress_insert.set(value);
+    }
+
+    fn cursor_notify_suppressed(&self) -> bool {
+        self.suppress_cursor_notify.get()
     }
 
     fn attach_to_terminal(&self, term_widget: &Terminal) {
@@ -346,6 +362,10 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
     }
 
     fn handle_insert_text(&self, text: &str) {
+        if self.syncing.get() || self.suppress_insert.get() {
+            debug_log("insert:skip-syncing");
+            return;
+        }
         if self.skip_next_insert.replace(false) {
             debug_log("insert:skip");
             return;
@@ -363,6 +383,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         }
         self.syncing.set(true);
         self.suppress_cursor_notify.set(true);
+        self.suppress_insert.set(true);
         debug_log("sync:start");
         let (_, row) = self.terminal.cursor_position();
         let html = self.terminal.line_html(row);
@@ -374,7 +395,19 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         let (cursor_col, _) = self.terminal.cursor_position();
         let cursor_pos = i32::try_from(cursor_col).unwrap_or(0);
         self.entry.set_position(cursor_pos);
-        self.suppress_cursor_notify.set(false);
+        self.suppress_insert.set(false);
+        #[cfg(test)]
+        {
+            self.suppress_cursor_notify.set(false);
+        }
+        #[cfg(not(test))]
+        {
+            let flag = self.suppress_cursor_notify.clone();
+            glib::idle_add_local(move || {
+                flag.set(false);
+                glib::ControlFlow::Break
+            });
+        }
         self.syncing.set(false);
     }
 
@@ -420,6 +453,9 @@ fn wire_keys(
 
     let cursor_bridge = bridge.clone();
     entry.connect_cursor_position_notify(move |entry_widget| {
+        if cursor_bridge.cursor_notify_suppressed() {
+            return;
+        }
         cursor_bridge.move_cursor_to(entry_widget.position());
     });
 
@@ -703,6 +739,28 @@ mod tests {
         let bridge = InputBridge::new(entry, ghost, term.clone());
         bridge.handle_insert_text("abc");
         assert_eq!(term.fed.borrow().as_slice(), b"abc");
+    }
+
+    #[test]
+    fn insert_text_is_skipped_when_syncing() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        bridge.set_syncing_for_test(true);
+        bridge.handle_insert_text("abc");
+        assert!(term.fed.borrow().is_empty());
+    }
+
+    #[test]
+    fn insert_text_is_skipped_when_suppressed() {
+        let entry = FakeEntry::default();
+        let ghost = FakeLabel::default();
+        let term = FakeTerminal::with_line("");
+        let bridge = InputBridge::new(entry, ghost, term.clone());
+        bridge.set_suppress_insert_for_test(true);
+        bridge.handle_insert_text("abc");
+        assert!(term.fed.borrow().is_empty());
     }
 
     #[test]
