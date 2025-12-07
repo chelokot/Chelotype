@@ -61,9 +61,9 @@ fn build_ui(app: &Application) {
     let bridge = InputBridge::new(entry_handle, label_handle, terminal_adapter);
     bridge.sync_from_terminal();
     bridge.attach_to_terminal(&terminal);
-    wire_keys(&entry, bridge.clone());
-
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    wire_keys(&entry, bridge.clone());
+    attach_global_key_forwarder(&entry, &content, bridge.clone());
     content.append(&header);
     content.append(&terminal);
     content.append(&overlay);
@@ -102,4 +102,31 @@ fn apply_overlay_style(entry: &gtk::Entry) {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+}
+
+fn attach_global_key_forwarder(
+    entry: &gtk::Entry,
+    container: &gtk::Box,
+    bridge: InputBridge<GtkEntryHandle, GtkLabelHandle, VteTerminalAdapter>,
+) {
+    let controller = gtk::EventControllerKey::new();
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let entry_clone = entry.clone();
+    controller.connect_key_pressed(move |_ctrl, key, _code, state| {
+        if entry_clone.has_focus() {
+            return glib::Propagation::Proceed;
+        }
+        if bridge.handle_key(key, state) {
+            return glib::Propagation::Stop;
+        }
+        if let Some(ch) = key.to_unicode() {
+            let mut buf = [0u8; 4];
+            let text = ch.encode_utf8(&mut buf);
+            if bridge.handle_insert_text(text) {
+                return glib::Propagation::Stop;
+            }
+        }
+        glib::Propagation::Proceed
+    });
+    container.add_controller(controller);
 }

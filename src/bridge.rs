@@ -211,7 +211,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
     }
 
     pub fn handle_insert_text(&self, text: &str) -> bool {
-        if self.syncing.get() || self.suppress_insert.get() {
+        if self.suppress_insert.get() {
             debug_log("insert:skip-syncing");
             return false;
         }
@@ -358,5 +358,7 @@ pub fn html_to_pango(input: &str) -> String {
             }
         })
         .to_string();
+    let underline_any = Regex::new(r#"(?i)<u[^>]*>"#).unwrap();
+    output = underline_any.replace_all(&output, "<u>").to_string();
     output
 }

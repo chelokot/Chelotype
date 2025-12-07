@@ -145,6 +145,13 @@ fn strips_pre_with_attributes() {
 }
 
 #[test]
+fn normalizes_underline_style() {
+    let input = r#"<u style="text-decoration-style:solid">u</u>"#;
+    let output = html_to_pango(input);
+    assert_eq!(output, "<u>u</u>");
+}
+
+#[test]
 fn converts_span_style_color() {
     let input = r##"<span style="color:#123456">val</span>"##;
     let output = html_to_pango(input);
@@ -236,8 +243,8 @@ fn insert_text_is_skipped_when_syncing() {
     let term = FakeTerminal::with_line("");
     let bridge = InputBridge::new(entry, ghost, term.clone());
     bridge.set_syncing_for_test(true);
-    assert!(!bridge.handle_insert_text("abc"));
-    assert!(term.fed.borrow().is_empty());
+    assert!(bridge.handle_insert_text("abc"));
+    assert_eq!(term.fed.borrow().as_slice(), b"abc");
 }
 
 #[test]
