@@ -88,7 +88,8 @@ fn apply_overlay_style(entry: &gtk::Entry) {
             border-radius: 8px;
             padding: 10px 12px;
             color: transparent;
-            caret-color: @theme_fg_color;
+            caret-color: transparent;
+            -gtk-secondary-caret-color: transparent;
             box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
         }
         entry.overlay-input:focus {

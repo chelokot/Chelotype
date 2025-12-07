@@ -1,4 +1,6 @@
-use chelotype::bridge::{EntryHandle, InputBridge, LabelHandle, TerminalAdapter, html_to_pango};
+use chelotype::bridge::{
+    EntryHandle, InputBridge, LabelHandle, TerminalAdapter, html_to_pango, insert_caret,
+};
 use gtk::gdk;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -152,6 +154,22 @@ fn normalizes_underline_style() {
 }
 
 #[test]
+fn caret_injected_at_position() {
+    let markup = html_to_pango(r##"<font color="#ff0000">ab</font>"##);
+    let with_caret = insert_caret(&markup, 1);
+    assert!(with_caret.contains("▏"));
+    assert!(with_caret.contains("a"));
+    assert!(with_caret.contains("b"));
+}
+
+#[test]
+fn caret_injected_past_end() {
+    let markup = html_to_pango("ab");
+    let with_caret = insert_caret(&markup, 5);
+    assert!(with_caret.ends_with("▏</span>") || with_caret.ends_with("▏"));
+}
+
+#[test]
 fn converts_span_style_color() {
     let input = r##"<span style="color:#123456">val</span>"##;
     let output = html_to_pango(input);
@@ -167,7 +185,7 @@ fn sync_applies_markup_and_text() {
     bridge.sync_from_terminal();
     assert_eq!(
         ghost.markup.borrow().as_str(),
-        "<span foreground=\"#ff0000\">x</span>"
+        "<span foreground=\"#ff0000\">x</span><span foreground=\"#7dd3fc\">▏</span>"
     );
     assert_eq!(
         entry.text_value().as_str(),
@@ -277,7 +295,10 @@ fn sync_empty_line_safe() {
     let bridge = InputBridge::new(entry.clone(), ghost.clone(), term);
     bridge.sync_from_terminal();
     assert_eq!(entry.text_value().as_str(), "");
-    assert_eq!(ghost.markup.borrow().as_str(), "");
+    assert_eq!(
+        ghost.markup.borrow().as_str(),
+        "<span foreground=\"#7dd3fc\">▏</span>"
+    );
 }
 
 #[test]
@@ -311,7 +332,7 @@ fn sync_after_typing_updates_markup() {
     bridge.sync_from_terminal();
     assert_eq!(
         ghost.markup.borrow().as_str(),
-        "<span foreground=\"#00ff00\">t</span>"
+        "<span foreground=\"#00ff00\">t</span><span foreground=\"#7dd3fc\">▏</span>"
     );
     assert_eq!(entry.text_value().as_str(), "t");
 }

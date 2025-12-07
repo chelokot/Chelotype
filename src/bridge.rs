@@ -238,7 +238,8 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         let (_, row) = self.terminal.cursor_position();
         let html = self.terminal.line_html(row);
         let text = self.terminal.line_text(row);
-        let markup = html_to_pango(&html);
+        let caret_pos = i32::try_from(self.terminal.cursor_position().0).unwrap_or(0);
+        let markup = insert_caret(&html_to_pango(&html), caret_pos as usize);
         self.ghost.set_markup(markup.as_str());
         self.entry.set_text(&text);
 
@@ -361,4 +362,30 @@ pub fn html_to_pango(input: &str) -> String {
     let underline_any = Regex::new(r#"(?i)<u[^>]*>"#).unwrap();
     output = underline_any.replace_all(&output, "<u>").to_string();
     output
+}
+
+pub fn insert_caret(markup: &str, caret_pos: usize) -> String {
+    let caret = r##"<span foreground="#7dd3fc">▏</span>"##;
+    let mut result = String::new();
+    let mut in_tag = false;
+    let mut pos = 0usize;
+    for ch in markup.chars() {
+        if ch == '<' {
+            in_tag = true;
+        }
+        if !in_tag && pos == caret_pos {
+            result.push_str(caret);
+        }
+        if !in_tag {
+            pos += 1;
+        }
+        result.push(ch);
+        if ch == '>' {
+            in_tag = false;
+        }
+    }
+    if caret_pos >= pos {
+        result.push_str(caret);
+    }
+    result
 }
