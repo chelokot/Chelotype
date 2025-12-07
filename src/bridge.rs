@@ -136,6 +136,8 @@ pub struct InputBridge<E: EntryHandle + 'static, L: LabelHandle + 'static, T: Te
     suppress_insert: Rc<Cell<bool>>,
     caret_visible: Rc<Cell<bool>>,
     last_markup: Rc<RefCell<Option<String>>>,
+    #[cfg(not(test))]
+    blink_source: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> InputBridge<E, L, T> {
@@ -150,6 +152,8 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             suppress_insert: Rc::new(Cell::new(false)),
             caret_visible: Rc::new(Cell::new(true)),
             last_markup: Rc::new(RefCell::new(None)),
+            #[cfg(not(test))]
+            blink_source: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -179,12 +183,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
 
         #[cfg(not(test))]
         {
-            let bridge = self.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(530), move || {
-                bridge.caret_visible.set(!bridge.caret_visible.get());
-                bridge.render_cached_markup();
-                glib::ControlFlow::Continue
-            });
+            self.restart_blink();
         }
     }
 
@@ -268,6 +267,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         let caret_pos = i32::try_from(self.terminal.cursor_position().0).unwrap_or(0);
         let base_markup = html_to_pango(&html);
         self.last_markup.replace(Some(base_markup.clone()));
+        self.reset_caret_visible();
         self.render_ghost_with_caret(&base_markup, caret_pos as usize);
         self.entry.set_text(&text);
 
@@ -294,6 +294,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         if self.syncing.get() || self.suppress_cursor_notify.get() {
             return;
         }
+        self.reset_caret_visible();
         debug_log(&format!("cursor:move:{target}"));
         let (_, row) = self.terminal.cursor_position();
         let max_len = self.terminal.line_text(row).chars().count() as i32;
@@ -317,6 +318,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         if let Some(idx) = self.ghost.index_at_x(x, y) {
             let idx_i32 = i32::try_from(idx).unwrap_or(0);
             self.move_cursor_to(idx_i32);
+            self.reset_caret_visible();
         }
     }
 
@@ -329,12 +331,30 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         self.ghost.set_markup(markup.as_str());
     }
 
-    #[allow(dead_code)]
     fn render_cached_markup(&self) {
         if let Some(base) = self.last_markup.borrow().as_ref() {
             let caret_pos = i32::try_from(self.terminal.cursor_position().0).unwrap_or(0);
             self.render_ghost_with_caret(base, caret_pos as usize);
         }
+    }
+
+    fn reset_caret_visible(&self) {
+        self.caret_visible.set(true);
+        self.render_cached_markup();
+        #[cfg(not(test))]
+        self.restart_blink();
+    }
+
+    #[cfg(not(test))]
+    fn restart_blink(&self) {
+        self.blink_source.borrow_mut().take().map(|id| id.remove());
+        let bridge = self.clone();
+        let id = glib::timeout_add_local(std::time::Duration::from_millis(530), move || {
+            bridge.caret_visible.set(!bridge.caret_visible.get());
+            bridge.render_cached_markup();
+            glib::ControlFlow::Continue
+        });
+        self.blink_source.replace(Some(id));
     }
 }
 
@@ -417,7 +437,7 @@ pub fn html_to_pango(input: &str) -> String {
 }
 
 pub fn insert_caret(markup: &str, caret_pos: usize) -> String {
-    let caret = r##"<span foreground="#7dd3fc">▏</span>"##;
+    let caret = r##"<span foreground="#7dd3fc" letter_spacing="-9000">|</span>"##;
     let mut result = String::new();
     let mut in_tag = false;
     let mut pos = 0usize;

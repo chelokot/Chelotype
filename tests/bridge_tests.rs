@@ -162,7 +162,7 @@ fn normalizes_underline_style() {
 fn caret_injected_at_position() {
     let markup = html_to_pango(r##"<font color="#ff0000">ab</font>"##);
     let with_caret = insert_caret(&markup, 1);
-    assert!(with_caret.contains("▏"));
+    assert!(with_caret.contains("|"));
     assert!(with_caret.contains("a"));
     assert!(with_caret.contains("b"));
 }
@@ -171,7 +171,7 @@ fn caret_injected_at_position() {
 fn caret_injected_past_end() {
     let markup = html_to_pango("ab");
     let with_caret = insert_caret(&markup, 5);
-    assert!(with_caret.contains("▏"));
+    assert!(with_caret.contains("|"));
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn sync_applies_markup_and_text() {
     bridge.sync_from_terminal();
     let markup = ghost.markup.borrow();
     assert!(markup.contains("foreground=\"#ff0000\">x</span>"));
-    assert!(markup.contains("▏"));
+    assert!(markup.contains("|"));
     assert_eq!(
         entry.text_value().as_str(),
         "<font color=\"#ff0000\">x</font>"
@@ -299,7 +299,7 @@ fn sync_empty_line_safe() {
     let bridge = InputBridge::new(entry.clone(), ghost.clone(), term);
     bridge.sync_from_terminal();
     assert_eq!(entry.text_value().as_str(), "");
-    assert!(ghost.markup.borrow().contains("▏"));
+    assert!(ghost.markup.borrow().contains("|"));
 }
 
 #[test]
@@ -333,11 +333,12 @@ fn sync_after_typing_updates_markup() {
     bridge.sync_from_terminal();
     let markup = ghost.markup.borrow();
     assert!(markup.contains("foreground=\"#00ff00\">t</span>"));
-    assert!(markup.contains("▏"));
+    assert!(markup.contains("|"));
     assert_eq!(entry.text_value().as_str(), "t");
 }
 
 #[test]
+#[serial]
 fn cursor_notify_from_programmatic_position_does_not_spin() {
     let entry = NotifyingEntry::default();
     let ghost = FakeLabel::default();
@@ -374,6 +375,7 @@ fn move_cursor_to_clamps_and_moves() {
 }
 
 #[test]
+#[serial]
 fn move_cursor_to_ignores_same_position() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
