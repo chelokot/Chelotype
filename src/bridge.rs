@@ -60,16 +60,13 @@ impl LabelHandle for GtkLabelHandle {
 
     fn index_at_x(&self, x: f64, y: f64) -> Option<usize> {
         let layout = self.widget.layout();
-        let (_, byte_idx, _) = layout.xy_to_index(
+        let (_, byte_idx, trailing) = layout.xy_to_index(
             (x * pango::SCALE as f64) as i32,
             (y * pango::SCALE as f64) as i32,
         );
         let text = layout.text();
-        let clamped = byte_idx.min(i32::try_from(text.len()).unwrap_or(0));
-        let caret_chars = text
-            .char_indices()
-            .take_while(|(i, _)| i < &(clamped as usize))
-            .count();
+        let clamped = byte_idx.min(i32::try_from(text.len()).unwrap_or(0)) as usize;
+        let caret_chars = text[..clamped].chars().count() + trailing as usize;
         Some(caret_chars)
     }
 }
@@ -332,6 +329,7 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         self.ghost.set_markup(markup.as_str());
     }
 
+    #[allow(dead_code)]
     fn render_cached_markup(&self) {
         if let Some(base) = self.last_markup.borrow().as_ref() {
             let caret_pos = i32::try_from(self.terminal.cursor_position().0).unwrap_or(0);
@@ -419,7 +417,7 @@ pub fn html_to_pango(input: &str) -> String {
 }
 
 pub fn insert_caret(markup: &str, caret_pos: usize) -> String {
-    let caret = r##"<span foreground="#7dd3fc" size="1">▏</span>"##;
+    let caret = r##"<span foreground="#7dd3fc">▏</span>"##;
     let mut result = String::new();
     let mut in_tag = false;
     let mut pos = 0usize;

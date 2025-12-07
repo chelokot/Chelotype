@@ -3,11 +3,13 @@ use chelotype::bridge::{
 };
 use chelotype::terminal::spawn_process;
 use gtk::{gdk, glib};
+use serial_test::serial;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use vte::prelude::*;
 
 #[test]
+#[serial]
 fn headless_cat_roundtrip() {
     gtk::init().expect("gtk init failed");
     let ctx = glib::MainContext::default();

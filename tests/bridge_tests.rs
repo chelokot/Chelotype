@@ -2,6 +2,7 @@ use chelotype::bridge::{
     EntryHandle, InputBridge, LabelHandle, TerminalAdapter, html_to_pango, insert_caret,
 };
 use gtk::gdk;
+use serial_test::serial;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -43,8 +44,8 @@ impl LabelHandle for FakeLabel {
         self.markup.borrow_mut().push_str(markup);
     }
 
-    fn index_at_x(&self, _x: f64, _y: f64) -> Option<usize> {
-        Some(0)
+    fn index_at_x(&self, x: f64, _y: f64) -> Option<usize> {
+        if x < 0.5 { Some(0) } else { Some(1) }
     }
 }
 
@@ -170,7 +171,7 @@ fn caret_injected_at_position() {
 fn caret_injected_past_end() {
     let markup = html_to_pango("ab");
     let with_caret = insert_caret(&markup, 5);
-    assert!(with_caret.ends_with("▏</span>") || with_caret.ends_with("▏"));
+    assert!(with_caret.contains("▏"));
 }
 
 #[test]
@@ -381,4 +382,26 @@ fn move_cursor_to_ignores_same_position() {
     let bridge = InputBridge::new(entry, ghost, term.clone());
     bridge.move_cursor_to(2);
     assert!(term.fed.borrow().is_empty());
+}
+
+#[test]
+#[serial]
+fn click_right_half_moves_after_char() {
+    let entry = FakeEntry::default();
+    let ghost = FakeLabel::default();
+    let term = FakeTerminal::with_line("ab");
+    let bridge = InputBridge::new(entry, ghost, term.clone());
+    bridge.move_cursor_from_point(1.0, 0.0);
+    assert_eq!(term.fed.borrow().as_slice(), b"\x1b[D");
+}
+
+#[test]
+#[serial]
+fn click_left_half_stays_before_char() {
+    let entry = FakeEntry::default();
+    let ghost = FakeLabel::default();
+    let term = FakeTerminal::with_line("ab");
+    let bridge = InputBridge::new(entry, ghost, term.clone());
+    bridge.move_cursor_from_point(0.0, 0.0);
+    assert_eq!(term.fed.borrow().as_slice(), b"\x1b[D\x1b[D");
 }

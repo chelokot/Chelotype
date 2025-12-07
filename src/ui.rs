@@ -49,7 +49,7 @@ fn build_ui(app: &Application) {
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&entry));
     overlay.add_overlay(&ghost);
-    overlay.set_margin_start(10);
+    overlay.set_margin_start(14);
     overlay.set_margin_end(10);
     overlay.set_margin_top(8);
     overlay.set_margin_bottom(12);
@@ -93,10 +93,6 @@ fn apply_overlay_style(entry: &gtk::Entry) {
             color: transparent;
             caret-color: transparent;
             -gtk-secondary-caret-color: transparent;
-            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
-        }
-        entry.overlay-input:focus {
-            box-shadow: inset 0 0 0 1px @accent_color, 0 0 0 1px rgba(0,0,0,0.25);
         }
     ";
     let provider = gtk::CssProvider::new();
