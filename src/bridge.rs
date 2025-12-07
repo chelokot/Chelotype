@@ -1,8 +1,8 @@
 use crate::logging::debug_log;
 use gtk::gdk::ModifierType;
-use gtk::{Entry, Label, glib};
+use gtk::{Entry, Label, glib, pango};
 use regex::Regex;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use vte::Terminal;
 use vte::prelude::*;
@@ -40,6 +40,7 @@ pub trait EntryHandle: Clone {
 
 pub trait LabelHandle: Clone {
     fn set_markup(&self, markup: &str);
+    fn index_at_x(&self, x: f64, y: f64) -> Option<usize>;
 }
 
 impl EntryHandle for GtkEntryHandle {
@@ -55,6 +56,21 @@ impl EntryHandle for GtkEntryHandle {
 impl LabelHandle for GtkLabelHandle {
     fn set_markup(&self, markup: &str) {
         self.widget.set_markup(markup);
+    }
+
+    fn index_at_x(&self, x: f64, y: f64) -> Option<usize> {
+        let layout = self.widget.layout();
+        let (_, byte_idx, _) = layout.xy_to_index(
+            (x * pango::SCALE as f64) as i32,
+            (y * pango::SCALE as f64) as i32,
+        );
+        let text = layout.text();
+        let clamped = byte_idx.min(i32::try_from(text.len()).unwrap_or(0));
+        let caret_chars = text
+            .char_indices()
+            .take_while(|(i, _)| i < &(clamped as usize))
+            .count();
+        Some(caret_chars)
     }
 }
 
@@ -121,6 +137,8 @@ pub struct InputBridge<E: EntryHandle + 'static, L: LabelHandle + 'static, T: Te
     suppress_cursor_notify: Rc<Cell<bool>>,
     skip_next_insert: Rc<Cell<bool>>,
     suppress_insert: Rc<Cell<bool>>,
+    caret_visible: Rc<Cell<bool>>,
+    last_markup: Rc<RefCell<Option<String>>>,
 }
 
 impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> InputBridge<E, L, T> {
@@ -133,6 +151,8 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             suppress_cursor_notify: Rc::new(Cell::new(false)),
             skip_next_insert: Rc::new(Cell::new(false)),
             suppress_insert: Rc::new(Cell::new(false)),
+            caret_visible: Rc::new(Cell::new(true)),
+            last_markup: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -159,6 +179,16 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             debug_log("terminal:cursor-moved");
             cursor_self.sync_from_terminal();
         });
+
+        #[cfg(not(test))]
+        {
+            let bridge = self.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(530), move || {
+                bridge.caret_visible.set(!bridge.caret_visible.get());
+                bridge.render_cached_markup();
+                glib::ControlFlow::Continue
+            });
+        }
     }
 
     pub fn handle_key(&self, key: gtk::gdk::Key, state: ModifierType) -> bool {
@@ -239,8 +269,9 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         let html = self.terminal.line_html(row);
         let text = self.terminal.line_text(row);
         let caret_pos = i32::try_from(self.terminal.cursor_position().0).unwrap_or(0);
-        let markup = insert_caret(&html_to_pango(&html), caret_pos as usize);
-        self.ghost.set_markup(markup.as_str());
+        let base_markup = html_to_pango(&html);
+        self.last_markup.replace(Some(base_markup.clone()));
+        self.render_ghost_with_caret(&base_markup, caret_pos as usize);
         self.entry.set_text(&text);
 
         let (cursor_col, _) = self.terminal.cursor_position();
@@ -283,6 +314,29 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             self.terminal.feed_child(seq);
         }
         self.sync_from_terminal();
+    }
+
+    pub fn move_cursor_from_point(&self, x: f64, y: f64) {
+        if let Some(idx) = self.ghost.index_at_x(x, y) {
+            let idx_i32 = i32::try_from(idx).unwrap_or(0);
+            self.move_cursor_to(idx_i32);
+        }
+    }
+
+    fn render_ghost_with_caret(&self, base_markup: &str, caret_pos: usize) {
+        let markup = if self.caret_visible.get() {
+            insert_caret(base_markup, caret_pos)
+        } else {
+            base_markup.to_string()
+        };
+        self.ghost.set_markup(markup.as_str());
+    }
+
+    fn render_cached_markup(&self) {
+        if let Some(base) = self.last_markup.borrow().as_ref() {
+            let caret_pos = i32::try_from(self.terminal.cursor_position().0).unwrap_or(0);
+            self.render_ghost_with_caret(base, caret_pos as usize);
+        }
     }
 }
 
@@ -365,7 +419,7 @@ pub fn html_to_pango(input: &str) -> String {
 }
 
 pub fn insert_caret(markup: &str, caret_pos: usize) -> String {
-    let caret = r##"<span foreground="#7dd3fc">▏</span>"##;
+    let caret = r##"<span foreground="#7dd3fc" size="1">▏</span>"##;
     let mut result = String::new();
     let mut in_tag = false;
     let mut pos = 0usize;

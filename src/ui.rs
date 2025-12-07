@@ -40,10 +40,11 @@ fn build_ui(app: &Application) {
         .valign(Align::Center)
         .use_markup(true)
         .build();
-    ghost.set_can_target(false);
     ghost.add_css_class("monospace");
     ghost.set_hexpand(true);
     ghost.set_halign(Align::Fill);
+    ghost.set_xalign(0.0);
+    ghost.set_cursor_from_name(Some("text"));
 
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&entry));
@@ -54,6 +55,7 @@ fn build_ui(app: &Application) {
     overlay.set_margin_bottom(12);
 
     apply_overlay_style(&entry);
+    entry.set_can_target(false);
 
     let entry_handle = GtkEntryHandle::new(entry.clone());
     let label_handle = GtkLabelHandle::new(ghost.clone());
@@ -68,6 +70,7 @@ fn build_ui(app: &Application) {
     content.append(&terminal);
     content.append(&overlay);
     start_shell(&terminal);
+    attach_ghost_click(&ghost, bridge.clone());
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -130,4 +133,16 @@ fn attach_global_key_forwarder(
         glib::Propagation::Proceed
     });
     container.add_controller(controller);
+}
+
+fn attach_ghost_click(
+    ghost: &gtk::Label,
+    bridge: InputBridge<GtkEntryHandle, GtkLabelHandle, VteTerminalAdapter>,
+) {
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(0);
+    gesture.connect_pressed(move |_g, _n, x, y| {
+        bridge.move_cursor_from_point(x, y);
+    });
+    ghost.add_controller(gesture);
 }
