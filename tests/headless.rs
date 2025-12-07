@@ -8,7 +8,6 @@ use std::rc::Rc;
 use vte::prelude::*;
 
 #[test]
-#[ignore = "needs live VTE feed; integration probe"]
 fn headless_cat_roundtrip() {
     gtk::init().expect("gtk init failed");
     let ctx = glib::MainContext::default();
@@ -45,10 +44,17 @@ fn headless_cat_roundtrip() {
             }
         });
 
-        let fed = bridge.handle_insert_text("abc");
-        assert!(fed, "insert was skipped");
-        bridge.handle_key(gdk::Key::Return, gdk::ModifierType::empty());
-        terminal.feed(b"abc\n");
+        glib::idle_add_local({
+            let bridge = bridge.clone();
+            let terminal = terminal.clone();
+            move || {
+                let fed = bridge.handle_insert_text("abc");
+                assert!(fed, "insert was skipped");
+                bridge.handle_key(gdk::Key::Return, gdk::ModifierType::empty());
+                terminal.feed(b"abc\n");
+                glib::ControlFlow::Break
+            }
+        });
 
         let loop_ref = glib::MainLoop::new(Some(&ctx), false);
         let loop_clone = loop_ref.clone();
