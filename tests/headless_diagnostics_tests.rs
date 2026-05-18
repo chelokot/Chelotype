@@ -151,6 +151,9 @@ fn headless_mode_exports_selection_render_dump() {
     assert!(json.contains("\"selection\""));
     assert!(json.contains("\"selected_text\""));
     assert!(json.contains("\"lines\""));
+    assert!(json.contains("\"runs\""));
+    assert!(json.contains("\"start_column\""));
+    assert!(json.contains("\"selected\": true"));
     assert!(json.contains("\"region\""));
     assert!(json.contains("\"end\""));
 

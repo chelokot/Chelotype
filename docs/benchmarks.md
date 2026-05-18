@@ -33,7 +33,7 @@ Next additions
 Latest local baseline
 - `CARGO_BUILD_JOBS=1 cargo bench --bench pipeline -- --sample-size 10`
 - Before renderer grouping: `full_pipeline_keyrepeat` was ~85 ms for 128 parser+render frames and `full_pipeline_latency_guard` failed at ~1.14 ms worst-frame latency.
-- After grouping same-style cells and trimming blank line tails: compact markup render is ~20 ms for 128 parser+render frames; structured app-frame render is ~21-22 ms for 128 parser+render frames and `full_pipeline_frame_latency_guard` passes at ~184-187 us.
+- After adding structured render runs, a naive multi-pass frame build regressed to ~24 ms for 128 frames. The single-pass frame builder recovered and improved it: compact markup render is ~19.5 ms, structured app-frame render is ~19.6 ms, and `full_pipeline_frame_latency_guard` passes at ~163-167 us.
 - Full `CHELOTYPE_HELD_KEY_SECONDS=10` held-key Criterion run passes, but takes about 100s because Criterion collects 10 samples. Use default 1s samples locally and full 10s samples for slower perf validation.
 - Default local held-key gate passes with 1s samples.
 - This is useful as a parser+render regression target, but it still does not measure the full GTK frame path visible to the user.

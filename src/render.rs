@@ -24,6 +24,25 @@ pub struct RenderLine {
     pub region: RenderRegion,
     pub text: String,
     pub markup: String,
+    pub runs: Vec<RenderRun>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RenderRun {
+    pub start_column: usize,
+    pub text: String,
+    pub style: RenderStyle,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RenderStyle {
+    pub fg: Option<String>,
+    pub bg: Option<String>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikeout: bool,
+    pub selected: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -92,27 +111,28 @@ impl Renderer {
         let mut input_text = String::new();
         let mut lines = Vec::with_capacity(content.lines.len());
         for (idx, line) in content.lines.iter().enumerate() {
-            let markup = cells_to_markup(line, &content.colors, idx, selection);
-            let text = cells_to_text(line);
+            let line_render = build_line_render(line, &content.colors, idx, selection);
             if idx as i32 == content.cursor_line {
-                input_markup.push_str(&markup);
-                input_text = text.clone();
+                input_markup.push_str(&line_render.markup);
+                input_text = line_render.text.clone();
                 lines.push(RenderLine {
                     row: idx,
                     region: RenderRegion::Input,
-                    text,
-                    markup,
+                    text: line_render.text,
+                    markup: line_render.markup,
+                    runs: line_render.runs,
                 });
             } else {
-                history_markup.push_str(&markup);
+                history_markup.push_str(&line_render.markup);
                 if idx + 1 != content.lines.len() {
                     history_markup.push('\n');
                 }
                 lines.push(RenderLine {
                     row: idx,
                     region: RenderRegion::History,
-                    text,
-                    markup,
+                    text: line_render.text,
+                    markup: line_render.markup,
+                    runs: line_render.runs,
                 });
             }
         }
@@ -130,6 +150,12 @@ impl Renderer {
             lines,
         }
     }
+}
+
+struct LineRender {
+    text: String,
+    markup: String,
+    runs: Vec<RenderRun>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -212,10 +238,92 @@ fn cells_to_markup(
     out
 }
 
+#[cfg(test)]
+fn cells_to_runs(
+    cells: &[Cell],
+    colors: &alacritty_terminal::term::color::Colors,
+    row: usize,
+    selection: Option<SelectionRange>,
+) -> Vec<RenderRun> {
+    let cells = &cells[..significant_len(cells)];
+    let mut runs = Vec::new();
+    let mut idx = 0;
+    while idx < cells.len() {
+        let start = idx;
+        let style = CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx));
+        let mut text = String::new();
+        while idx < cells.len()
+            && CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx)) == style
+        {
+            text.push(cells[idx].c);
+            idx += 1;
+        }
+        runs.push(RenderRun {
+            start_column: start,
+            text,
+            style: style.to_render_style(colors),
+        });
+    }
+    runs
+}
+
+fn build_line_render(
+    cells: &[Cell],
+    colors: &alacritty_terminal::term::color::Colors,
+    row: usize,
+    selection: Option<SelectionRange>,
+) -> LineRender {
+    let cells = &cells[..significant_len(cells)];
+    let mut text = String::new();
+    let mut markup = String::new();
+    let mut runs = Vec::new();
+    let mut idx = 0;
+    while idx < cells.len() {
+        let start = idx;
+        let style = CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx));
+        let mut run_text = String::new();
+        markup.push_str(&style_open(style, colors));
+        while idx < cells.len()
+            && CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx)) == style
+        {
+            let ch = cells[idx].c;
+            text.push(ch);
+            run_text.push(ch);
+            push_escaped_char(&mut markup, ch);
+            idx += 1;
+        }
+        markup.push_str("</span>");
+        runs.push(RenderRun {
+            start_column: start,
+            text: run_text,
+            style: style.to_render_style(colors),
+        });
+    }
+    LineRender { text, markup, runs }
+}
+
 fn is_selected(selection: Option<SelectionRange>, row: usize, column: usize) -> bool {
     selection
         .map(|range| range.contains(GridPoint { row, column }))
         .unwrap_or(false)
+}
+
+impl CellStyle {
+    fn to_render_style(self, colors: &alacritty_terminal::term::color::Colors) -> RenderStyle {
+        RenderStyle {
+            fg: color_to_hex(self.fg, colors),
+            bg: if self.selected {
+                Some("#264f78".to_string())
+            } else {
+                color_to_hex(self.bg, colors)
+            },
+            bold: self.flags.contains(Flags::BOLD),
+            italic: self.flags.contains(Flags::ITALIC),
+            underline: self.flags.intersects(Flags::ALL_UNDERLINES),
+            strikeout: self.flags.contains(Flags::STRIKEOUT),
+            selected: self.selected,
+        }
+    }
 }
 
 fn cells_to_text(cells: &[Cell]) -> String {
@@ -304,6 +412,26 @@ mod tests {
     }
 
     #[test]
+    fn runs_group_adjacent_cells_by_style_and_selection() {
+        let cells = [cell('a'), cell('b'), cell('c'), cell('d')];
+        let selection = SelectionRange::new(
+            GridPoint { row: 0, column: 1 },
+            GridPoint { row: 0, column: 3 },
+        );
+        let runs = cells_to_runs(&cells, &Colors::default(), 0, Some(selection));
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].start_column, 0);
+        assert_eq!(runs[0].text, "a");
+        assert!(!runs[0].style.selected);
+        assert_eq!(runs[1].start_column, 1);
+        assert_eq!(runs[1].text, "bc");
+        assert!(runs[1].style.selected);
+        assert_eq!(runs[2].start_column, 3);
+        assert_eq!(runs[2].text, "d");
+        assert!(!runs[2].style.selected);
+    }
+
+    #[test]
     fn renderer_exports_structured_history_and_input_lines() {
         let content = RenderableContentOwned {
             lines: vec![
@@ -321,8 +449,10 @@ mod tests {
         assert_eq!(frame.lines.len(), 2);
         assert_eq!(frame.lines[0].region, RenderRegion::History);
         assert_eq!(frame.lines[0].text, "old");
+        assert_eq!(frame.lines[0].runs[0].text, "old");
         assert_eq!(frame.lines[1].region, RenderRegion::Input);
         assert_eq!(frame.lines[1].text, "new");
+        assert_eq!(frame.lines[1].runs[0].start_column, 0);
         assert_eq!(frame.input_text, "new");
     }
 }

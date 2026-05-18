@@ -22,9 +22,9 @@ Prompt-to-artifact checklist
   - Coverage: default tests run with zero bridge tests; `cargo test --features legacy-vte-bridge --test bridge_tests` keeps the old reference isolated.
   - Status: partial; old bridge code still exists as a feature-gated reference.
 - Renderer consumes grid/cell state directly
-  - Evidence: `src/render.rs` converts `RenderableContentOwned` lines/cells into `RenderOutput` and `RenderFrame`.
+  - Evidence: `src/render.rs` converts `RenderableContentOwned` lines/cells into `RenderOutput`, `RenderFrame`, and typed `RenderRun` records with start columns and style fields.
   - Evidence: `src/canvas.rs` draws active app frames on a GTK `DrawingArea`.
-  - Status: partial; it still renders full-frame Pango markup, not incremental per-cell draw batches.
+  - Status: partial; the app has typed render runs but the canvas still paints line markup rather than direct per-run draw batches.
 - History, scrollback, current input
   - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots.
   - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`.
@@ -55,7 +55,7 @@ Prompt-to-artifact checklist
 - Perf gates
   - Evidence: `benches/pipeline.rs`, `docs/benchmarks.md`.
   - Coverage: active app-frame render benchmark, latency guard, held-key scenario.
-  - Status: partial; not a full GTK frame/pixel pipeline, no memory/allocation gate.
+  - Status: partial; active frame construction is gated, but not the full GTK/Cairo/Pango paint path, and there is no memory/allocation gate.
 - Container-friendly runtime assumptions
   - Evidence: binary-level headless mode works without opening the GTK app.
   - Status: weak; no documented container image, no CI container recipe, no deterministic shell fixture.
