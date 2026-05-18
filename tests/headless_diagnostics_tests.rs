@@ -1,3 +1,4 @@
+use serial_test::serial;
 use std::fs::{read_dir, read_to_string};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,12 +18,30 @@ fn snapshot_file_with_extension(
 ) -> std::path::PathBuf {
     paths
         .iter()
-        .find(|path| path.extension().is_some_and(|ext| ext == extension))
+        .find(|path| {
+            path.extension().is_some_and(|ext| ext == extension)
+                && !(extension == "json"
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().ends_with(".render.json")))
+        })
+        .expect("snapshot file")
+        .clone()
+}
+
+fn snapshot_file_ending_with(paths: &[std::path::PathBuf], suffix: &str) -> std::path::PathBuf {
+    paths
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(suffix))
+        })
         .expect("snapshot file")
         .clone()
 }
 
 #[test]
+#[serial]
 fn headless_mode_writes_deterministic_snapshot_files_without_warnings() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-{}",
@@ -92,6 +111,7 @@ fn headless_mode_writes_deterministic_snapshot_files_without_warnings() {
 }
 
 #[test]
+#[serial]
 fn headless_mode_exports_selection_render_dump() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-selection-{}",
@@ -148,6 +168,7 @@ fn headless_mode_exports_selection_render_dump() {
 }
 
 #[test]
+#[serial]
 fn headless_mode_replays_scripted_interaction_actions() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-scripted-{}",
@@ -189,6 +210,176 @@ fn headless_mode_replays_scripted_interaction_actions() {
 }
 
 #[test]
+#[serial]
+fn headless_mode_replays_keyboard_events_through_input_mapping() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-keyboard-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let target = dir.join("keyboard-edit.txt");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            format!(
+                "raw:stty erase '^?'\\n|raw:cat > {}\\n|text:abc|key:Backspace|text:d|key:Enter|key:Ctrl+d|raw:printf 'EDITED='; cat {}; echo\\n",
+                target.display(),
+                target.display()
+            ),
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "EDITED=abd")
+        .output()
+        .expect("run keyboard headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let text_snapshot = snapshot_file_with_extension(&snapshot_paths(&dir), "txt");
+    let text = read_to_string(text_snapshot).expect("read text snapshot");
+    assert!(text.contains("EDITED=abd"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn headless_mode_replays_mouse_drag_selection_events() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-mouse-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "raw:printf 'mouse-selection\\n'\\n|mouse:press:left:0,0|mouse:drag:5,0|mouse:release:5,0",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "mouse-selection")
+        .output()
+        .expect("run mouse headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let render_dump = snapshot_file_ending_with(&paths, ".render.json");
+    let json = read_to_string(render_dump).expect("read render dump");
+    assert!(json.contains("\"selection\""));
+    assert!(json.contains("\"selected_text\""));
+    assert!(json.contains("\"column\": 6"));
+
+    let markup_dump = snapshot_file_ending_with(&paths, ".markup.html");
+    let markup = read_to_string(markup_dump).expect("read markup dump");
+    assert!(markup.contains("background=\"#264f78\""));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn headless_mode_replays_resize_event() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-resize-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env("CHELOTYPE_HEADLESS_EVENTS", "resize:40x6")
+        .env("CHELOTYPE_HEADLESS_EXPECT", "")
+        .output()
+        .expect("run resize headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let json_snapshot = snapshot_file_with_extension(&snapshot_paths(&dir), "json");
+    let json: serde_json::Value =
+        serde_json::from_str(&read_to_string(json_snapshot).expect("read json snapshot"))
+            .expect("parse json snapshot");
+    assert_eq!(json["cols"], 40);
+    assert_eq!(json["rows"], 6);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn headless_mode_replays_scroll_event() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-scroll-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "resize:40x6|raw:for n in $(seq 1 24); do echo HEADLESS_SCROLL_$n; done\\n|wait:HEADLESS_SCROLL_24|scroll:8",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "")
+        .output()
+        .expect("run scroll headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let json_snapshot = snapshot_file_with_extension(&snapshot_paths(&dir), "json");
+    let json: serde_json::Value =
+        serde_json::from_str(&read_to_string(json_snapshot).expect("read json snapshot"))
+            .expect("parse json snapshot");
+    assert!(
+        json["display_offset"].as_u64().expect("display offset") > 0,
+        "{json}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_replays_backspace_and_arrow_cursor_actions() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-editing-{}",
@@ -224,6 +415,7 @@ fn headless_mode_replays_backspace_and_arrow_cursor_actions() {
 }
 
 #[test]
+#[serial]
 fn headless_mode_exports_unicode_and_style_cells_in_json() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-style-{}",

@@ -5,6 +5,7 @@ Headless snapshots
 - Selection runs also produce `.render.json` with history/input markup, selected text, and the selected grid range.
 - JSON snapshots include `rows`, `cols`, cursor fields, mouse mode fields, plain `text`, and per-cell text/color/style records.
 - Override actions with `CHELOTYPE_HEADLESS_ACTIONS`; split actions with `|`, and use `\n`, `\r`, `\t`, `\e`, and `\\` escapes.
+- Prefer `CHELOTYPE_HEADLESS_EVENTS` for input-path e2e. Supported events: `raw:<bytes>`, `text:<text>`, `key:<name>`, `resize:<cols>x<rows>`, `scroll:<lines>`, `mouse:press:<button>:<col>,<row>`, `mouse:drag:<col>,<row>`, and `mouse:release:<col>,<row>`.
 - Override expected terminal text with `CHELOTYPE_HEADLESS_EXPECT`; split expected substrings with `|`.
 - Override delay between actions with `CHELOTYPE_HEADLESS_STEP_MS`.
 - Override selected cells with `CHELOTYPE_HEADLESS_SELECTION=row,column:row,column`.

@@ -22,6 +22,7 @@ Current state audit
 - Partial: `src/diagnostics.rs` and `src/snapshot.rs` provide structured snapshot exports with rows/cols, cursor, mouse mode, plain text, and per-cell text/color/style records.
 - Partial: `tests/backend_integration_tests.rs` verifies real PTY write/read, ANSI color preservation, and cursor tracking against the active backend.
 - Partial: `tests/headless_diagnostics_tests.rs` launches the binary in headless mode, verifies JSON/HTML/text/markup snapshot files, checks expected terminal content, supports scripted action/expectation env overrides, and fails on stderr warnings/errors.
+- Partial: headless diagnostics support event-level automation for raw/text writes, key events, resize, scroll, mouse press/drag/release, and selection export.
 - Partial: headless diagnostics verify Unicode text and styled cells (bold, italic, underline, ANSI color) in structured JSON snapshots.
 - Partial: `TerminalBackend::resize` updates both the PTY winsize and `alacritty_terminal` state; `app.rs` derives terminal size from the GTK viewport.
 - Partial: `TerminalBackend::scroll_display` and `scroll_to_bottom` expose scrollback viewport movement from the terminal core, and snapshots export `display_offset`.
@@ -33,7 +34,7 @@ Current state audit
 - Missing: custom drawing renderer; current renderer still uses GTK labels and full markup replacement.
 - Weak: resize is covered at backend level, but not yet by headless GTK e2e.
 - Weak: first-class mouse support has mode-aware click press/release/drag plumbing and a local grid selection model, but selection is not yet exported to clipboard and still lacks headless GTK drag e2e.
-- Partial: active binary-level headless diagnostics exist, but GTK interaction e2e is still missing.
+- Partial: active binary-level headless diagnostics exercise backend/input/interaction/render paths, but GTK window event injection e2e is still missing.
 - Partial: old VTE bridge is isolated behind the `legacy-vte-bridge` Cargo feature; default builds/tests no longer include it, while `cargo test --features legacy-vte-bridge --test bridge_tests` keeps the reference path checked.
 - Weak: benchmarks exist, but they do not yet prove UI-visible held-key smoothness.
 - Blocked: local verification is currently unreliable while the filesystem has almost no free space.
