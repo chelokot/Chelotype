@@ -1,4 +1,4 @@
-use crate::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
+use crate::backend::{RenderableContentOwned, ScreenSize};
 use crate::canvas::TerminalCanvas;
 use crate::cell_text::lines_to_text;
 use crate::input::{KeyAction, key_to_action};
@@ -10,6 +10,7 @@ use crate::render::Renderer;
 use crate::selection::{SelectionRange, selected_text};
 use crate::snapshot::write_snapshot_with_selection;
 use crate::terminal_font::metrics_for_widget;
+use crate::workspace::TerminalWorkspace;
 use adw::Application;
 use adw::prelude::*;
 use gtk::glib;
@@ -44,8 +45,8 @@ fn build_ui(app: &Application) {
         .content(&content)
         .build();
 
-    let backend = TerminalBackend::spawn_shell().expect("spawn shell");
-    let backend_rc = std::rc::Rc::new(std::cell::RefCell::new(backend));
+    let workspace = TerminalWorkspace::spawn_shell().expect("spawn terminal workspace");
+    let workspace_rc = std::rc::Rc::new(std::cell::RefCell::new(workspace));
     apply_style(canvas.widget());
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
     let last_snapshot = std::rc::Rc::new(std::cell::RefCell::new(std::time::Instant::now()));
@@ -68,7 +69,7 @@ fn build_ui(app: &Application) {
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
-        let backend = backend_rc.clone();
+        let workspace = workspace_rc.clone();
         let content = last_content.clone();
         let selection = selection.clone();
         let canvas_widget = canvas.widget().clone();
@@ -76,10 +77,10 @@ fn build_ui(app: &Application) {
             if let Some(action) = key_to_action(key, state) {
                 match action {
                     KeyAction::Write(data) => {
-                        let _ = backend.borrow_mut().write(&data);
+                        let _ = workspace.borrow_mut().write_active(&data);
                     }
                     KeyAction::ScrollDisplay(lines) => {
-                        let _ = backend.borrow_mut().scroll_display(lines);
+                        let _ = workspace.borrow_mut().scroll_active(lines);
                     }
                     KeyAction::CopySelection => {
                         copy_selection_to_clipboard(&canvas_widget, &content, selection.get());
@@ -96,7 +97,7 @@ fn build_ui(app: &Application) {
     let click_controller = gtk::GestureClick::new();
     click_controller.set_button(0);
     {
-        let backend = backend_rc.clone();
+        let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
@@ -119,7 +120,7 @@ fn build_ui(app: &Application) {
                 crate::logging::debug_log(&format!("mouse press effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
-                    &backend,
+                    &workspace,
                     &selection,
                     &selection_dirty,
                     &content,
@@ -128,7 +129,7 @@ fn build_ui(app: &Application) {
         });
     }
     {
-        let backend = backend_rc.clone();
+        let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
@@ -153,7 +154,7 @@ fn build_ui(app: &Application) {
                 crate::logging::debug_log(&format!("mouse release effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
-                    &backend,
+                    &workspace,
                     &selection,
                     &selection_dirty,
                     &content,
@@ -163,7 +164,7 @@ fn build_ui(app: &Application) {
                 crate::logging::debug_log(&format!("mouse release outside effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
-                    &backend,
+                    &workspace,
                     &selection,
                     &selection_dirty,
                     &content,
@@ -172,7 +173,7 @@ fn build_ui(app: &Application) {
         });
     }
     {
-        let backend = backend_rc.clone();
+        let workspace = workspace_rc.clone();
         let selection = selection.clone();
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
@@ -180,14 +181,14 @@ fn build_ui(app: &Application) {
         gtk::prelude::GestureExt::connect_cancel(&click_controller, move |_gesture, _sequence| {
             let effects = pointer_interaction.borrow_mut().cancel();
             crate::logging::debug_log(&format!("mouse gesture cancelled effects={effects:?}"));
-            apply_interaction_effects(effects, &backend, &selection, &selection_dirty, &content);
+            apply_interaction_effects(effects, &workspace, &selection, &selection_dirty, &content);
         });
     }
     canvas.widget().add_controller(click_controller);
 
     let motion_controller = gtk::EventControllerMotion::new();
     {
-        let backend = backend_rc.clone();
+        let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
@@ -207,7 +208,7 @@ fn build_ui(app: &Application) {
                 crate::logging::debug_log(&format!("mouse motion effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
-                    &backend,
+                    &workspace,
                     &selection,
                     &selection_dirty,
                     &content,
@@ -220,10 +221,10 @@ fn build_ui(app: &Application) {
     let scroll_controller =
         gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     {
-        let backend = backend_rc.clone();
+        let workspace = workspace_rc.clone();
         scroll_controller.connect_scroll(move |_controller, _dx, dy| {
             if let Some(lines) = crate::interaction::wheel_scroll_lines(dy) {
-                let _ = backend.borrow_mut().scroll_display(lines);
+                let _ = workspace.borrow_mut().scroll_active(lines);
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -233,9 +234,11 @@ fn build_ui(app: &Application) {
     canvas.widget().add_controller(scroll_controller);
 
     if let Some(scenario) = ui_e2e.clone() {
-        let backend = backend_rc.clone();
+        let workspace = workspace_rc.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
-            let _ = backend.borrow_mut().write(scenario.input.as_bytes());
+            let _ = workspace
+                .borrow_mut()
+                .write_active(scenario.input.as_bytes());
         });
     }
 
@@ -256,11 +259,13 @@ fn build_ui(app: &Application) {
         }
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
             && last_size.get() != Some(size)
-            && backend_rc.borrow_mut().resize(size).is_ok()
+            && workspace_rc.borrow_mut().resize_active(size).is_ok()
         {
             last_size.set(Some(size));
         }
-        let terminal_content = backend_rc.borrow_mut().snapshot_renderable_if_dirty();
+        let terminal_content = workspace_rc
+            .borrow_mut()
+            .snapshot_active_renderable_if_dirty();
         let terminal_changed = terminal_content.is_some();
         if let Some(content) = terminal_content {
             mouse_mode.set(content.mouse);
@@ -433,7 +438,7 @@ fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: Te
 
 fn apply_interaction_effects(
     effects: Vec<InteractionEffect>,
-    backend: &std::rc::Rc<std::cell::RefCell<TerminalBackend>>,
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
     content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
@@ -441,7 +446,7 @@ fn apply_interaction_effects(
     for effect in effects {
         match effect {
             InteractionEffect::Write(bytes) => {
-                let _ = backend.borrow_mut().write(&bytes);
+                let _ = workspace.borrow_mut().write_active(&bytes);
             }
             InteractionEffect::SelectionChanged(range) => {
                 crate::logging::debug_log(&format!("selection changed {range:?}"));
@@ -452,7 +457,7 @@ fn apply_interaction_effects(
                 if let Some(content) = content.borrow().as_ref()
                     && let Some(bytes) = cursor_movement_bytes_for_content(content, position)
                 {
-                    let _ = backend.borrow_mut().write(&bytes);
+                    let _ = workspace.borrow_mut().write_active(&bytes);
                 }
             }
         }

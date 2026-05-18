@@ -27,6 +27,7 @@ Current state audit
 - Partial: headless diagnostics support event-level automation for raw/text writes, key events, resize, scroll, mouse press/drag/release, click-to-cursor movement, and selection export.
 - Partial: `TerminalBackend::resize` updates both the PTY winsize and Ghostty terminal dimensions; `app.rs` derives terminal size from the GTK viewport.
 - Partial: `TerminalBackend::scroll_display` and `scroll_to_bottom` expose scrollback viewport movement from the terminal core, and snapshots export `display_offset`.
+- Partial: `src/workspace.rs` owns a typed pane list where every pane owns one `TerminalBackend`; `app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active pane; unit tests prove pane switching and isolated terminal state across two PTYs.
 - Partial: `src/input.rs` defines a testable keyboard-to-terminal-byte mapping used by the active GTK app.
 - Partial: `src/mouse.rs` defines testable SGR mouse event encoding, `src/interaction.rs` owns the pure pointer state machine, Ghostty exposes terminal mouse mode state, and `app.rs` forwards click press/release/drag events to the PTY only when terminal mouse reporting is enabled.
 - Partial: `src/selection.rs` defines a typed half-open grid selection model with extraction tests, `src/render.rs` can highlight selected cells from terminal grid coordinates, and `app.rs` starts local drag selection when terminal mouse reporting is not active. GTK e2e now verifies real Xvfb mouse drag selection and exported `selected_text`.
@@ -43,5 +44,5 @@ Next implementation order
 3. Add clipboard selection export.
 4. Design semantic-prompt-aware shell cursor placement for mouse-driven command editing beyond soft-wrapped current input.
 5. Add smooth scrolling and command blocks.
-6. Add workspace/tab/split model.
+6. Add visible tab/split UI on top of the workspace model.
 7. Add GTK paint-path perf gates and allocation tracking.

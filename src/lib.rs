@@ -13,3 +13,4 @@ pub mod selection;
 pub mod snapshot;
 pub mod terminal_font;
 pub mod terminal_grid;
+pub mod workspace;

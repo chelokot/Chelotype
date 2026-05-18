@@ -7,9 +7,9 @@ Chelotype needs one real PTY-backed terminal session, one terminal-core state, s
 Prompt-to-artifact checklist
 
 - One real PTY per terminal session
-  - Evidence: `src/backend.rs` owns one `portable_pty` master/child per `TerminalBackend`.
-  - Coverage: `backend_writes_to_single_pty_and_reads_shell_output`.
-  - Status: partial; no workspace/pane manager exists yet.
+  - Evidence: `src/backend.rs` owns one `portable_pty` master/child per `TerminalBackend`; `src/workspace.rs` stores panes as `TerminalBackend` owners and the GTK app talks to the active workspace pane.
+  - Coverage: `backend_writes_to_single_pty_and_reads_shell_output`, `workspace_tracks_active_pane_identity`, and `workspace_keeps_each_pane_terminal_state_isolated`.
+  - Status: partial; the internal workspace/pane model exists, but there is no tab/split UI yet.
 - One terminal-core state / shell-driven source of truth
   - Evidence: `src/backend.rs` owns one `libghostty_vt::Terminal`; PTY reader bytes are fed into that terminal state.
   - Coverage: backend integration tests and headless snapshots.
@@ -59,8 +59,9 @@ Prompt-to-artifact checklist
   - Evidence: `scripts/with-zig.sh`, binary-level headless mode, clean `zsh -f` diagnostics fixture, README setup/run commands, and Xvfb-based GTK e2e test.
   - Status: partial; no CI container image yet.
 - Workspaces, tabs/splits, command blocks, smooth scrolling
-  - Evidence: none beyond current data-shape direction.
-  - Status: missing.
+  - Evidence: `src/workspace.rs` provides active-pane routing and multi-pane ownership; `src/app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active workspace pane.
+  - Coverage: workspace unit tests prove pane identity switching and isolated terminal state across two PTYs.
+  - Status: partial; no tab/split UI, smooth scroll model, or command-block model yet.
 
 Current green commands
 
@@ -71,4 +72,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor position assertions, semantic-prompt-aware shell cursor placement beyond soft wraps, advanced grapheme/IME tests, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor position assertions, semantic-prompt-aware shell cursor placement beyond soft wraps, advanced grapheme/IME tests, tab/split UI on top of the workspace model, command blocks, smooth scrolling, and full GTK paint-path perf gates.
