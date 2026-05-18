@@ -2,7 +2,7 @@ use crate::backend::RenderableContentOwned;
 use crate::cell_text::{is_wide_spacer, push_cell_text};
 use crate::command_blocks::{CommandBlock, command_blocks};
 use crate::selection::{GridPoint, SelectionRange};
-use crate::terminal_grid::TerminalCell;
+use crate::terminal_grid::{TerminalCell, TerminalSemanticPrompt};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -182,6 +182,9 @@ impl Renderer {
 fn input_region_range(content: &RenderableContentOwned) -> std::ops::RangeInclusive<usize> {
     let cursor = content.cursor_line.max(0) as usize;
     let end = cursor.min(content.lines.len().saturating_sub(1));
+    if let Some(range) = semantic_prompt_input_region(content, end) {
+        return range;
+    }
     let mut start = end;
     while start > 0 {
         let current = content
@@ -201,6 +204,51 @@ fn input_region_range(content: &RenderableContentOwned) -> std::ops::RangeInclus
         }
     }
     start..=end
+}
+
+fn semantic_prompt_input_region(
+    content: &RenderableContentOwned,
+    end: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let metadata = content.line_metadata.get(end).copied().unwrap_or_default();
+    if metadata.semantic_prompt == TerminalSemanticPrompt::None {
+        return None;
+    }
+    let mut start = end;
+    while start > 0 {
+        let current = content
+            .line_metadata
+            .get(start)
+            .copied()
+            .unwrap_or_default();
+        let previous = content
+            .line_metadata
+            .get(start - 1)
+            .copied()
+            .unwrap_or_default();
+        if current.semantic_prompt == TerminalSemanticPrompt::Continuation
+            && matches!(
+                previous.semantic_prompt,
+                TerminalSemanticPrompt::Prompt | TerminalSemanticPrompt::Continuation
+            )
+        {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if content
+        .line_metadata
+        .get(start)
+        .copied()
+        .unwrap_or_default()
+        .semantic_prompt
+        == TerminalSemanticPrompt::Prompt
+    {
+        Some(start..=end)
+    } else {
+        None
+    }
 }
 
 struct LineRender {
@@ -630,6 +678,39 @@ mod tests {
         assert_eq!(frame.lines[2].region, RenderRegion::Input);
         assert_eq!(frame.input_text, "cmd");
         assert!(frame.input_markup.contains('\n'));
+    }
+
+    #[test]
+    fn renderer_marks_semantic_prompt_continuations_as_input_region() {
+        let content = RenderableContentOwned {
+            lines: vec![
+                vec![cell("o"), cell("l"), cell("d")],
+                vec![cell(">"), cell(" "), cell("a")],
+                vec![cell("b"), cell("c")],
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata::default(),
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Continuation,
+                    ..TerminalLineMetadata::default()
+                },
+            ],
+            cursor_line: 2,
+            cursor_col: 2,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        };
+        let frame = Renderer::render_frame_with_selection(content, None);
+        assert_eq!(frame.lines[0].region, RenderRegion::History);
+        assert_eq!(frame.lines[1].region, RenderRegion::Input);
+        assert_eq!(frame.lines[2].region, RenderRegion::Input);
+        assert_eq!(frame.input_text, "bc");
     }
 
     #[test]

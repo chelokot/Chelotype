@@ -2,7 +2,7 @@ use crate::mouse::{
     MouseButton, MouseGridPosition, sgr_drag_bytes, sgr_press_bytes, sgr_release_bytes,
 };
 use crate::selection::{GridPoint, SelectionRange};
-use crate::terminal_grid::{MouseMode, TerminalContent};
+use crate::terminal_grid::{MouseMode, TerminalContent, TerminalSemanticPrompt};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InteractionEffect {
@@ -130,7 +130,7 @@ pub fn cursor_movement_bytes_for_content(
     let cursor_column = usize::try_from(content.cursor_col).ok()?;
     let target_row = usize::from(target.row);
     let target_column = usize::from(target.column);
-    let input_rows = active_wrapped_rows(content, cursor_row)?;
+    let input_rows = active_input_rows(content, cursor_row)?;
     if !input_rows.contains(&target_row) {
         return None;
     }
@@ -141,13 +141,71 @@ pub fn cursor_movement_bytes_for_content(
     arrow_bytes_for_delta(delta)
 }
 
-fn active_wrapped_rows(
+fn active_input_rows(
     content: &TerminalContent,
     cursor_row: usize,
 ) -> Option<std::ops::RangeInclusive<usize>> {
     if cursor_row >= content.lines.len() {
         return None;
     }
+    if let Some(rows) = active_semantic_prompt_rows(content, cursor_row) {
+        return Some(rows);
+    }
+    active_wrapped_rows(content, cursor_row)
+}
+
+fn active_semantic_prompt_rows(
+    content: &TerminalContent,
+    cursor_row: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let metadata = content
+        .line_metadata
+        .get(cursor_row)
+        .copied()
+        .unwrap_or_default();
+    if metadata.semantic_prompt == TerminalSemanticPrompt::None {
+        return None;
+    }
+    let mut start = cursor_row;
+    while start > 0 {
+        let current = content
+            .line_metadata
+            .get(start)
+            .copied()
+            .unwrap_or_default();
+        let previous = content
+            .line_metadata
+            .get(start - 1)
+            .copied()
+            .unwrap_or_default();
+        if current.semantic_prompt == TerminalSemanticPrompt::Continuation
+            && matches!(
+                previous.semantic_prompt,
+                TerminalSemanticPrompt::Prompt | TerminalSemanticPrompt::Continuation
+            )
+        {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if content
+        .line_metadata
+        .get(start)
+        .copied()
+        .unwrap_or_default()
+        .semantic_prompt
+        != TerminalSemanticPrompt::Prompt
+    {
+        return None;
+    }
+    Some(start..=cursor_row)
+}
+
+fn active_wrapped_rows(
+    content: &TerminalContent,
+    cursor_row: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
     let mut start = cursor_row;
     while start > 0 {
         let current = content
@@ -215,7 +273,9 @@ fn arrow_bytes_for_delta(delta: i32) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal_grid::{TerminalCell, TerminalColors, TerminalLineMetadata};
+    use crate::terminal_grid::{
+        TerminalCell, TerminalColors, TerminalLineMetadata, TerminalSemanticPrompt,
+    };
 
     fn pos(column: u16, row: u16) -> MouseGridPosition {
         MouseGridPosition { column, row }
@@ -372,6 +432,46 @@ mod tests {
             Some(&b"\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"[..])
         );
         assert_eq!(cursor_movement_bytes_for_content(&content, pos(1, 3)), None);
+    }
+
+    #[test]
+    fn cursor_movement_uses_semantic_prompt_continuation_rows() {
+        let content = TerminalContent {
+            lines: vec![
+                vec![TerminalCell::blank(); 3],
+                vec![TerminalCell::blank(); 4],
+                vec![TerminalCell::blank(); 5],
+                vec![TerminalCell::blank(); 2],
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata::default(),
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Continuation,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata::default(),
+            ],
+            cursor_line: 2,
+            cursor_col: 3,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        };
+        assert_eq!(
+            cursor_movement_bytes_for_content(&content, pos(2, 1)).as_deref(),
+            Some(&b"\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"[..])
+        );
+        assert_eq!(
+            cursor_movement_bytes_for_content(&content, pos(1, 2)).as_deref(),
+            Some(&b"\x1b[D\x1b[D"[..])
+        );
+        assert_eq!(cursor_movement_bytes_for_content(&content, pos(1, 0)), None);
+        assert_eq!(cursor_movement_bytes_for_content(&content, pos(0, 3)), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::backend::{RenderableContentOwned, ScreenSize};
+use crate::backend::{MouseMode, RenderableContentOwned, ScreenSize};
 use crate::canvas::TerminalCanvas;
 use crate::cell_text::lines_to_text;
 use crate::input::{KeyAction, key_to_action};
@@ -75,6 +75,7 @@ fn build_ui(app: &Application) {
     let mouse_mode = std::rc::Rc::new(std::cell::Cell::new(crate::backend::MouseMode::default()));
     let pointer_interaction =
         std::rc::Rc::new(std::cell::RefCell::new(PointerInteraction::default()));
+    let drag_gesture_moved = std::rc::Rc::new(std::cell::Cell::new(false));
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
     let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
     let last_content = std::rc::Rc::new(std::cell::RefCell::new(None::<RenderableContentOwned>));
@@ -211,9 +212,11 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let drag_gesture_moved = drag_gesture_moved.clone();
         let canvas_widget = canvas.widget().clone();
         click_controller.connect_pressed(move |gesture, _press_count, x, y| {
             canvas_widget.grab_focus();
+            drag_gesture_moved.set(false);
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
             if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
                 crate::logging::debug_log(&format!(
@@ -243,8 +246,23 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let drag_gesture_moved = drag_gesture_moved.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
+            if drag_gesture_moved.get() && !mode.get().sends_press_release() {
+                let effects = pointer_interaction.borrow_mut().cancel();
+                crate::logging::debug_log(&format!(
+                    "mouse release after drag gesture effects={effects:?}"
+                ));
+                apply_interaction_effects(
+                    effects,
+                    &workspace,
+                    &selection,
+                    &selection_dirty,
+                    &content,
+                );
+                return;
+            }
             if let Some(cell_position) = pointer_grid_position(metrics.get(), x, y) {
                 let position = if mode.get().sends_press_release() {
                     cell_position
@@ -292,6 +310,119 @@ fn build_ui(app: &Application) {
         });
     }
     canvas.widget().add_controller(click_controller);
+
+    let drag_controller = gtk::GestureDrag::new();
+    drag_controller.set_button(1);
+    {
+        let workspace = workspace_rc.clone();
+        let metrics = cell_metrics.clone();
+        let mode = mouse_mode.clone();
+        let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
+        let content = last_content.clone();
+        let pointer_interaction = pointer_interaction.clone();
+        let drag_gesture_moved = drag_gesture_moved.clone();
+        let canvas_widget = canvas.widget().clone();
+        drag_controller.connect_drag_begin(move |_gesture, x, y| {
+            if mode.get().sends_press_release() {
+                return;
+            }
+            canvas_widget.grab_focus();
+            drag_gesture_moved.set(false);
+            if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
+                let effects = pointer_interaction.borrow_mut().press(
+                    MouseMode::default(),
+                    MouseButton::Left,
+                    position,
+                );
+                crate::logging::debug_log(&format!("drag begin effects={effects:?}"));
+                apply_interaction_effects(
+                    effects,
+                    &workspace,
+                    &selection,
+                    &selection_dirty,
+                    &content,
+                );
+            }
+        });
+    }
+    {
+        let workspace = workspace_rc.clone();
+        let metrics = cell_metrics.clone();
+        let mode = mouse_mode.clone();
+        let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
+        let content = last_content.clone();
+        let pointer_interaction = pointer_interaction.clone();
+        let drag_gesture_moved = drag_gesture_moved.clone();
+        drag_controller.connect_drag_update(move |gesture, offset_x, offset_y| {
+            if mode.get().sends_press_release() {
+                return;
+            }
+            let Some((start_x, start_y)) = gesture.start_point() else {
+                return;
+            };
+            if let Some(position) =
+                pointer_grid_position(metrics.get(), start_x + offset_x, start_y + offset_y)
+            {
+                let effects = pointer_interaction
+                    .borrow_mut()
+                    .motion(MouseMode::default(), position);
+                if effects
+                    .iter()
+                    .any(|effect| matches!(effect, InteractionEffect::SelectionChanged(Some(_))))
+                {
+                    drag_gesture_moved.set(true);
+                }
+                crate::logging::debug_log(&format!("drag update effects={effects:?}"));
+                apply_interaction_effects(
+                    effects,
+                    &workspace,
+                    &selection,
+                    &selection_dirty,
+                    &content,
+                );
+            }
+        });
+    }
+    {
+        let workspace = workspace_rc.clone();
+        let metrics = cell_metrics.clone();
+        let mode = mouse_mode.clone();
+        let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
+        let content = last_content.clone();
+        let pointer_interaction = pointer_interaction.clone();
+        let drag_gesture_moved = drag_gesture_moved.clone();
+        drag_controller.connect_drag_end(move |gesture, offset_x, offset_y| {
+            if mode.get().sends_press_release() {
+                return;
+            }
+            let Some((start_x, start_y)) = gesture.start_point() else {
+                return;
+            };
+            let effects = if let Some(position) =
+                pointer_grid_position(metrics.get(), start_x + offset_x, start_y + offset_y)
+            {
+                pointer_interaction
+                    .borrow_mut()
+                    .release(MouseMode::default(), position)
+            } else {
+                pointer_interaction.borrow_mut().cancel()
+            };
+            let effects = if drag_gesture_moved.get() {
+                effects
+                    .into_iter()
+                    .filter(|effect| !matches!(effect, InteractionEffect::MoveCursorTo(_)))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            crate::logging::debug_log(&format!("drag end effects={effects:?}"));
+            apply_interaction_effects(effects, &workspace, &selection, &selection_dirty, &content);
+        });
+    }
+    canvas.widget().add_controller(drag_controller);
 
     let motion_controller = gtk::EventControllerMotion::new();
     {

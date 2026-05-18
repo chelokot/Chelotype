@@ -607,7 +607,7 @@ import -window "$window_id" "$screenshot"
     let expected_delta = geometry_metric(&geometry_trace, "cell_width") * 2.0;
     let actual_delta = green.min_x as f64 - red.min_x as f64;
     assert!(
-        (actual_delta - expected_delta).abs() <= 5.0,
+        (actual_delta - expected_delta).abs() <= 2.0,
         "colored cells after a styled space drifted off grid: red={red:?} green={green:?} expected_delta={expected_delta:.2} actual_delta={actual_delta:.2}"
     );
 
@@ -1529,6 +1529,179 @@ exit 1
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("aZbcdef"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_keeps_zsh_autosuggestion_on_grid_and_clicks_real_buffer_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping zsh autosuggestion e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+    let autosuggest_plugin = std::path::Path::new(
+        "/opt/oh-my-zsh/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh",
+    );
+    let syntax_plugin = std::path::Path::new(
+        "/opt/oh-my-zsh/custom/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
+    );
+    if !autosuggest_plugin.exists() || !syntax_plugin.exists() {
+        eprintln!("skipping zsh autosuggestion e2e because zsh plugins are not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-zsh-autosuggest-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let zdot = dir.join("zdot");
+    let snapshots = dir.join("snapshots");
+    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    std::fs::create_dir_all(&snapshots).expect("snapshot dir");
+    std::fs::write(zdot.join(".zsh_history"), "git status\n").expect("history fixture");
+    std::fs::write(
+        zdot.join(".zshrc"),
+        format!(
+            "HISTFILE=\"{}\"\nHISTSIZE=1000\nSAVEHIST=1000\nPS1=\"❯ \"\nZSH_AUTOSUGGEST_STRATEGY=(history)\nsource {}\nsource {}\n",
+            zdot.join(".zsh_history").display(),
+            autosuggest_plugin.display(),
+            syntax_plugin.display()
+        ),
+    )
+    .expect("zshrc fixture");
+    let geometry_trace = dir.join("geometry.env");
+    let autosuggest_snapshot = dir.join("autosuggest.json");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+geometry_trace="$3"
+zdot="$4"
+autosuggest_snapshot="$5"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.35
+xdotool type --window "$window_id" --delay 10 "git"
+for _ in {1..120}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ] && grep -F '❯ git status' "$latest_json" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        cp "$latest_json" "$autosuggest_snapshot"
+        break
+    fi
+    sleep 0.1
+done
+if [ ! -f "$autosuggest_snapshot" ]; then
+    echo "zsh autosuggestion snapshot never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$autosuggest_snapshot" | head -n 1)"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+target_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.4 * cell) }')"
+target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+xdotool mousemove "$target_x" "$target_y"
+xdotool click 1
+sleep 0.2
+xdotool type --window "$window_id" --delay 10 "X"
+for _ in {1..120}; do
+    if grep -R '❯ gXit' "$snapshot_dir" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "click did not move cursor inside real zsh buffer with an autosuggestion present" >&2
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+for file in "$snapshot_dir"/*.txt; do
+    [ -f "$file" ] || continue
+    echo "===$file" >&2
+    sed -n '1,14p' "$file" >&2
+done
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-zsh-autosuggest-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            snapshots.to_str().expect("snapshot dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+            zdot.to_str().expect("zdot path utf8"),
+            autosuggest_snapshot
+                .to_str()
+                .expect("autosuggest snapshot path utf8"),
+        ])
+        .output()
+        .expect("run gtk zsh autosuggestion e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk zsh autosuggestion e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let snapshot = read_to_string(&autosuggest_snapshot).expect("read autosuggest snapshot");
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&snapshot).expect("valid autosuggest snapshot json");
+    let line = snapshot["lines"]
+        .as_array()
+        .expect("snapshot lines")
+        .iter()
+        .find(|line| {
+            line["cells"]
+                .as_array()
+                .expect("line cells")
+                .iter()
+                .filter_map(|cell| cell["text"].as_str())
+                .collect::<String>()
+                .contains("❯ git status")
+        })
+        .expect("autosuggestion line");
+    let cells = line["cells"].as_array().expect("line cells");
+    assert_eq!(cells[2]["text"], "g");
+    assert_eq!(cells[5]["text"], " ");
+    assert_eq!(cells[6]["text"], "s");
+    assert_eq!(cells[5]["fg"], "#666666");
+    assert_eq!(cells[6]["fg"], "#666666");
+
+    let text = snapshot_paths(&snapshots)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .map(|path| read_to_string(path).expect("read text snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("❯ gXit"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

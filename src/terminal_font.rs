@@ -24,9 +24,13 @@ pub fn layout_for(widget: &gtk::DrawingArea, markup: &str) -> pango::Layout {
 }
 
 pub fn metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalFontMetrics> {
-    let metrics = widget.pango_context().metrics(Some(&description()), None);
-    let cell_width = metrics.approximate_digit_width() as f64 / pango::SCALE as f64;
-    let line_height = metrics.height() as f64 / pango::SCALE as f64;
+    let description = description();
+    let sample = "00000000000000000000000000000000";
+    let layout = widget.create_pango_layout(Some(sample));
+    layout.set_font_description(Some(&description));
+    let (sample_width, line_height) = layout.pixel_size();
+    let cell_width = sample_width as f64 / sample.chars().count() as f64;
+    let line_height = line_height as f64;
     if cell_width <= 0.0 || line_height <= 0.0 {
         return None;
     }
