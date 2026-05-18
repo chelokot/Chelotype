@@ -33,7 +33,7 @@ Prompt-to-artifact checklist
   - Status: partial; real keyboard input reaches the shell through GTK, with more IME/layout scenarios still needed.
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
-  - Coverage: local drag selection tests, SGR mouse reporting tests, headless mouse drag selection e2e, and real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`.
+  - Coverage: local drag selection tests, SGR mouse reporting tests, headless mouse drag selection e2e, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
   - Status: partial; no clipboard export and no shell cursor placement integration.
 - Resize/reflow
   - Evidence: `TerminalBackend::resize` updates PTY winsize and Ghostty terminal dimensions.

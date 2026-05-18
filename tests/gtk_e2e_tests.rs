@@ -143,9 +143,9 @@ fn gtk_e2e_exports_colored_cells_under_xvfb() {
         .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
         .env(
             "CHELOTYPE_UI_E2E_INPUT",
-            "printf '\\033[31mGTK_RED_STYLE\\033[0m\\n'\n",
+            "printf '\\033[31mGTK_RED_STYLE\\033[0m\\n'; printf 'GTK_COLOR_DONE\\n'\n",
         )
-        .env("CHELOTYPE_UI_E2E_EXPECT", "GTK_RED_STYLE")
+        .env("CHELOTYPE_UI_E2E_EXPECT", "GTK_COLOR_DONE")
         .output()
         .expect("run gtk color e2e binary under xvfb");
 
@@ -362,6 +362,110 @@ exit 1
         .collect::<Vec<_>>()
         .join("\n");
     assert!(json.contains("\"selected_text\": \"MOUSE_SELECT_OK"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_forwards_terminal_mouse_reporting_to_pty_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk mouse reporting e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-mouse-report-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+cmd="stty raw -echo; printf '\033[?1000h\033[?1006h'; dd bs=1 count=9 2>/dev/null | od -An -tx1; printf '\033[?1006l\033[?1000l'; stty sane; printf '\nMOUSE_REPORT_DONE\n'"
+xdotool type --window "$window_id" --delay 1 "$cmd"
+xdotool key --window "$window_id" Return
+sleep 1
+xdotool mousemove 20 115
+xdotool click 1
+for _ in {1..100}; do
+    if grep -R 'MOUSE_REPORT_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'MOUSE_REPORT_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "mouse-report command never completed" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+if grep -R '1b 5b 3c 30 3b 31 3b 33 4d' "$snapshot_dir" >/dev/null 2>&1; then
+    exit 0
+fi
+echo "shell did not receive SGR mouse press bytes" >&2
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+for file in "$snapshot_dir"/*.txt; do
+    [ -f "$file" ] || continue
+    echo "===$file" >&2
+    sed -n '1,12p' "$file" >&2
+done
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-mouse-report-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+        ])
+        .output()
+        .expect("run gtk mouse reporting e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk mouse reporting e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let text = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .map(|path| read_to_string(path).expect("read text snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("MOUSE_REPORT_DONE"));
+    assert!(text.contains("1b 5b 3c 30 3b 31 3b 33 4d"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
