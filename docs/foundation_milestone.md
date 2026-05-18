@@ -31,7 +31,7 @@ Current state audit
 - Partial: `src/mouse.rs` defines testable SGR mouse event encoding, `src/interaction.rs` owns the pure pointer state machine, `backend.rs` exposes terminal mouse mode state, and `app.rs` forwards click press/release/drag events from the GTK overlay to the PTY only when the corresponding SGR mouse reporting mode is enabled.
 - Partial: `src/selection.rs` defines a typed half-open grid selection model with extraction tests, `src/render.rs` can highlight selected cells from terminal grid coordinates, and `app.rs` starts local drag selection when terminal mouse reporting is not active.
 - Partial: `libghostty-vt` research, ADR evidence, and local Ghostling configure attempt are recorded in `docs/libghostty_spike_findings.md` and `docs/adr_terminal_core.md`; build is blocked by missing Zig 0.15.x.
-- Missing: custom drawing renderer; current renderer still uses GTK labels and full markup replacement.
+- Partial: `src/canvas.rs` provides a GTK `DrawingArea` render surface that draws terminal markup and caret itself from `RenderOutput`; this replaces GTK labels in the active app path, but still uses full-frame Pango markup rather than an incremental cell renderer.
 - Weak: resize is covered at backend level, but not yet by headless GTK e2e.
 - Weak: first-class mouse support has mode-aware click press/release/drag plumbing and a local grid selection model, but selection is not yet exported to clipboard and still lacks headless GTK drag e2e.
 - Partial: active binary-level headless diagnostics exercise backend/input/interaction/render paths, but GTK window event injection e2e is still missing.

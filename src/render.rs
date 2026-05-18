@@ -26,7 +26,7 @@ pub struct RenderLine {
     pub markup: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct RenderFrame {
     pub history_markup: String,
     pub input_markup: String,
@@ -35,6 +35,7 @@ pub struct RenderFrame {
     pub lines: Vec<RenderLine>,
 }
 
+#[derive(Clone)]
 pub struct RenderOutput {
     pub history_markup: String,
     pub input_markup: String,

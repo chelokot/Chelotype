@@ -2,6 +2,7 @@ pub mod app;
 pub mod backend;
 #[cfg(feature = "legacy-vte-bridge")]
 pub mod bridge;
+pub mod canvas;
 pub mod diagnostics;
 pub mod input;
 pub mod interaction;
