@@ -6,7 +6,7 @@ use crate::interaction::{InteractionEffect, PointerInteraction};
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::Renderer;
 use crate::selection::SelectionRange;
-use crate::snapshot::write_snapshot;
+use crate::snapshot::write_snapshot_with_selection;
 use adw::Application;
 use adw::prelude::*;
 use gtk::glib;
@@ -57,6 +57,7 @@ fn build_ui(app: &Application) {
     let pointer_interaction =
         std::rc::Rc::new(std::cell::RefCell::new(PointerInteraction::default()));
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
+    let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -87,14 +88,21 @@ fn build_ui(app: &Application) {
         let metrics = cell_metrics.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
         let pointer_interaction = pointer_interaction.clone();
         click_controller.connect_pressed(move |gesture, _press_count, x, y| {
+            crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
             if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
+                crate::logging::debug_log(&format!(
+                    "mouse press grid col={} row={}",
+                    position.column, position.row
+                ));
                 let button = mouse_button_from_gesture(gesture).unwrap_or(MouseButton::Left);
                 let effects = pointer_interaction
                     .borrow_mut()
                     .press(mode.get(), button, position);
-                apply_interaction_effects(effects, &backend, &selection);
+                crate::logging::debug_log(&format!("mouse press effects={effects:?}"));
+                apply_interaction_effects(effects, &backend, &selection, &selection_dirty);
             }
         });
     }
@@ -103,13 +111,20 @@ fn build_ui(app: &Application) {
         let metrics = cell_metrics.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
         let pointer_interaction = pointer_interaction.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
+            crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
             if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
+                crate::logging::debug_log(&format!(
+                    "mouse release grid col={} row={}",
+                    position.column, position.row
+                ));
                 let effects = pointer_interaction
                     .borrow_mut()
                     .release(mode.get(), position);
-                apply_interaction_effects(effects, &backend, &selection);
+                crate::logging::debug_log(&format!("mouse release effects={effects:?}"));
+                apply_interaction_effects(effects, &backend, &selection, &selection_dirty);
             }
         });
     }
@@ -121,13 +136,20 @@ fn build_ui(app: &Application) {
         let metrics = cell_metrics.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
         let pointer_interaction = pointer_interaction.clone();
         motion_controller.connect_motion(move |_controller, x, y| {
+            crate::logging::debug_log(&format!("mouse motion x={x:.1} y={y:.1}"));
             if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
+                crate::logging::debug_log(&format!(
+                    "mouse motion grid col={} row={}",
+                    position.column, position.row
+                ));
                 let effects = pointer_interaction
                     .borrow_mut()
                     .motion(mode.get(), position);
-                apply_interaction_effects(effects, &backend, &selection);
+                crate::logging::debug_log(&format!("mouse motion effects={effects:?}"));
+                apply_interaction_effects(effects, &backend, &selection, &selection_dirty);
             }
         });
     }
@@ -177,7 +199,7 @@ fn build_ui(app: &Application) {
                     .all(|expected| text.contains(expected))
                 {
                     gtk::test_widget_wait_for_draw(canvas.widget());
-                    let _ = write_snapshot(content, "gtk_e2e");
+                    let _ = write_snapshot_with_selection(content, "gtk_e2e", selection.get());
                     app_for_tick.quit();
                     return glib::ControlFlow::Break;
                 }
@@ -187,10 +209,12 @@ fn build_ui(app: &Application) {
                 }
             }
             if snapshot_enabled
-                && last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+                && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+                    || selection_dirty.replace(false))
             {
                 *last_snapshot.borrow_mut() = std::time::Instant::now();
-                let _ = crate::snapshot::write_snapshot(content, "frame");
+                crate::logging::debug_log(&format!("snapshot selection {:?}", selection.get()));
+                let _ = write_snapshot_with_selection(content, "frame", selection.get());
             }
         }
         glib::ControlFlow::Continue
@@ -254,13 +278,18 @@ fn apply_interaction_effects(
     effects: Vec<InteractionEffect>,
     backend: &std::rc::Rc<std::cell::RefCell<TerminalBackend>>,
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+    selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
 ) {
     for effect in effects {
         match effect {
             InteractionEffect::Write(bytes) => {
                 let _ = backend.borrow_mut().write(&bytes);
             }
-            InteractionEffect::SelectionChanged(range) => selection.set(range),
+            InteractionEffect::SelectionChanged(range) => {
+                crate::logging::debug_log(&format!("selection changed {range:?}"));
+                selection.set(range);
+                selection_dirty.set(true);
+            }
         }
     }
 }

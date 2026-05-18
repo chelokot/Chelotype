@@ -1,5 +1,6 @@
 use crate::backend::RenderableContentOwned;
 use crate::cell_text::lines_to_text;
+use crate::selection::{SelectionRange, selected_text};
 use crate::terminal_grid::{TerminalCell, TerminalLineMetadata, TerminalSemanticPrompt};
 use serde::Serialize;
 use std::fs::{File, create_dir_all};
@@ -29,6 +30,8 @@ struct SnapshotJson {
     cursor_visible: bool,
     display_offset: usize,
     mouse: MouseJson,
+    selection: Option<SelectionRange>,
+    selected_text: Option<String>,
     text: String,
     lines: Vec<LineJson>,
 }
@@ -51,6 +54,15 @@ struct MouseJson {
 }
 
 pub fn write_snapshot(snapshot: RenderableContentOwned, label: &str) -> Option<PathBuf> {
+    write_snapshot_with_selection(snapshot, label, None)
+}
+
+pub fn write_snapshot_with_selection(
+    snapshot: RenderableContentOwned,
+    label: &str,
+    selection: Option<SelectionRange>,
+) -> Option<PathBuf> {
+    crate::logging::debug_log(&format!("write snapshot selection {selection:?}"));
     let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
         .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
     let ts = SystemTime::now()
@@ -113,6 +125,8 @@ pub fn write_snapshot(snapshot: RenderableContentOwned, label: &str) -> Option<P
             sgr: snapshot.mouse.sgr,
             utf8: snapshot.mouse.utf8,
         },
+        selection,
+        selected_text: selection.map(|range| selected_text(&snapshot.lines, range)),
         text: snapshot_plain_from_lines(&snapshot.lines),
         lines: lines_json,
     };
