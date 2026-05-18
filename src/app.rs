@@ -10,7 +10,7 @@ use crate::render::Renderer;
 use crate::selection::{SelectionRange, selected_text};
 use crate::snapshot::write_snapshot_with_selection;
 use crate::terminal_font::metrics_for_widget;
-use crate::workspace::TerminalWorkspace;
+use crate::workspace::{PaneId, TerminalWorkspace};
 use adw::Application;
 use adw::prelude::*;
 use gtk::glib;
@@ -24,8 +24,23 @@ pub fn run_app() -> glib::ExitCode {
 }
 
 fn build_ui(app: &Application) {
+    let workspace = TerminalWorkspace::spawn_shell().expect("spawn terminal workspace");
+    let workspace_rc = std::rc::Rc::new(std::cell::RefCell::new(workspace));
+    let force_snapshot = std::rc::Rc::new(std::cell::Cell::new(true));
+
+    let tab_strip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    tab_strip.add_css_class("term-tab-strip");
+    let new_tab_button = gtk::Button::builder()
+        .label("+")
+        .tooltip_text("New terminal")
+        .build();
+    new_tab_button.add_css_class("flat");
+    let title = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    title.append(&tab_strip);
+    title.append(&new_tab_button);
+
     let header = adw::HeaderBar::builder()
-        .title_widget(&gtk::Label::new(Some("Chelotype")))
+        .title_widget(&title)
         .show_start_title_buttons(true)
         .show_end_title_buttons(true)
         .build();
@@ -45,8 +60,6 @@ fn build_ui(app: &Application) {
         .content(&content)
         .build();
 
-    let workspace = TerminalWorkspace::spawn_shell().expect("spawn terminal workspace");
-    let workspace_rc = std::rc::Rc::new(std::cell::RefCell::new(workspace));
     apply_style(canvas.widget());
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
     let last_snapshot = std::rc::Rc::new(std::cell::RefCell::new(std::time::Instant::now()));
@@ -66,13 +79,53 @@ fn build_ui(app: &Application) {
     let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
     let last_content = std::rc::Rc::new(std::cell::RefCell::new(None::<RenderableContentOwned>));
 
+    update_tab_strip(
+        &tab_strip,
+        workspace_rc.clone(),
+        force_snapshot.clone(),
+        selection.clone(),
+        selection_dirty.clone(),
+    );
+    {
+        let workspace = workspace_rc.clone();
+        let tab_strip = tab_strip.clone();
+        let force_snapshot = force_snapshot.clone();
+        let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
+        let last_size = last_size.clone();
+        new_tab_button.connect_clicked(move |_| {
+            let new_pane = workspace.borrow_mut().add_shell_pane();
+            if let Ok(id) = new_pane {
+                activate_workspace_pane(
+                    &workspace,
+                    id,
+                    &force_snapshot,
+                    &selection,
+                    &selection_dirty,
+                    last_size.get(),
+                );
+                update_tab_strip(
+                    &tab_strip,
+                    workspace.clone(),
+                    force_snapshot.clone(),
+                    selection.clone(),
+                    selection_dirty.clone(),
+                );
+            }
+        });
+    }
+
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
         let workspace = workspace_rc.clone();
         let content = last_content.clone();
         let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
         let canvas_widget = canvas.widget().clone();
+        let force_snapshot = force_snapshot.clone();
+        let tab_strip = tab_strip.clone();
+        let last_size = last_size.clone();
         key_controller.connect_key_pressed(move |_ctrl, key, _code, state| {
             if let Some(action) = key_to_action(key, state) {
                 match action {
@@ -84,6 +137,60 @@ fn build_ui(app: &Application) {
                     }
                     KeyAction::CopySelection => {
                         copy_selection_to_clipboard(&canvas_widget, &content, selection.get());
+                    }
+                    KeyAction::NewPane => {
+                        let new_pane = workspace.borrow_mut().add_shell_pane();
+                        if let Ok(id) = new_pane {
+                            activate_workspace_pane(
+                                &workspace,
+                                id,
+                                &force_snapshot,
+                                &selection,
+                                &selection_dirty,
+                                last_size.get(),
+                            );
+                            update_tab_strip(
+                                &tab_strip,
+                                workspace.clone(),
+                                force_snapshot.clone(),
+                                selection.clone(),
+                                selection_dirty.clone(),
+                            );
+                        }
+                    }
+                    KeyAction::NextPane => {
+                        workspace.borrow_mut().activate_next();
+                        force_active_workspace_snapshot(
+                            &force_snapshot,
+                            &selection,
+                            &selection_dirty,
+                            last_size.get(),
+                            &workspace,
+                        );
+                        update_tab_strip(
+                            &tab_strip,
+                            workspace.clone(),
+                            force_snapshot.clone(),
+                            selection.clone(),
+                            selection_dirty.clone(),
+                        );
+                    }
+                    KeyAction::PreviousPane => {
+                        workspace.borrow_mut().activate_previous();
+                        force_active_workspace_snapshot(
+                            &force_snapshot,
+                            &selection,
+                            &selection_dirty,
+                            last_size.get(),
+                            &workspace,
+                        );
+                        update_tab_strip(
+                            &tab_strip,
+                            workspace.clone(),
+                            force_snapshot.clone(),
+                            selection.clone(),
+                            selection_dirty.clone(),
+                        );
                     }
                 }
                 glib::Propagation::Stop
@@ -263,9 +370,13 @@ fn build_ui(app: &Application) {
         {
             last_size.set(Some(size));
         }
-        let terminal_content = workspace_rc
-            .borrow_mut()
-            .snapshot_active_renderable_if_dirty();
+        let terminal_content = if force_snapshot.replace(false) {
+            workspace_rc.borrow_mut().snapshot_active_renderable()
+        } else {
+            workspace_rc
+                .borrow_mut()
+                .snapshot_active_renderable_if_dirty()
+        };
         let terminal_changed = terminal_content.is_some();
         if let Some(content) = terminal_content {
             mouse_mode.set(content.mouse);
@@ -314,6 +425,87 @@ fn build_ui(app: &Application) {
     });
 
     window.present();
+}
+
+fn update_tab_strip(
+    tab_strip: &gtk::Box,
+    workspace: std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    selection: std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+    selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
+) {
+    while let Some(child) = tab_strip.first_child() {
+        tab_strip.remove(&child);
+    }
+    let panes = workspace.borrow().panes();
+    for (idx, pane) in panes.into_iter().enumerate() {
+        let tab = gtk::ToggleButton::builder()
+            .label(format!("{}", idx + 1))
+            .active(pane.active)
+            .tooltip_text(format!("Terminal {}", idx + 1))
+            .build();
+        tab.add_css_class("term-tab");
+        let workspace = workspace.clone();
+        let force_snapshot = force_snapshot.clone();
+        let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
+        let tab_strip_for_click = tab_strip.clone();
+        tab.connect_clicked(move |_| {
+            let activated = workspace.borrow_mut().activate(pane.id);
+            if activated {
+                force_active_workspace_snapshot(
+                    &force_snapshot,
+                    &selection,
+                    &selection_dirty,
+                    None,
+                    &workspace,
+                );
+                update_tab_strip(
+                    &tab_strip_for_click,
+                    workspace.clone(),
+                    force_snapshot.clone(),
+                    selection.clone(),
+                    selection_dirty.clone(),
+                );
+            }
+        });
+        tab_strip.append(&tab);
+    }
+}
+
+fn activate_workspace_pane(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    id: PaneId,
+    force_snapshot: &std::rc::Rc<std::cell::Cell<bool>>,
+    selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+    selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    size: Option<ScreenSize>,
+) {
+    let activated = workspace.borrow_mut().activate(id);
+    if activated {
+        force_active_workspace_snapshot(
+            force_snapshot,
+            selection,
+            selection_dirty,
+            size,
+            workspace,
+        );
+    }
+}
+
+fn force_active_workspace_snapshot(
+    force_snapshot: &std::rc::Rc<std::cell::Cell<bool>>,
+    selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+    selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    size: Option<ScreenSize>,
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+) {
+    if let Some(size) = size {
+        let _ = workspace.borrow_mut().resize_active(size);
+    }
+    selection.set(None);
+    selection_dirty.set(true);
+    force_snapshot.set(true);
 }
 
 #[derive(Clone)]
@@ -406,6 +598,14 @@ fn apply_style(canvas: &gtk::DrawingArea) {
         drawingarea.term-canvas {
             color: #e5e7eb;
             background: transparent;
+        }
+        .term-tab-strip {
+            border-spacing: 0.25rem;
+        }
+        button.term-tab {
+            min-width: 2rem;
+            min-height: 1.75rem;
+            padding: 0 0.5rem;
         }
     ";
     let provider = gtk::CssProvider::new();

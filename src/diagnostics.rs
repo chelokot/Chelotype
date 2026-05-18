@@ -133,6 +133,9 @@ impl HeadlessRuntime {
                         KeyAction::Write(bytes) => backend.write(&bytes),
                         KeyAction::ScrollDisplay(lines) => backend.scroll_display(lines),
                         KeyAction::CopySelection => Ok(()),
+                        KeyAction::NewPane | KeyAction::NextPane | KeyAction::PreviousPane => {
+                            Ok(())
+                        }
                     }
                 } else {
                     Ok(())

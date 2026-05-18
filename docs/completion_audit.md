@@ -8,8 +8,8 @@ Prompt-to-artifact checklist
 
 - One real PTY per terminal session
   - Evidence: `src/backend.rs` owns one `portable_pty` master/child per `TerminalBackend`; `src/workspace.rs` stores panes as `TerminalBackend` owners and the GTK app talks to the active workspace pane.
-  - Coverage: `backend_writes_to_single_pty_and_reads_shell_output`, `workspace_tracks_active_pane_identity`, and `workspace_keeps_each_pane_terminal_state_isolated`.
-  - Status: partial; the internal workspace/pane model exists, but there is no tab/split UI yet.
+  - Coverage: `backend_writes_to_single_pty_and_reads_shell_output`, `workspace_tracks_active_pane_identity`, `workspace_keeps_each_pane_terminal_state_isolated`, and `gtk_e2e_creates_and_switches_terminal_tabs_under_xvfb`.
+  - Status: partial; workspace panes and visible tabs exist, but split panes are not implemented yet.
 - One terminal-core state / shell-driven source of truth
   - Evidence: `src/backend.rs` owns one `libghostty_vt::Terminal`; PTY reader bytes are fed into that terminal state.
   - Coverage: backend integration tests and headless snapshots.
@@ -59,9 +59,9 @@ Prompt-to-artifact checklist
   - Evidence: `scripts/with-zig.sh`, binary-level headless mode, clean `zsh -f` diagnostics fixture, README setup/run commands, and Xvfb-based GTK e2e test.
   - Status: partial; no CI container image yet.
 - Workspaces, tabs/splits, command blocks, smooth scrolling
-  - Evidence: `src/workspace.rs` provides active-pane routing and multi-pane ownership; `src/app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active workspace pane; `src/command_blocks.rs` builds semantic-prompt command blocks.
-  - Coverage: workspace unit tests prove pane identity switching and isolated terminal state across two PTYs; command-block unit tests and renderer tests prove prompt/continuation/output row boundaries.
-  - Status: partial; no tab/split UI, smooth scroll model, or command-block UI yet.
+  - Evidence: `src/workspace.rs` provides active-pane routing and multi-pane ownership; `src/app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active workspace pane; the header exposes tab buttons and a new-tab button; `src/command_blocks.rs` builds semantic-prompt command blocks.
+  - Coverage: workspace unit tests prove pane identity switching and isolated terminal state across two PTYs; input unit tests cover tab shortcuts; GTK e2e creates a second terminal tab, verifies active pane isolation, and switches back; command-block unit tests and renderer tests prove prompt/continuation/output row boundaries.
+  - Status: partial; visible tabs exist, but split panes, smooth scroll model, and command-block UI are not implemented yet.
 
 Current green commands
 
@@ -72,4 +72,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor position assertions, semantic-prompt-aware shell cursor placement beyond soft wraps, advanced grapheme/IME tests, tab/split UI on top of the workspace model, command-block UI, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor position assertions, semantic-prompt-aware shell cursor placement beyond soft wraps, advanced grapheme/IME tests, split-pane UI, command-block UI, smooth scrolling, and full GTK paint-path perf gates.

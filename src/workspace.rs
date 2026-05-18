@@ -5,6 +5,12 @@ use std::io;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaneId(u64);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneInfo {
+    pub id: PaneId,
+    pub active: bool,
+}
+
 pub struct TerminalWorkspace {
     panes: Vec<TerminalPane>,
     active: PaneId,
@@ -53,6 +59,11 @@ impl TerminalWorkspace {
         Ok(id)
     }
 
+    pub fn add_shell_pane(&mut self) -> io::Result<PaneId> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        self.add_pane_with(CommandBuilder::new(shell))
+    }
+
     pub fn activate(&mut self, id: PaneId) -> bool {
         if self.panes.iter().any(|pane| pane.id == id) {
             self.active = id;
@@ -60,6 +71,24 @@ impl TerminalWorkspace {
         } else {
             false
         }
+    }
+
+    pub fn activate_next(&mut self) {
+        self.activate_relative(1);
+    }
+
+    pub fn activate_previous(&mut self) {
+        self.activate_relative(-1);
+    }
+
+    pub fn panes(&self) -> Vec<PaneInfo> {
+        self.panes
+            .iter()
+            .map(|pane| PaneInfo {
+                id: pane.id,
+                active: pane.id == self.active,
+            })
+            .collect()
     }
 
     pub fn write_active(&mut self, data: &[u8]) -> io::Result<()> {
@@ -89,6 +118,20 @@ impl TerminalWorkspace {
             .find(|pane| pane.id == active)
             .map(|pane| &mut pane.backend)
             .expect("active pane must exist")
+    }
+
+    fn activate_relative(&mut self, delta: isize) {
+        if self.panes.is_empty() {
+            return;
+        }
+        let current = self
+            .panes
+            .iter()
+            .position(|pane| pane.id == self.active)
+            .expect("active pane must exist");
+        let count = self.panes.len() as isize;
+        let next = (current as isize + delta).rem_euclid(count) as usize;
+        self.active = self.panes[next].id;
     }
 }
 
@@ -136,6 +179,46 @@ mod tests {
         assert!(workspace.activate(first));
         assert_eq!(workspace.active_pane_id(), first);
         assert!(!workspace.activate(PaneId(999)));
+        let _ = workspace.write_active(b"exit\n");
+    }
+
+    #[test]
+    fn workspace_cycles_active_panes() {
+        let mut workspace = TerminalWorkspace::spawn_with(shell_command()).expect("spawn pane");
+        let first = workspace.active_pane_id();
+        let second = workspace
+            .add_pane_with(shell_command())
+            .expect("spawn pane");
+        let third = workspace
+            .add_pane_with(shell_command())
+            .expect("spawn pane");
+
+        workspace.activate_next();
+        assert_eq!(workspace.active_pane_id(), second);
+        workspace.activate_next();
+        assert_eq!(workspace.active_pane_id(), third);
+        workspace.activate_next();
+        assert_eq!(workspace.active_pane_id(), first);
+        workspace.activate_previous();
+        assert_eq!(workspace.active_pane_id(), third);
+        assert_eq!(
+            workspace.panes(),
+            vec![
+                PaneInfo {
+                    id: first,
+                    active: false,
+                },
+                PaneInfo {
+                    id: second,
+                    active: false,
+                },
+                PaneInfo {
+                    id: third,
+                    active: true,
+                },
+            ]
+        );
+
         let _ = workspace.write_active(b"exit\n");
     }
 

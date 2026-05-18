@@ -5,9 +5,19 @@ pub enum KeyAction {
     Write(Vec<u8>),
     ScrollDisplay(i32),
     CopySelection,
+    NewPane,
+    NextPane,
+    PreviousPane,
 }
 
 pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyAction> {
+    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+        match key {
+            gdk::Key::Page_Down => return Some(KeyAction::NextPane),
+            gdk::Key::Page_Up => return Some(KeyAction::PreviousPane),
+            _ => {}
+        }
+    }
     if state.contains(gdk::ModifierType::CONTROL_MASK)
         && state.contains(gdk::ModifierType::SHIFT_MASK)
         && key
@@ -15,6 +25,14 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
             .is_some_and(|ch| ch.eq_ignore_ascii_case(&'c'))
     {
         return Some(KeyAction::CopySelection);
+    }
+    if state.contains(gdk::ModifierType::CONTROL_MASK)
+        && state.contains(gdk::ModifierType::SHIFT_MASK)
+        && key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'t'))
+    {
+        return Some(KeyAction::NewPane);
     }
     if state.contains(gdk::ModifierType::SHIFT_MASK) {
         match key {
@@ -140,6 +158,25 @@ mod tests {
         assert_eq!(
             key_to_action(gdk::Key::c, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::Write(vec![0x03]))
+        );
+    }
+
+    #[test]
+    fn maps_workspace_tab_shortcuts() {
+        assert_eq!(
+            key_to_action(
+                gdk::Key::t,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::NewPane)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::Page_Down, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::NextPane)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::Page_Up, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::PreviousPane)
         );
     }
 }
