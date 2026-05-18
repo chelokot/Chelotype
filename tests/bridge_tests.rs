@@ -1,5 +1,8 @@
+#![cfg(feature = "legacy-vte-bridge")]
+
 use chelotype::bridge::{
-    EntryHandle, InputBridge, LabelHandle, TerminalAdapter, html_to_pango, insert_caret,
+    CaretHandle, EntryHandle, InputBridge, LabelHandle, TerminalAdapter, html_to_pango,
+    insert_caret,
 };
 use gtk::gdk;
 use serial_test::serial;
@@ -47,6 +50,32 @@ impl LabelHandle for FakeLabel {
     fn index_at_x(&self, x: f64, _y: f64) -> Option<usize> {
         if x < 0.5 { Some(0) } else { Some(1) }
     }
+
+    fn caret_offset(&self, caret_pos: usize) -> f64 {
+        caret_pos as f64
+    }
+}
+
+#[derive(Clone, Default)]
+struct FakeCaret {
+    visible: Rc<Cell<bool>>,
+    offset: Rc<Cell<f64>>,
+}
+
+impl FakeCaret {
+    fn visible_value(&self) -> bool {
+        self.visible.get()
+    }
+}
+
+impl CaretHandle for FakeCaret {
+    fn set_offset(&self, x: f64) {
+        self.offset.set(x);
+    }
+
+    fn set_visible(&self, visible: bool) {
+        self.visible.set(visible);
+    }
 }
 
 #[derive(Clone, Default)]
@@ -86,6 +115,7 @@ struct FakeTerminal {
     line_html: Rc<RefCell<String>>,
     line_text: Rc<RefCell<String>>,
     cursor: Rc<RefCell<(i64, i64)>>,
+    columns: i64,
 }
 
 impl FakeTerminal {
@@ -95,6 +125,7 @@ impl FakeTerminal {
             line_html: Rc::new(RefCell::new(text.to_string())),
             line_text: Rc::new(RefCell::new(text.to_string())),
             cursor: Rc::new(RefCell::new((text.len() as i64, 0))),
+            columns: text.len() as i64 + 10,
         }
     }
 
@@ -121,9 +152,14 @@ impl TerminalAdapter for FakeTerminal {
     fn line_text(&self, _row: i64) -> String {
         self.line_text.borrow().clone()
     }
+
+    fn column_count(&self) -> i64 {
+        self.columns
+    }
 }
 
 #[test]
+#[serial]
 fn converts_font_color_to_span() {
     let input = r##"<pre><font color="#ff0000">abc</font></pre>"##;
     let output = html_to_pango(input);
@@ -131,6 +167,7 @@ fn converts_font_color_to_span() {
 }
 
 #[test]
+#[serial]
 fn converts_font_color_case_insensitive() {
     let input = r##"<PRE><FONT COLOR="#00ffcc">ok</FONT></PRE>"##;
     let output = html_to_pango(input);
@@ -138,6 +175,7 @@ fn converts_font_color_case_insensitive() {
 }
 
 #[test]
+#[serial]
 fn strips_div_and_pre() {
     let input = "<div><pre>text</pre></div>";
     let output = html_to_pango(input);
@@ -145,6 +183,7 @@ fn strips_div_and_pre() {
 }
 
 #[test]
+#[serial]
 fn strips_pre_with_attributes() {
     let input = r#"<pre style="padding:4px"><span style="color:#00ff00">ok</span></pre>"#;
     let output = html_to_pango(input);
@@ -152,6 +191,7 @@ fn strips_pre_with_attributes() {
 }
 
 #[test]
+#[serial]
 fn normalizes_underline_style() {
     let input = r#"<u style="text-decoration-style:solid">u</u>"#;
     let output = html_to_pango(input);
@@ -159,22 +199,25 @@ fn normalizes_underline_style() {
 }
 
 #[test]
+#[serial]
 fn caret_injected_at_position() {
     let markup = html_to_pango(r##"<font color="#ff0000">ab</font>"##);
     let with_caret = insert_caret(&markup, 1);
-    assert!(with_caret.contains("|"));
+    assert!(with_caret.contains("▏"));
     assert!(with_caret.contains("a"));
     assert!(with_caret.contains("b"));
 }
 
 #[test]
+#[serial]
 fn caret_injected_past_end() {
     let markup = html_to_pango("ab");
     let with_caret = insert_caret(&markup, 5);
-    assert!(with_caret.contains("|"));
+    assert!(with_caret.contains("▏"));
 }
 
 #[test]
+#[serial]
 fn converts_span_style_color() {
     let input = r##"<span style="color:#123456">val</span>"##;
     let output = html_to_pango(input);
@@ -182,168 +225,231 @@ fn converts_span_style_color() {
 }
 
 #[test]
+#[serial]
 fn sync_applies_markup_and_text() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("<font color=\"#ff0000\">x</font>");
-    let bridge = InputBridge::new(entry.clone(), ghost.clone(), term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("x");
+    shadow.set_line("x", Some("<font color=\"#ff0000\">x</font>"), 1);
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(
+        entry.clone(),
+        ghost.clone(),
+        caret.clone(),
+        shadow.clone(),
+        output,
+    );
     bridge.sync_from_terminal();
     let markup = ghost.markup.borrow();
     assert!(markup.contains("foreground=\"#ff0000\">x</span>"));
-    assert!(markup.contains("|"));
-    assert_eq!(
-        entry.text_value().as_str(),
-        "<font color=\"#ff0000\">x</font>"
-    );
+    assert_eq!(entry.text_value().as_str(), "x");
+    assert!(caret.visible_value());
 }
 
 #[test]
+#[serial]
 fn handle_key_forwards_enter() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow, output.clone());
     assert!(bridge.handle_key(gdk::Key::Return, gdk::ModifierType::empty()));
-    assert_eq!(term.fed.borrow().as_slice(), b"\n");
+    assert_eq!(output.fed.borrow().as_slice(), b"\n");
 }
 
 #[test]
+#[serial]
 fn handle_key_allows_ctrl_c() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     assert!(bridge.handle_key(gdk::Key::c, gdk::ModifierType::CONTROL_MASK));
-    assert_eq!(term.fed.borrow().as_slice(), &[0x03]);
+    assert_eq!(shadow.fed.borrow().as_slice(), &[0x03]);
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn handle_key_plain_text_is_not_consumed() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     assert!(!bridge.handle_key(gdk::Key::a, gdk::ModifierType::empty()));
-    assert!(term.fed.borrow().is_empty());
+    assert!(shadow.fed.borrow().is_empty());
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn handle_key_alt_prefix() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     assert!(bridge.handle_key(gdk::Key::a, gdk::ModifierType::ALT_MASK));
-    assert_eq!(term.fed.borrow().as_slice(), b"\x1ba");
+    assert_eq!(shadow.fed.borrow().as_slice(), b"\x1ba");
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn alt_key_sets_skip_for_insert() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     assert!(bridge.handle_key(gdk::Key::b, gdk::ModifierType::ALT_MASK));
     bridge.handle_insert_text("b");
-    assert_eq!(term.fed.borrow().as_slice(), b"\x1bb");
+    assert_eq!(shadow.fed.borrow().as_slice(), b"\x1bb");
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn insert_text_feeds_terminal() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     assert!(bridge.handle_insert_text("abc"));
-    assert_eq!(term.fed.borrow().as_slice(), b"abc");
+    assert_eq!(shadow.fed.borrow().as_slice(), b"abc");
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn insert_text_is_skipped_when_syncing() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     bridge.set_syncing_for_test(true);
     assert!(bridge.handle_insert_text("abc"));
-    assert_eq!(term.fed.borrow().as_slice(), b"abc");
+    assert_eq!(shadow.fed.borrow().as_slice(), b"abc");
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn insert_text_is_skipped_when_suppressed() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     bridge.set_suppress_insert_for_test(true);
     assert!(!bridge.handle_insert_text("abc"));
-    assert!(term.fed.borrow().is_empty());
+    assert!(shadow.fed.borrow().is_empty());
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn sync_sets_cursor_position() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
+    let caret = FakeCaret::default();
     let term = FakeTerminal::with_line("abc");
     term.set_line("abc", None, 2);
-    let bridge = InputBridge::new(entry.clone(), ghost, term);
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry.clone(), ghost, caret, term, output);
     bridge.sync_from_terminal();
     assert_eq!(entry.position_value(), 2);
 }
 
 #[test]
+#[serial]
 fn sync_empty_line_safe() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
+    let caret = FakeCaret::default();
     let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry.clone(), ghost.clone(), term);
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry.clone(), ghost.clone(), caret.clone(), term, output);
     bridge.sync_from_terminal();
     assert_eq!(entry.text_value().as_str(), "");
-    assert!(ghost.markup.borrow().contains("|"));
+    assert!(caret.visible_value());
 }
 
 #[test]
+#[serial]
 fn arrow_keys_send_escape() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     bridge.handle_key(gdk::Key::Left, gdk::ModifierType::empty());
-    assert_eq!(term.fed.borrow().as_slice(), b"\x1b[D");
+    assert_eq!(shadow.fed.borrow().as_slice(), b"\x1b[D");
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn delete_sends_sequence() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
-    let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let caret = FakeCaret::default();
+    let shadow = FakeTerminal::with_line("");
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, shadow.clone(), output.clone());
     bridge.handle_key(gdk::Key::Delete, gdk::ModifierType::empty());
-    assert_eq!(term.fed.borrow().as_slice(), b"\x1b[3~");
+    assert_eq!(shadow.fed.borrow().as_slice(), b"\x1b[3~");
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
+#[serial]
 fn sync_after_typing_updates_markup() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
+    let caret = FakeCaret::default();
     let term = FakeTerminal::with_line("");
-    let bridge = InputBridge::new(entry.clone(), ghost.clone(), term.clone());
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(
+        entry.clone(),
+        ghost.clone(),
+        caret.clone(),
+        term.clone(),
+        output,
+    );
     bridge.handle_key(gdk::Key::t, gdk::ModifierType::empty());
     term.set_line("t", Some("<font color=\"#00ff00\">t</font>"), 1);
     bridge.sync_from_terminal();
     let markup = ghost.markup.borrow();
     assert!(markup.contains("foreground=\"#00ff00\">t</span>"));
-    assert!(markup.contains("|"));
     assert_eq!(entry.text_value().as_str(), "t");
 }
 
 #[test]
 #[serial]
+#[serial]
 fn cursor_notify_from_programmatic_position_does_not_spin() {
     let entry = NotifyingEntry::default();
     let ghost = FakeLabel::default();
+    let caret = FakeCaret::default();
     let term = FakeTerminal::with_line("abc");
-    let bridge = InputBridge::new(entry.clone(), ghost, term.clone());
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry.clone(), ghost, caret, term.clone(), output);
     let loop_counter = Rc::new(Cell::new(0));
     entry.set_on_position({
         let bridge = bridge.clone();
@@ -364,14 +470,18 @@ fn cursor_notify_from_programmatic_position_does_not_spin() {
 }
 
 #[test]
+#[serial]
 fn move_cursor_to_clamps_and_moves() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
+    let caret = FakeCaret::default();
     let term = FakeTerminal::with_line("abc");
     term.set_line("abc", None, 1);
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, term.clone(), output.clone());
     bridge.move_cursor_to(5);
     assert_eq!(term.fed.borrow().as_slice(), b"\x1b[C\x1b[C");
+    assert!(output.fed.borrow().is_empty());
 }
 
 #[test]
@@ -379,31 +489,39 @@ fn move_cursor_to_clamps_and_moves() {
 fn move_cursor_to_ignores_same_position() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
+    let caret = FakeCaret::default();
     let term = FakeTerminal::with_line("abc");
     term.set_line("abc", None, 2);
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, term.clone(), output);
     bridge.move_cursor_to(2);
     assert!(term.fed.borrow().is_empty());
 }
 
 #[test]
 #[serial]
+#[serial]
 fn click_right_half_moves_after_char() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
+    let caret = FakeCaret::default();
     let term = FakeTerminal::with_line("ab");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, term.clone(), output);
     bridge.move_cursor_from_point(1.0, 0.0);
     assert_eq!(term.fed.borrow().as_slice(), b"\x1b[D");
 }
 
 #[test]
 #[serial]
+#[serial]
 fn click_left_half_stays_before_char() {
     let entry = FakeEntry::default();
     let ghost = FakeLabel::default();
+    let caret = FakeCaret::default();
     let term = FakeTerminal::with_line("ab");
-    let bridge = InputBridge::new(entry, ghost, term.clone());
+    let output = FakeTerminal::with_line("");
+    let bridge = InputBridge::new(entry, ghost, caret, term.clone(), output);
     bridge.move_cursor_from_point(0.0, 0.0);
     assert_eq!(term.fed.borrow().as_slice(), b"\x1b[D\x1b[D");
 }

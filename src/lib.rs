@@ -1,4 +1,12 @@
+pub mod app;
+pub mod backend;
+#[cfg(feature = "legacy-vte-bridge")]
 pub mod bridge;
+pub mod diagnostics;
+pub mod input;
+pub mod interaction;
 pub mod logging;
-pub mod terminal;
-pub mod ui;
+pub mod mouse;
+pub mod render;
+pub mod selection;
+pub mod snapshot;

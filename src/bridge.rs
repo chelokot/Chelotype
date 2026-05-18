@@ -41,6 +41,23 @@ pub trait EntryHandle: Clone {
 pub trait LabelHandle: Clone {
     fn set_markup(&self, markup: &str);
     fn index_at_x(&self, x: f64, y: f64) -> Option<usize>;
+    fn caret_offset(&self, caret_pos: usize) -> f64;
+}
+
+#[derive(Clone)]
+pub struct GtkCaretHandle {
+    widget: Label,
+}
+
+impl GtkCaretHandle {
+    pub fn new(widget: Label) -> Self {
+        Self { widget }
+    }
+}
+
+pub trait CaretHandle: Clone {
+    fn set_offset(&self, x: f64);
+    fn set_visible(&self, visible: bool);
 }
 
 impl EntryHandle for GtkEntryHandle {
@@ -69,6 +86,34 @@ impl LabelHandle for GtkLabelHandle {
         let caret_chars = text[..clamped].chars().count() + trailing as usize;
         Some(caret_chars)
     }
+
+    fn caret_offset(&self, caret_pos: usize) -> f64 {
+        let layout = self.widget.layout();
+        let text = layout.text();
+        let mut byte_index = text.len();
+        let mut chars_seen = 0;
+        for (idx, _) in text.char_indices() {
+            if chars_seen == caret_pos {
+                byte_index = idx;
+                break;
+            }
+            chars_seen += 1;
+        }
+        let pos = layout.index_to_pos(byte_index as i32);
+        let half_width = pos.width() as f64 / pango::SCALE as f64 / 2.0;
+        let raw = pos.x() as f64 / pango::SCALE as f64 - half_width;
+        raw.max(0.0)
+    }
+}
+
+impl CaretHandle for GtkCaretHandle {
+    fn set_offset(&self, x: f64) {
+        self.widget.set_margin_start(x.round() as i32);
+    }
+
+    fn set_visible(&self, visible: bool) {
+        self.widget.set_visible(visible);
+    }
 }
 
 #[derive(Clone)]
@@ -91,6 +136,7 @@ pub trait TerminalAdapter: Clone + 'static {
     fn cursor_position(&self) -> (i64, i64);
     fn line_html(&self, row: i64) -> String;
     fn line_text(&self, row: i64) -> String;
+    fn column_count(&self) -> i64;
 }
 
 impl TerminalAdapter for VteTerminalAdapter {
@@ -123,37 +169,56 @@ impl TerminalAdapter for VteTerminalAdapter {
         );
         text.map(|v| v.to_string()).unwrap_or_default()
     }
+
+    fn column_count(&self) -> i64 {
+        self.terminal.column_count()
+    }
 }
 
 #[derive(Clone)]
-pub struct InputBridge<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> {
+pub struct InputBridge<
+    E: EntryHandle + 'static,
+    L: LabelHandle + 'static,
+    C: CaretHandle + 'static,
+    T: TerminalAdapter,
+> {
     entry: E,
     ghost: L,
-    terminal: T,
+    caret: C,
+    shadow_terminal: T,
+    output_terminal: T,
     syncing: Rc<Cell<bool>>,
     suppress_cursor_notify: Rc<Cell<bool>>,
     skip_next_insert: Rc<Cell<bool>>,
     suppress_insert: Rc<Cell<bool>>,
     caret_visible: Rc<Cell<bool>>,
     last_markup: Rc<RefCell<Option<String>>>,
-    #[cfg(not(test))]
-    blink_source: Rc<RefCell<Option<glib::SourceId>>>,
+    recorded: Rc<RefCell<Vec<u8>>>,
+    sync_pending: Rc<Cell<bool>>,
 }
 
-impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> InputBridge<E, L, T> {
-    pub fn new(entry: E, ghost: L, terminal: T) -> Self {
+impl<
+    E: EntryHandle + 'static,
+    L: LabelHandle + 'static,
+    C: CaretHandle + 'static,
+    T: TerminalAdapter,
+> InputBridge<E, L, C, T>
+{
+    pub fn new(entry: E, ghost: L, caret: C, shadow_terminal: T, output_terminal: T) -> Self {
         Self {
             entry,
             ghost,
-            terminal,
+            caret,
+            shadow_terminal,
+            output_terminal,
             syncing: Rc::new(Cell::new(false)),
             suppress_cursor_notify: Rc::new(Cell::new(false)),
             skip_next_insert: Rc::new(Cell::new(false)),
             suppress_insert: Rc::new(Cell::new(false)),
             caret_visible: Rc::new(Cell::new(true)),
             last_markup: Rc::new(RefCell::new(None)),
-            #[cfg(not(test))]
-            blink_source: Rc::new(RefCell::new(None)),
+            recorded: Rc::new(RefCell::new(Vec::new())),
+            sync_pending: Rc::new(Cell::new(false)),
         }
     }
 
@@ -173,17 +238,22 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         let contents_self = self.clone();
         term_widget.connect_contents_changed(move |_| {
             debug_log("terminal:contents-changed");
-            contents_self.sync_from_terminal();
+            contents_self.queue_sync();
         });
         let cursor_self = self.clone();
         term_widget.connect_cursor_moved(move |_| {
             debug_log("terminal:cursor-moved");
-            cursor_self.sync_from_terminal();
+            cursor_self.queue_sync();
         });
 
         #[cfg(not(test))]
         {
-            self.restart_blink();
+            let bridge = self.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(530), move || {
+                bridge.caret_visible.set(!bridge.caret_visible.get());
+                bridge.render_cached_markup();
+                glib::ControlFlow::Continue
+            });
         }
     }
 
@@ -229,8 +299,13 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             }
         };
         if let Some(data) = bytes {
+            if data == b"\n" {
+                self.submit_command();
+                return true;
+            }
             debug_log(&format!("feed:{data:?}"));
-            self.terminal.feed_child(&data);
+            self.recorded.borrow_mut().extend_from_slice(&data);
+            self.shadow_terminal.feed_child(&data);
             return true;
         }
         false
@@ -249,7 +324,10 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
             return false;
         }
         debug_log(&format!("insert:{text}"));
-        self.terminal.feed_child(text.as_bytes());
+        self.recorded
+            .borrow_mut()
+            .extend_from_slice(text.as_bytes());
+        self.shadow_terminal.feed_child(text.as_bytes());
         true
     }
 
@@ -261,17 +339,17 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         self.suppress_cursor_notify.set(true);
         self.suppress_insert.set(true);
         debug_log("sync:start");
-        let (_, row) = self.terminal.cursor_position();
-        let html = self.terminal.line_html(row);
-        let text = self.terminal.line_text(row);
-        let caret_pos = i32::try_from(self.terminal.cursor_position().0).unwrap_or(0);
+        self.caret_visible.set(true);
+        let (_, row) = self.shadow_terminal.cursor_position();
+        let html = self.shadow_terminal.line_html(row);
+        let text = self.shadow_terminal.line_text(row);
+        let caret_pos = i32::try_from(self.shadow_terminal.cursor_position().0).unwrap_or(0);
         let base_markup = html_to_pango(&html);
         self.last_markup.replace(Some(base_markup.clone()));
-        self.reset_caret_visible();
         self.render_ghost_with_caret(&base_markup, caret_pos as usize);
         self.entry.set_text(&text);
 
-        let (cursor_col, _) = self.terminal.cursor_position();
+        let (cursor_col, _) = self.shadow_terminal.cursor_position();
         let cursor_pos = i32::try_from(cursor_col).unwrap_or(0);
         self.entry.set_position(cursor_pos);
         self.suppress_insert.set(false);
@@ -294,12 +372,16 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         if self.syncing.get() || self.suppress_cursor_notify.get() {
             return;
         }
-        self.reset_caret_visible();
         debug_log(&format!("cursor:move:{target}"));
-        let (_, row) = self.terminal.cursor_position();
-        let max_len = self.terminal.line_text(row).chars().count() as i32;
+        let (_, row) = self.shadow_terminal.cursor_position();
+        let max_len = self.shadow_terminal.line_text(row).chars().count() as i32;
         let clamped = target.clamp(0, max_len);
-        let current = self.terminal.cursor_position().0.try_into().unwrap_or(0);
+        let current = self
+            .shadow_terminal
+            .cursor_position()
+            .0
+            .try_into()
+            .unwrap_or(0);
         if clamped == current {
             return;
         }
@@ -309,7 +391,8 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         let seq = if delta > 0 { move_right } else { move_left };
         let steps = delta.abs();
         for _ in 0..steps {
-            self.terminal.feed_child(seq);
+            self.shadow_terminal.feed_child(seq);
+            self.recorded.borrow_mut().extend_from_slice(seq);
         }
         self.sync_from_terminal();
     }
@@ -318,49 +401,51 @@ impl<E: EntryHandle + 'static, L: LabelHandle + 'static, T: TerminalAdapter> Inp
         if let Some(idx) = self.ghost.index_at_x(x, y) {
             let idx_i32 = i32::try_from(idx).unwrap_or(0);
             self.move_cursor_to(idx_i32);
-            self.reset_caret_visible();
         }
     }
 
     fn render_ghost_with_caret(&self, base_markup: &str, caret_pos: usize) {
-        let markup = if self.caret_visible.get() {
-            insert_caret(base_markup, caret_pos)
-        } else {
-            base_markup.to_string()
-        };
-        self.ghost.set_markup(markup.as_str());
+        self.ghost.set_markup(base_markup);
+        let offset = self.ghost.caret_offset(caret_pos);
+        self.caret.set_offset(offset);
+        self.caret.set_visible(self.caret_visible.get());
     }
 
+    #[allow(dead_code)]
     fn render_cached_markup(&self) {
         if let Some(base) = self.last_markup.borrow().as_ref() {
-            let caret_pos = i32::try_from(self.terminal.cursor_position().0).unwrap_or(0);
+            let caret_pos = i32::try_from(self.shadow_terminal.cursor_position().0).unwrap_or(0);
             self.render_ghost_with_caret(base, caret_pos as usize);
         }
     }
 
-    fn reset_caret_visible(&self) {
+    fn submit_command(&self) {
+        let payload = self.recorded.borrow().clone();
+        if !payload.is_empty() {
+            self.output_terminal.feed_child(&payload);
+            self.recorded.borrow_mut().clear();
+        }
+        self.output_terminal.feed_child(b"\n");
+        self.shadow_terminal.feed_child(b"\n");
         self.caret_visible.set(true);
-        self.render_cached_markup();
-        #[cfg(not(test))]
-        self.restart_blink();
     }
 
-    #[cfg(not(test))]
-    fn restart_blink(&self) {
-        self.blink_source.borrow_mut().take().map(|id| id.remove());
+    fn queue_sync(&self) {
+        if self.sync_pending.replace(true) {
+            return;
+        }
         let bridge = self.clone();
-        let id = glib::timeout_add_local(std::time::Duration::from_millis(530), move || {
-            bridge.caret_visible.set(!bridge.caret_visible.get());
-            bridge.render_cached_markup();
-            glib::ControlFlow::Continue
+        glib::idle_add_local(move || {
+            bridge.sync_pending.set(false);
+            bridge.sync_from_terminal();
+            glib::ControlFlow::Break
         });
-        self.blink_source.replace(Some(id));
     }
 }
 
 pub fn wire_keys(
     entry: &Entry,
-    bridge: InputBridge<GtkEntryHandle, GtkLabelHandle, VteTerminalAdapter>,
+    bridge: InputBridge<GtkEntryHandle, GtkLabelHandle, GtkCaretHandle, VteTerminalAdapter>,
 ) {
     entry.add_controller({
         let controller = gtk::EventControllerKey::new();
@@ -437,27 +522,27 @@ pub fn html_to_pango(input: &str) -> String {
 }
 
 pub fn insert_caret(markup: &str, caret_pos: usize) -> String {
-    let caret = r##"<span foreground="#7dd3fc" letter_spacing="-9000">|</span>"##;
-    let mut result = String::new();
+    let caret = r##"<span foreground="#7dd3fc">▏</span>"##;
+    let mut plain = String::new();
     let mut in_tag = false;
-    let mut pos = 0usize;
     for ch in markup.chars() {
         if ch == '<' {
             in_tag = true;
         }
-        if !in_tag && pos == caret_pos {
-            result.push_str(caret);
-        }
         if !in_tag {
-            pos += 1;
+            plain.push(ch);
         }
-        result.push(ch);
         if ch == '>' {
             in_tag = false;
         }
     }
-    if caret_pos >= pos {
-        result.push_str(caret);
-    }
-    result
+    let chars: Vec<char> = plain.chars().collect();
+    let split = caret_pos.min(chars.len());
+    let (left, right) = chars.split_at(split);
+    let mut rendered = String::new();
+    rendered.push_str(&left.iter().collect::<String>());
+    rendered.push_str(caret);
+    rendered.push_str(&left.iter().collect::<String>());
+    rendered.push_str(&right.iter().collect::<String>());
+    rendered
 }
