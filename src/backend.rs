@@ -65,9 +65,13 @@ impl TerminalBackend {
     }
 
     pub fn spawn_headless_shell() -> std::io::Result<Self> {
-        let mut command = CommandBuilder::new("/bin/sh");
+        let mut command = CommandBuilder::new("/usr/bin/zsh");
+        command.arg("-f");
         command.arg("-i");
+        command.env("TERM", "xterm-256color");
         command.env("PS1", "");
+        command.env("PROMPT_COMMAND", "");
+        command.env("HISTFILE", "/dev/null");
         command.env("ENV", "");
         command.env("BASH_ENV", "");
         Self::spawn(command)

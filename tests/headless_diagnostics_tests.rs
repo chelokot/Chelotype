@@ -349,6 +349,46 @@ fn headless_mode_replays_mouse_drag_selection_events() {
 
 #[test]
 #[serial]
+fn headless_mode_replays_mouse_click_as_shell_cursor_movement() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-mouse-click-cursor-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "text:abcdef|wait:abcdef|mouse:press:left:2,1|mouse:release:2,1|text:Z|key:Enter",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "abZcdef")
+        .env("CHELOTYPE_HEADLESS_STEP_MS", "120")
+        .output()
+        .expect("run mouse click cursor headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let text_snapshot = snapshot_file_with_extension(&snapshot_paths(&dir), "txt");
+    let text = read_to_string(text_snapshot).expect("read text snapshot");
+    assert!(text.contains("abZcdef"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_replays_resize_event() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-resize-{}",

@@ -29,6 +29,7 @@ bash scripts/with-zig.sh cargo run
 ```
 
 Snapshots are written to `/tmp/chelotype_snapshots` by default. Set `CHELOTYPE_SNAPSHOT_DIR` to override it.
+Headless diagnostics use a clean interactive `zsh -f` fixture with an empty prompt so editable shell input and mouse-click cursor movement are deterministic.
 
 ## GTK E2E
 
