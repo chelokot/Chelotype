@@ -49,8 +49,8 @@ Prompt-to-artifact checklist
   - Status: partial; visual cursor shape and blink/reset are covered, but stronger pixel-level position assertions are still needed.
 - Unicode/graphemes
   - Evidence: Ghostty grapheme extraction, shared `src/cell_text.rs`, structured cell JSON with wide-cell flags.
-  - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata.
-  - Status: partial; emoji ZWJ, ambiguous-width, and IME/composition scenarios are still needed.
+  - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata; headless emoji/ZWJ/ambiguous-width test verifies ZWJ emoji cells and single-width ambiguous characters through snapshots and render dumps.
+  - Status: partial; emoji ZWJ and ambiguous-width coverage exists, but IME/composition scenarios are still needed.
 - Perf gates
   - Evidence: `benches/pipeline.rs`, `docs/benchmarks.md`.
   - Coverage: active Ghostty app-frame render benchmark, 4 ms latency guard, explicit 60/120 Hz frame-budget gates, held-key scenario, backend dirty-snapshot regression test, and canvas frame equality skip.

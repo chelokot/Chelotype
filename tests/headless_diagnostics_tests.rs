@@ -597,6 +597,92 @@ fn headless_mode_exports_unicode_and_style_cells_in_json() {
 
 #[test]
 #[serial]
+fn headless_mode_preserves_emoji_zwj_and_ambiguous_width_cells() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-emoji-zwj-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "raw:printf 'EMOJI 👩‍💻 FAMILY 👨‍👩‍👧‍👦 AMBIG · Ω\\n'\\n",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "EMOJI|FAMILY|AMBIG")
+        .env("CHELOTYPE_HEADLESS_STEP_MS", "160")
+        .output()
+        .expect("run emoji headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let snapshot: serde_json::Value = serde_json::from_str(
+        &read_to_string(snapshot_file_with_extension(&paths, "json")).expect("read json snapshot"),
+    )
+    .expect("parse json snapshot");
+    let cells = snapshot["lines"]
+        .as_array()
+        .expect("snapshot lines")
+        .iter()
+        .flat_map(|line| line["cells"].as_array().expect("line cells"))
+        .collect::<Vec<_>>();
+    assert!(
+        cells.iter().any(|cell| cell["text"]
+            .as_str()
+            .is_some_and(|text| text.contains('\u{200d}'))
+            && cell["wide"].as_bool() == Some(true)),
+        "snapshot did not keep ZWJ emoji cells wide: {snapshot}"
+    );
+    for text in ["·", "Ω"] {
+        assert!(
+            cells.iter().any(|cell| {
+                cell["text"].as_str() == Some(text)
+                    && cell["wide"].as_bool() == Some(false)
+                    && cell["wide_spacer"].as_bool() == Some(false)
+            }),
+            "snapshot did not keep ambiguous-width {text} as one normal cell: {snapshot}"
+        );
+    }
+
+    let render_dump: serde_json::Value = serde_json::from_str(
+        &read_to_string(snapshot_file_ending_with(&paths, ".render.json"))
+            .expect("read render dump"),
+    )
+    .expect("parse render dump");
+    let render_cells = render_dump["lines"]
+        .as_array()
+        .expect("render lines")
+        .iter()
+        .flat_map(|line| line["cells"].as_array().expect("render cells"))
+        .collect::<Vec<_>>();
+    assert!(
+        render_cells.iter().any(|cell| {
+            cell["text"]
+                .as_str()
+                .is_some_and(|text| text.contains('\u{200d}'))
+                && cell["columns"].as_u64() == Some(2)
+        }),
+        "render dump did not keep ZWJ emoji cells wide: {render_dump}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_preserves_zsh_colored_prompt_cells() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-zsh-prompt-{}",
