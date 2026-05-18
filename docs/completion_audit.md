@@ -21,8 +21,8 @@ Prompt-to-artifact checklist
   - Evidence: `src/bridge.rs`, `tests/bridge_tests.rs`, and the bridge bench were removed; `Cargo.toml` has no VTE bridge feature.
   - Status: done for the active tree.
 - Renderer consumes grid/cell state directly
-  - Evidence: `src/ghostty_snapshot.rs` exports `TerminalContent`; `src/render.rs` renders typed cells/runs from that model.
-  - Status: partial; canvas still paints Pango markup lines rather than direct incremental per-cell draw batches.
+  - Evidence: `src/ghostty_snapshot.rs` exports `TerminalContent`; `src/render.rs` renders typed cells/runs from that model; `src/canvas.rs` paints structured runs by grid column and draws the cursor from grid coordinates.
+  - Status: partial; canvas no longer paints whole-line markup, but still uses per-run Pango markup for text attributes and does not yet have incremental dirty-row paint or screenshot/pixel e2e.
 - History, scrollback, current input
   - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots, and Ghostty row metadata (`wrapped`, `wrap_continuation`, semantic prompt) exported through `TerminalContent`.
   - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`.

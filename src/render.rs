@@ -30,6 +30,7 @@ pub struct RenderLine {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RenderRun {
     pub start_column: usize,
+    pub columns: usize,
     pub text: String,
     pub style: RenderStyle,
 }
@@ -289,6 +290,7 @@ fn cells_to_runs(
         if !text.is_empty() {
             runs.push(RenderRun {
                 start_column: start,
+                columns: idx - start,
                 text,
                 style: style.into_render_style(),
             });
@@ -324,6 +326,7 @@ fn build_line_render(
         if !run_text.is_empty() {
             runs.push(RenderRun {
                 start_column: start,
+                columns: idx - start,
                 text: run_text,
                 style: style.into_render_style(),
             });
@@ -469,12 +472,15 @@ mod tests {
         let runs = cells_to_runs(&cells, 0, Some(selection));
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[0].start_column, 0);
+        assert_eq!(runs[0].columns, 1);
         assert_eq!(runs[0].text, "a");
         assert!(!runs[0].style.selected);
         assert_eq!(runs[1].start_column, 1);
+        assert_eq!(runs[1].columns, 2);
         assert_eq!(runs[1].text, "bc");
         assert!(runs[1].style.selected);
         assert_eq!(runs[2].start_column, 3);
+        assert_eq!(runs[2].columns, 1);
         assert_eq!(runs[2].text, "d");
         assert!(!runs[2].style.selected);
     }
@@ -500,6 +506,7 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "a中b");
         assert_eq!(runs[0].start_column, 0);
+        assert_eq!(runs[0].columns, 4);
     }
 
     #[test]

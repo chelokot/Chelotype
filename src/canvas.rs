@@ -1,4 +1,4 @@
-use crate::render::{RenderFrame, RenderRegion};
+use crate::render::{RenderFrame, RenderRun};
 use gtk::cairo;
 use gtk::pango;
 use gtk::prelude::*;
@@ -59,19 +59,21 @@ fn draw_background(context: &cairo::Context, width: i32, height: i32) {
 
 fn draw_render_output(widget: &gtk::DrawingArea, context: &cairo::Context, render: &RenderFrame) {
     let line_height = terminal_line_height(widget);
-    let mut input_layout = None;
+    let cell_width = terminal_cell_width(widget);
     for line in &render.lines {
-        let layout = terminal_layout(widget, &line.markup);
         let top = line.row as f64 * line_height;
-        gtk::render_layout(&widget.style_context(), context, 0.0, top, &layout);
-        if line.region == RenderRegion::Input {
-            input_layout = Some(layout);
+        for run in &line.runs {
+            draw_run_background(context, run, cell_width, line_height, top);
+        }
+        for run in &line.runs {
+            let left = run.start_column as f64 * cell_width;
+            let layout = terminal_layout(widget, &run_markup(run));
+            gtk::render_layout(&widget.style_context(), context, left, top, &layout);
         }
     }
 
     if render.cursor.visible {
-        let layout = input_layout.unwrap_or_else(|| terminal_layout(widget, &render.input_markup));
-        draw_caret(context, &layout, render, line_height);
+        draw_caret(context, render, line_height, cell_width);
     }
 }
 
@@ -84,20 +86,56 @@ fn terminal_layout(widget: &gtk::DrawingArea, markup: &str) -> pango::Layout {
     layout
 }
 
-fn draw_caret(
+fn draw_run_background(
     context: &cairo::Context,
-    input_layout: &pango::Layout,
-    render: &RenderFrame,
+    run: &RenderRun,
+    cell_width: f64,
     line_height: f64,
+    top: f64,
 ) {
-    let byte_index = byte_index_for_char(&render.input_text, render.cursor.column.max(0) as usize);
-    let caret_pos = input_layout.index_to_pos(byte_index as i32);
-    let x = caret_pos.x() as f64 / pango::SCALE as f64;
-    let y =
-        render.cursor.line.max(0) as f64 * line_height + caret_pos.y() as f64 / pango::SCALE as f64;
+    if let Some(color) = run.style.bg.as_deref().and_then(parse_hex_color) {
+        context.set_source_rgb(color.red, color.green, color.blue);
+        context.rectangle(
+            run.start_column as f64 * cell_width,
+            top,
+            run.columns as f64 * cell_width,
+            line_height,
+        );
+        let _ = context.fill();
+    }
+}
+
+fn draw_caret(context: &cairo::Context, render: &RenderFrame, line_height: f64, cell_width: f64) {
+    let x = render.cursor.column.max(0) as f64 * cell_width;
+    let y = render.cursor.line.max(0) as f64 * line_height;
     context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
     context.rectangle(x.round(), y.round(), 1.25, line_height);
     let _ = context.fill();
+}
+
+fn run_markup(run: &RenderRun) -> String {
+    let mut span = String::from("<span");
+    if let Some(fg) = &run.style.fg {
+        span.push_str(&format!(" foreground=\"{}\"", fg));
+    }
+    if run.style.bold {
+        span.push_str(" weight=\"bold\"");
+    }
+    if run.style.italic {
+        span.push_str(" style=\"italic\"");
+    }
+    if run.style.underline {
+        span.push_str(" underline=\"single\"");
+    }
+    if run.style.strikeout {
+        span.push_str(" strikethrough=\"true\"");
+    }
+    span.push('>');
+    for ch in run.text.chars() {
+        span.push_str(&markup_escape(ch));
+    }
+    span.push_str("</span>");
+    span
 }
 
 fn terminal_line_height(widget: &gtk::DrawingArea) -> f64 {
@@ -108,25 +146,78 @@ fn terminal_line_height(widget: &gtk::DrawingArea) -> f64 {
     metrics.height() as f64 / pango::SCALE as f64
 }
 
-fn byte_index_for_char(text: &str, caret_col: usize) -> usize {
-    for (chars_seen, (byte_idx, _)) in text.char_indices().enumerate() {
-        if chars_seen == caret_col {
-            return byte_idx;
-        }
+fn terminal_cell_width(widget: &gtk::DrawingArea) -> f64 {
+    let metrics = widget.pango_context().metrics(
+        Some(&pango::FontDescription::from_string("JetBrains Mono 13")),
+        None,
+    );
+    metrics.approximate_char_width() as f64 / pango::SCALE as f64
+}
+
+struct Rgb {
+    red: f64,
+    green: f64,
+    blue: f64,
+}
+
+fn parse_hex_color(value: &str) -> Option<Rgb> {
+    let value = value.strip_prefix('#')?;
+    if value.len() != 6 {
+        return None;
     }
-    text.len()
+    let red = u8::from_str_radix(&value[0..2], 16).ok()?;
+    let green = u8::from_str_radix(&value[2..4], 16).ok()?;
+    let blue = u8::from_str_radix(&value[4..6], 16).ok()?;
+    Some(Rgb {
+        red: f64::from(red) / 255.0,
+        green: f64::from(green) / 255.0,
+        blue: f64::from(blue) / 255.0,
+    })
+}
+
+fn markup_escape(ch: char) -> String {
+    match ch {
+        '&' => "&amp;".to_string(),
+        '<' => "&lt;".to_string(),
+        '>' => "&gt;".to_string(),
+        _ => ch.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::RenderStyle;
 
     #[test]
-    fn maps_char_column_to_byte_index_for_unicode_text() {
-        assert_eq!(byte_index_for_char("aя中", 0), 0);
-        assert_eq!(byte_index_for_char("aя中", 1), 1);
-        assert_eq!(byte_index_for_char("aя中", 2), 3);
-        assert_eq!(byte_index_for_char("aя中", 3), "aя中".len());
-        assert_eq!(byte_index_for_char("aя中", 30), "aя中".len());
+    fn run_markup_escapes_text_and_preserves_style() {
+        let run = RenderRun {
+            start_column: 0,
+            columns: 3,
+            text: "<&>".to_string(),
+            style: RenderStyle {
+                fg: Some("#ff0000".to_string()),
+                bg: None,
+                bold: true,
+                italic: true,
+                underline: true,
+                strikeout: true,
+                selected: false,
+            },
+        };
+        let markup = run_markup(&run);
+        assert!(markup.contains("foreground=\"#ff0000\""));
+        assert!(markup.contains("weight=\"bold\""));
+        assert!(markup.contains("style=\"italic\""));
+        assert!(markup.contains("underline=\"single\""));
+        assert!(markup.contains("strikethrough=\"true\""));
+        assert!(markup.contains("&lt;&amp;&gt;"));
+    }
+
+    #[test]
+    fn parse_hex_color_rejects_invalid_colors() {
+        assert!(parse_hex_color("#264f78").is_some());
+        assert!(parse_hex_color("264f78").is_none());
+        assert!(parse_hex_color("#xyzxyz").is_none());
     }
 }
