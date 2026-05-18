@@ -48,4 +48,4 @@ Build first with `bash scripts/with-zig.sh cargo build`, or just run the covered
 bash scripts/with-zig.sh cargo test --test gtk_e2e_tests
 ```
 
-The same test file also runs scenarios that verify ANSI-colored cells, capture a nonblank real-window screenshot, send real keyboard events with `xdotool`, forward terminal mouse-reporting bytes to the PTY, drag-select terminal text with the mouse, export PRIMARY/CLIPBOARD selection text, resize the GTK window, and inspect the resulting structured snapshots.
+The same test file also runs scenarios that verify ANSI-colored cells, capture a nonblank real-window screenshot, check truecolor terminal output at the pixel level, send real keyboard events with `xdotool`, forward terminal mouse-reporting bytes to the PTY, drag-select terminal text with the mouse, export PRIMARY/CLIPBOARD selection text, resize the GTK window, and inspect the resulting structured snapshots.

@@ -23,7 +23,7 @@ Current state audit
 - Partial: `src/diagnostics.rs` and `src/snapshot.rs` provide structured snapshot exports with rows/cols, cursor, mouse mode, plain text, and per-cell text/color/style records.
 - Partial: `tests/backend_integration_tests.rs` verifies real PTY write/read, ANSI color preservation, cursor tracking, resize, mouse modes, and scrollback against the active backend.
 - Partial: `tests/headless_diagnostics_tests.rs` launches the binary in headless mode, verifies JSON/HTML/text/markup snapshot files, checks expected terminal content, supports scripted action/expectation env overrides, and fails on stderr warnings/errors.
-- Partial: `tests/gtk_e2e_tests.rs` verifies real GTK launch snapshots, ANSI-colored cell export, nonblank real-window screenshots, real Xvfb keyboard input, terminal mouse-reporting bytes forwarded to the PTY, real mouse drag selection, PRIMARY/CLIPBOARD selection export, and real GTK window resize without GTK warnings.
+- Partial: `tests/gtk_e2e_tests.rs` verifies real GTK launch snapshots, ANSI-colored cell export, nonblank real-window screenshots, pixel-level truecolor output, real Xvfb keyboard input, terminal mouse-reporting bytes forwarded to the PTY, real mouse drag selection, PRIMARY/CLIPBOARD selection export, and real GTK window resize without GTK warnings.
 - Partial: headless diagnostics support event-level automation for raw/text writes, key events, resize, scroll, mouse press/drag/release, and selection export.
 - Partial: `TerminalBackend::resize` updates both the PTY winsize and Ghostty terminal dimensions; `app.rs` derives terminal size from the GTK viewport.
 - Partial: `TerminalBackend::scroll_display` and `scroll_to_bottom` expose scrollback viewport movement from the terminal core, and snapshots export `display_offset`.
@@ -34,7 +34,7 @@ Current state audit
 - Partial: `benches/pipeline.rs` measures the active Ghostty parser/render-state/snapshot/render path, while the app runtime now uses dirty snapshots and skips identical canvas frames.
 - Weak: resize is covered at backend, headless, and GTK window-event level, but scrollback reflow edge cases are still weak.
 - Weak: first-class mouse support has mode-aware click press/release/drag plumbing, terminal mouse-reporting e2e, a local grid selection model, real GTK drag-selection e2e, and PRIMARY/CLIPBOARD export, but shell cursor placement is not integrated.
-- Weak: screenshots now prove the GTK surface is nonblank, but benchmarks do not yet prove UI-visible GTK paint smoothness.
+- Weak: screenshots now prove the GTK surface is nonblank and truecolor text reaches pixels, but benchmarks do not yet prove UI-visible GTK paint smoothness.
 
 Next implementation order
 
