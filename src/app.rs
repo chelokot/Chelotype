@@ -5,7 +5,7 @@ use crate::input::{KeyAction, key_to_action};
 use crate::interaction::{InteractionEffect, PointerInteraction};
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::Renderer;
-use crate::selection::SelectionRange;
+use crate::selection::{SelectionRange, selected_text};
 use crate::snapshot::write_snapshot_with_selection;
 use adw::Application;
 use adw::prelude::*;
@@ -64,6 +64,9 @@ fn build_ui(app: &Application) {
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
         let backend = backend_rc.clone();
+        let content = last_content.clone();
+        let selection = selection.clone();
+        let canvas_widget = canvas.widget().clone();
         key_controller.connect_key_pressed(move |_ctrl, key, _code, state| {
             if let Some(action) = key_to_action(key, state) {
                 match action {
@@ -72,6 +75,9 @@ fn build_ui(app: &Application) {
                     }
                     KeyAction::ScrollDisplay(lines) => {
                         let _ = backend.borrow_mut().scroll_display(lines);
+                    }
+                    KeyAction::CopySelection => {
+                        copy_selection_to_clipboard(&canvas_widget, &content, selection.get());
                     }
                 }
                 glib::Propagation::Stop
@@ -203,6 +209,9 @@ fn build_ui(app: &Application) {
         if let Some(content) = render_content {
             let rendered = Renderer::render_frame_with_selection(content.clone(), selection.get());
             canvas.set_render(rendered);
+            if selection_changed {
+                copy_selection_to_primary(canvas.widget(), &content, selection.get());
+            }
             if let Some(scenario) = &ui_e2e {
                 let text = lines_to_text(&content.lines);
                 if scenario
@@ -265,6 +274,56 @@ impl UiE2eScenario {
             expected,
             timeout,
         })
+    }
+}
+
+fn copy_selection_to_primary(
+    widget: &gtk::DrawingArea,
+    content: &RenderableContentOwned,
+    selection: Option<SelectionRange>,
+) {
+    let Some(text) = selection_text(content, selection) else {
+        return;
+    };
+    widget.primary_clipboard().set_text(&text);
+    trace_clipboard_export("primary", &text);
+}
+
+fn copy_selection_to_clipboard(
+    widget: &gtk::DrawingArea,
+    content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+    selection: Option<SelectionRange>,
+) {
+    let Some(content) = content.borrow().clone() else {
+        return;
+    };
+    let Some(text) = selection_text(&content, selection) else {
+        return;
+    };
+    widget.clipboard().set_text(&text);
+    trace_clipboard_export("clipboard", &text);
+}
+
+fn selection_text(
+    content: &RenderableContentOwned,
+    selection: Option<SelectionRange>,
+) -> Option<String> {
+    let text = selected_text(&content.lines, selection?);
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn trace_clipboard_export(kind: &str, text: &str) {
+    let Ok(path) = std::env::var("CHELOTYPE_CLIPBOARD_TRACE") else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let escaped = text.replace('\n', "\\n");
+        let _ = writeln!(file, "{kind}\t{escaped}");
     }
 }
 

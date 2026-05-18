@@ -4,9 +4,18 @@ use gtk::gdk;
 pub enum KeyAction {
     Write(Vec<u8>),
     ScrollDisplay(i32),
+    CopySelection,
 }
 
 pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyAction> {
+    if state.contains(gdk::ModifierType::CONTROL_MASK)
+        && state.contains(gdk::ModifierType::SHIFT_MASK)
+        && key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'c'))
+    {
+        return Some(KeyAction::CopySelection);
+    }
     if state.contains(gdk::ModifierType::SHIFT_MASK) {
         match key {
             gdk::Key::Page_Up => return Some(KeyAction::ScrollDisplay(10)),
@@ -116,6 +125,21 @@ mod tests {
         assert_eq!(
             key_to_action(gdk::Key::Page_Down, gdk::ModifierType::SHIFT_MASK),
             Some(KeyAction::ScrollDisplay(-10))
+        );
+    }
+
+    #[test]
+    fn maps_ctrl_shift_c_to_copy_selection_without_intercepting_ctrl_c() {
+        assert_eq!(
+            key_to_action(
+                gdk::Key::c,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::CopySelection)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::c, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::Write(vec![0x03]))
         );
     }
 }

@@ -34,7 +34,7 @@ Prompt-to-artifact checklist
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
   - Coverage: local drag selection tests, SGR mouse reporting tests, headless mouse drag selection e2e, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
-  - Status: partial; no clipboard export and no shell cursor placement integration.
+  - Status: partial; PRIMARY/CLIPBOARD export is covered, but no shell cursor placement integration.
 - Resize/reflow
   - Evidence: `TerminalBackend::resize` updates PTY winsize and Ghostty terminal dimensions.
   - Coverage: backend resize integration, headless resize event e2e, and real Xvfb+xdotool GTK window resize e2e that verifies changed snapshot rows.
@@ -71,4 +71,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor visual assertions, screenshot/pixel checks, direct per-cell/incremental drawing, shell cursor placement strategy, advanced grapheme/IME tests, clipboard selection, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor visual assertions, pixel-level color checks, direct per-cell/incremental drawing, shell cursor placement strategy, advanced grapheme/IME tests, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.

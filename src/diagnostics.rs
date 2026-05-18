@@ -130,6 +130,7 @@ impl HeadlessRuntime {
                     match action {
                         KeyAction::Write(bytes) => backend.write(&bytes),
                         KeyAction::ScrollDisplay(lines) => backend.scroll_display(lines),
+                        KeyAction::CopySelection => Ok(()),
                     }
                 } else {
                     Ok(())
