@@ -45,8 +45,8 @@ Prompt-to-artifact checklist
   - Status: partial; truecolor reaches pixels, but zsh prompt/theme fidelity is still not deeply asserted.
 - Cursor position/shape/visibility
   - Evidence: cursor fields in snapshots, canvas caret drawing.
-  - Coverage: backend cursor integration and canvas byte-index unit test.
-  - Status: partial; no visual blink/shape e2e after the canvas switch.
+  - Coverage: backend cursor integration, HTML snapshot cursor-placement unit test, and real Xvfb screenshot e2e that asserts the cursor-colored pixels form a narrow vertical caret.
+  - Status: partial; visual cursor shape is covered, but stronger pixel-level position checks and blinking-state assertions are still needed.
 - Unicode/graphemes
   - Evidence: Ghostty grapheme extraction, shared `src/cell_text.rs`, structured cell JSON with wide-cell flags.
   - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata.
@@ -71,4 +71,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor visual assertions, multiline/prompt-aware shell cursor placement, advanced grapheme/IME tests, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor position/blink assertions, multiline/prompt-aware shell cursor placement, advanced grapheme/IME tests, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.

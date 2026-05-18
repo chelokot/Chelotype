@@ -166,6 +166,12 @@ fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
             if cell.wide_spacer {
                 continue;
             }
+            if snapshot.cursor_visible
+                && snapshot.cursor_line == line_idx as i32
+                && snapshot.cursor_col == col_idx as i32
+            {
+                out.push_str("<span style=\"color:#7dd3fc\">|</span>");
+            }
             let mut span = String::from("<span style=\"");
             span.push_str(&format!("color:{};", cell.fg));
             span.push_str(&format!("background-color:{};", cell.bg));
@@ -183,13 +189,13 @@ fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
                 span.push_str(&html_escape(ch));
             }
             span.push_str("</span>");
-            if snapshot.cursor_visible
-                && snapshot.cursor_line == line_idx as i32
-                && snapshot.cursor_col == col_idx as i32
-            {
-                span.push_str("<span style=\"color:#7dd3fc\">|</span>");
-            }
             out.push_str(&span);
+        }
+        if snapshot.cursor_visible
+            && snapshot.cursor_line == line_idx as i32
+            && snapshot.cursor_col == line.cells.len() as i32
+        {
+            out.push_str("<span style=\"color:#7dd3fc\">|</span>");
         }
         if line_idx + 1 != snapshot.lines.len() {
             out.push('\n');
@@ -243,5 +249,52 @@ mod tests {
         spacer.wide_spacer = true;
         let lines = vec![vec![cell("a"), wide, spacer, cell("b")]];
         assert_eq!(snapshot_plain_from_lines(&lines), "a中b");
+    }
+
+    #[test]
+    fn html_snapshot_places_cursor_before_cell_at_cursor_column() {
+        let snapshot = SnapshotJson {
+            rows: 1,
+            cols: 3,
+            cursor_line: 0,
+            cursor_col: 1,
+            cursor_visible: true,
+            display_offset: 0,
+            mouse: MouseJson {
+                click: false,
+                drag: false,
+                motion: false,
+                sgr: false,
+                utf8: false,
+            },
+            selection: None,
+            selected_text: None,
+            text: "abc".to_string(),
+            lines: vec![LineJson {
+                wrapped: false,
+                wrap_continuation: false,
+                semantic_prompt: "none",
+                cells: ["a", "b", "c"]
+                    .into_iter()
+                    .map(|text| CellJson {
+                        text: text.to_string(),
+                        fg: "#ffffff".to_string(),
+                        bg: "#000000".to_string(),
+                        bold: false,
+                        underline: false,
+                        italic: false,
+                        inverse: false,
+                        wide: false,
+                        wide_spacer: false,
+                    })
+                    .collect(),
+            }],
+        };
+        let html = snapshot_to_html(&snapshot);
+        assert!(
+            html.find(">a</span><span style=\"color:#7dd3fc\">|</span><span")
+                .is_some(),
+            "{html}"
+        );
     }
 }

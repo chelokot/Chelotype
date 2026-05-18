@@ -513,6 +513,37 @@ mod tests {
     }
 
     #[test]
+    fn render_cells_keep_exact_columns_across_styled_spaces() {
+        let mut suggestion_space = cell(" ");
+        suggestion_space.fg = Some("#737373".to_string());
+        let mut suggestion = cell("s");
+        suggestion.fg = Some("#737373".to_string());
+        let line = build_line_render(
+            &[cell("a"), suggestion_space, suggestion, cell("b")],
+            0,
+            None,
+        );
+        assert_eq!(line.text, "a sb");
+        assert_eq!(
+            line.cells
+                .iter()
+                .map(|cell| (
+                    cell.column,
+                    cell.columns,
+                    cell.text.as_str(),
+                    cell.style.fg.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 1, "a", None),
+                (1, 1, " ", Some("#737373")),
+                (2, 1, "s", Some("#737373")),
+                (3, 1, "b", None),
+            ]
+        );
+    }
+
+    #[test]
     fn text_and_markup_preserve_zerowidth_combining_marks() {
         let composed = cell("e\u{0301}");
         let cells = [cell("x"), composed, cell("y")];

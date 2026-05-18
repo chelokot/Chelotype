@@ -81,6 +81,73 @@ fn red_pixel_count(image: &std::path::Path) -> usize {
         .count()
 }
 
+#[derive(Clone, Copy)]
+struct ImagePixel {
+    x: usize,
+    y: usize,
+    red: u16,
+    green: u16,
+    blue: u16,
+}
+
+#[derive(Debug)]
+struct PixelBounds {
+    min_x: usize,
+    max_x: usize,
+    min_y: usize,
+    max_y: usize,
+    count: usize,
+}
+
+impl PixelBounds {
+    fn width(&self) -> usize {
+        self.max_x - self.min_x + 1
+    }
+
+    fn height(&self) -> usize {
+        self.max_y - self.min_y + 1
+    }
+}
+
+fn pixel_bounds(
+    image: &std::path::Path,
+    matches: impl Fn(ImagePixel) -> bool,
+) -> Option<PixelBounds> {
+    let output = Command::new("convert")
+        .args([image.to_str().expect("image path utf8"), "txt:-"])
+        .output()
+        .expect("convert screenshot to pixels");
+    assert!(
+        output.status.success(),
+        "convert failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut bounds: Option<PixelBounds> = None;
+    for pixel in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_image_pixel)
+        .filter(|pixel| matches(*pixel))
+    {
+        bounds = Some(match bounds {
+            Some(bounds) => PixelBounds {
+                min_x: bounds.min_x.min(pixel.x),
+                max_x: bounds.max_x.max(pixel.x),
+                min_y: bounds.min_y.min(pixel.y),
+                max_y: bounds.max_y.max(pixel.y),
+                count: bounds.count + 1,
+            },
+            None => PixelBounds {
+                min_x: pixel.x,
+                max_x: pixel.x,
+                min_y: pixel.y,
+                max_y: pixel.y,
+                count: 1,
+            },
+        });
+    }
+    bounds
+}
+
 fn parse_srgb(line: &str) -> Option<[u16; 3]> {
     let start = line.find("srgb(")? + "srgb(".len();
     let end = line[start..].find(')')? + start;
@@ -88,6 +155,19 @@ fn parse_srgb(line: &str) -> Option<[u16; 3]> {
         .split(',')
         .map(|part| part.trim().parse::<u16>().ok());
     Some([parts.next()??, parts.next()??, parts.next()??])
+}
+
+fn parse_image_pixel(line: &str) -> Option<ImagePixel> {
+    let (position, rest) = line.split_once(':')?;
+    let (x, y) = position.split_once(',')?;
+    let [red, green, blue] = parse_srgb(rest)?;
+    Some(ImagePixel {
+        x: x.trim().parse().ok()?,
+        y: y.trim().parse().ok()?,
+        red,
+        green,
+        blue,
+    })
 }
 
 #[test]
@@ -399,6 +479,113 @@ import -window "$window_id" "$screenshot"
 
     let count = red_pixel_count(&screenshot);
     assert!(count > 20, "expected red terminal pixels, found {count}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_renders_narrow_cursor_pixels_under_xvfb() {
+    if !has_command("xvfb-run")
+        || !has_command("xdotool")
+        || !has_command("import")
+        || !has_command("convert")
+    {
+        eprintln!(
+            "skipping gtk cursor pixel e2e because xvfb-run, xdotool, import, or convert is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-cursor-pixel-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let screenshot = dir.join("window.png");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+screenshot="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "abc def"
+for _ in {1..100}; do
+    if grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "cursor pixel marker never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+sleep 0.2
+import -window "$window_id" "$screenshot"
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-cursor-pixel-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            screenshot.to_str().expect("screenshot path utf8"),
+        ])
+        .output()
+        .expect("run gtk cursor pixel e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk cursor pixel e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let bounds = pixel_bounds(&screenshot, |pixel| {
+        pixel.red == 125 && pixel.green == 211 && pixel.blue == 252
+    })
+    .expect("cursor-colored pixels in screenshot");
+    assert!(
+        bounds.width() <= 2,
+        "cursor should be a narrow vertical caret, got {bounds:?}"
+    );
+    assert!(
+        bounds.height() >= 16,
+        "cursor should be visibly tall, got {bounds:?}"
+    );
+    assert!(
+        bounds.count >= 16,
+        "cursor should have enough visible pixels, got {bounds:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
