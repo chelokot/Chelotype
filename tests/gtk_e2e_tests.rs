@@ -81,6 +81,14 @@ fn red_pixel_count(image: &std::path::Path) -> usize {
         .count()
 }
 
+fn cursor_pixel_count(image: &std::path::Path) -> usize {
+    pixel_bounds(image, |pixel| {
+        pixel.red == 125 && pixel.green == 211 && pixel.blue == 252
+    })
+    .map(|bounds| bounds.count)
+    .unwrap_or(0)
+}
+
 #[derive(Clone, Copy)]
 struct ImagePixel {
     x: usize,
@@ -530,18 +538,7 @@ fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "abc def"
-for _ in {1..100}; do
-    if grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 0.1
-done
-if ! grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1; then
-    echo "cursor pixel marker never appeared" >&2
-    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
-    exit 1
-fi
-sleep 0.2
+sleep 0.15
 import -window "$window_id" "$screenshot"
 "#;
 
@@ -585,6 +582,112 @@ import -window "$window_id" "$screenshot"
     assert!(
         bounds.count >= 16,
         "cursor should have enough visible pixels, got {bounds:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_blinks_cursor_and_resets_after_input_under_xvfb() {
+    if !has_command("xvfb-run")
+        || !has_command("xdotool")
+        || !has_command("import")
+        || !has_command("convert")
+    {
+        eprintln!(
+            "skipping gtk cursor blink e2e because xvfb-run, xdotool, import, or convert is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-cursor-blink-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let visible = dir.join("visible.png");
+    let hidden = dir.join("hidden.png");
+    let reset = dir.join("reset.png");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+visible="$3"
+hidden="$4"
+reset="$5"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "blink"
+sleep 0.15
+import -window "$window_id" "$visible"
+sleep 0.65
+import -window "$window_id" "$hidden"
+xdotool type --window "$window_id" --delay 2 "X"
+sleep 0.15
+import -window "$window_id" "$reset"
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-cursor-blink-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            visible.to_str().expect("visible screenshot path utf8"),
+            hidden.to_str().expect("hidden screenshot path utf8"),
+            reset.to_str().expect("reset screenshot path utf8"),
+        ])
+        .output()
+        .expect("run gtk cursor blink e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk cursor blink e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let visible_count = cursor_pixel_count(&visible);
+    let hidden_count = cursor_pixel_count(&hidden);
+    let reset_count = cursor_pixel_count(&reset);
+    assert!(
+        visible_count >= 16,
+        "cursor should start visible, got {visible_count} cursor pixels"
+    );
+    assert_eq!(
+        hidden_count, 0,
+        "cursor should blink off, got {hidden_count} cursor pixels"
+    );
+    assert!(
+        reset_count >= 16,
+        "cursor should reset visible after input, got {reset_count} cursor pixels"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

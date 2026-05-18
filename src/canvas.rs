@@ -2,13 +2,17 @@ use crate::render::{RenderCell, RenderFrame, RenderStyle};
 use gtk::cairo;
 use gtk::pango;
 use gtk::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+const CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(530);
 
 #[derive(Clone)]
 pub struct TerminalCanvas {
     area: gtk::DrawingArea,
     render: Rc<RefCell<Option<RenderFrame>>>,
+    cursor_blink: Rc<Cell<CursorBlinkState>>,
 }
 
 impl TerminalCanvas {
@@ -24,15 +28,21 @@ impl TerminalCanvas {
         area.add_css_class("term-canvas");
 
         let render = Rc::new(RefCell::new(None::<RenderFrame>));
+        let cursor_blink = Rc::new(Cell::new(CursorBlinkState::default()));
         let draw_render = render.clone();
+        let draw_cursor_blink = cursor_blink.clone();
         area.set_draw_func(move |widget, context, width, height| {
             draw_background(context, width, height);
             if let Some(render) = draw_render.borrow().as_ref() {
-                draw_render_output(widget, context, render);
+                draw_render_output(widget, context, render, draw_cursor_blink.get());
             }
         });
 
-        Self { area, render }
+        Self {
+            area,
+            render,
+            cursor_blink,
+        }
     }
 
     pub fn widget(&self) -> &gtk::DrawingArea {
@@ -41,11 +51,31 @@ impl TerminalCanvas {
 
     pub fn set_render(&self, render: RenderFrame) {
         let mut current = self.render.borrow_mut();
+        let previous_blink = self.cursor_blink.get();
+        self.cursor_blink
+            .set(previous_blink.sync(render.cursor.clone(), Instant::now()));
         if current.as_ref() == Some(&render) {
+            if previous_blink != self.cursor_blink.get() {
+                self.area.queue_draw();
+            }
             return;
         }
         *current = Some(render);
         self.area.queue_draw();
+    }
+
+    pub fn tick_cursor_blink(&self) {
+        let Some(render) = self.render.borrow().as_ref().cloned() else {
+            return;
+        };
+        let next = self
+            .cursor_blink
+            .get()
+            .tick(render.cursor.visible, Instant::now());
+        if self.cursor_blink.get() != next {
+            self.cursor_blink.set(next);
+            self.area.queue_draw();
+        }
     }
 }
 
@@ -61,7 +91,12 @@ fn draw_background(context: &cairo::Context, width: i32, height: i32) {
     let _ = context.fill();
 }
 
-fn draw_render_output(widget: &gtk::DrawingArea, context: &cairo::Context, render: &RenderFrame) {
+fn draw_render_output(
+    widget: &gtk::DrawingArea,
+    context: &cairo::Context,
+    render: &RenderFrame,
+    cursor_blink: CursorBlinkState,
+) {
     let line_height = terminal_line_height(widget);
     let cell_width = terminal_cell_width(widget);
     for line in &render.lines {
@@ -79,8 +114,65 @@ fn draw_render_output(widget: &gtk::DrawingArea, context: &cairo::Context, rende
         }
     }
 
-    if render.cursor.visible {
+    if render.cursor.visible && cursor_blink.visible {
         draw_caret(context, render, line_height, cell_width);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CursorBlinkState {
+    visible: bool,
+    cursor: Option<CursorIdentity>,
+    reset_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CursorIdentity {
+    line: i32,
+    column: i32,
+    visible: bool,
+}
+
+impl CursorBlinkState {
+    fn sync(self, cursor: crate::render::RenderCursor, now: Instant) -> Self {
+        let identity = CursorIdentity {
+            line: cursor.line,
+            column: cursor.column,
+            visible: cursor.visible,
+        };
+        if !cursor.visible {
+            return Self {
+                visible: false,
+                cursor: Some(identity),
+                reset_at: None,
+            };
+        }
+        if self.cursor != Some(identity) || !self.visible {
+            return Self {
+                visible: true,
+                cursor: Some(identity),
+                reset_at: Some(now),
+            };
+        }
+        self
+    }
+
+    fn tick(self, cursor_visible: bool, now: Instant) -> Self {
+        if !cursor_visible {
+            return Self {
+                visible: false,
+                cursor: self.cursor,
+                reset_at: None,
+            };
+        }
+        let reset_at = self.reset_at.unwrap_or(now);
+        let elapsed_periods =
+            now.saturating_duration_since(reset_at).as_millis() / CURSOR_BLINK_PERIOD.as_millis();
+        Self {
+            visible: elapsed_periods.is_multiple_of(2),
+            cursor: self.cursor,
+            reset_at: Some(reset_at),
+        }
     }
 }
 
@@ -230,5 +322,36 @@ mod tests {
         assert!(parse_hex_color("#264f78").is_some());
         assert!(parse_hex_color("264f78").is_none());
         assert!(parse_hex_color("#xyzxyz").is_none());
+    }
+
+    #[test]
+    fn cursor_blink_toggles_and_resets_on_cursor_movement() {
+        let start = Instant::now();
+        let cursor = crate::render::RenderCursor {
+            line: 1,
+            column: 2,
+            visible: true,
+            color: "#7dd3fc".to_string(),
+        };
+        let state = CursorBlinkState::default().sync(cursor.clone(), start);
+        assert!(state.visible);
+        let hidden = state.tick(true, start + CURSOR_BLINK_PERIOD);
+        assert!(!hidden.visible);
+        let moved = hidden.sync(
+            crate::render::RenderCursor {
+                column: 3,
+                ..cursor
+            },
+            start + CURSOR_BLINK_PERIOD + Duration::from_millis(1),
+        );
+        assert!(moved.visible);
+        assert!(
+            moved
+                .tick(
+                    true,
+                    start + CURSOR_BLINK_PERIOD + Duration::from_millis(120)
+                )
+                .visible
+        );
     }
 }

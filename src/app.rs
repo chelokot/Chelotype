@@ -207,6 +207,14 @@ fn build_ui(app: &Application) {
         });
     }
 
+    {
+        let canvas = canvas.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
+            canvas.tick_cursor_blink();
+            glib::ControlFlow::Continue
+        });
+    }
+
     let app_for_tick = app.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         let measured_metrics = terminal_metrics_for_widget(canvas.widget());
