@@ -29,8 +29,8 @@ Prompt-to-artifact checklist
   - Status: partial; soft-wrapped cursor input now stays in one input region, but no smooth scroll model and no command-block model.
 - Keyboard input
   - Evidence: `src/input.rs`.
-  - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, and arrow byte e2e.
-  - Status: partial; no GTK window event injection e2e.
+  - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, arrow byte e2e, and `tests/gtk_e2e_tests.rs` real-window Xvfb smoke.
+  - Status: partial; GTK launches and renders under Xvfb, but there is no low-level GTK key event injection yet.
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
   - Coverage: local drag selection tests, SGR mouse reporting tests, headless mouse drag selection e2e.
@@ -41,8 +41,8 @@ Prompt-to-artifact checklist
   - Status: partial; no GTK resize e2e and scrollback reflow edge cases are weak.
 - Colors/styles/zsh prompt fidelity
   - Evidence: Ghostty cell fg/bg/style snapshots and renderer exports.
-  - Coverage: ANSI color backend test and headless Unicode/style JSON test.
-  - Status: partial; no screenshot/pixel-level app renderer verification.
+  - Coverage: ANSI color backend test, headless Unicode/style JSON test, and Xvfb real-window smoke snapshot.
+  - Status: partial; no screenshot/pixel-level app renderer verification yet.
 - Cursor position/shape/visibility
   - Evidence: cursor fields in snapshots, canvas caret drawing.
   - Coverage: backend cursor integration and canvas byte-index unit test.
@@ -56,8 +56,8 @@ Prompt-to-artifact checklist
   - Coverage: active Ghostty app-frame render benchmark, latency guard, held-key scenario.
   - Status: partial; active frame construction is gated, but not the full GTK/Cairo/Pango paint path, and there is no memory/allocation gate.
 - Container-friendly runtime assumptions
-  - Evidence: `scripts/with-zig.sh`, binary-level headless mode, README setup/run commands.
-  - Status: partial; no CI container image or deterministic shell fixture.
+  - Evidence: `scripts/with-zig.sh`, binary-level headless mode, README setup/run commands, and Xvfb-based GTK e2e test.
+  - Status: partial; no CI container image or deterministic shell fixture beyond the current headless `/bin/sh` diagnostics.
 - Workspaces, tabs/splits, command blocks, smooth scrolling
   - Evidence: none beyond current data-shape direction.
   - Status: missing.

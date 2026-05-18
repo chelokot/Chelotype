@@ -1,10 +1,12 @@
 use crate::backend::{ScreenSize, TerminalBackend};
 use crate::canvas::TerminalCanvas;
+use crate::cell_text::lines_to_text;
 use crate::input::{KeyAction, key_to_action};
 use crate::interaction::{InteractionEffect, PointerInteraction};
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::Renderer;
 use crate::selection::SelectionRange;
+use crate::snapshot::write_snapshot;
 use adw::Application;
 use adw::prelude::*;
 use gtk::glib;
@@ -45,6 +47,10 @@ fn build_ui(app: &Application) {
     apply_style(canvas.widget());
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
     let last_snapshot = std::rc::Rc::new(std::cell::RefCell::new(std::time::Instant::now()));
+    let ui_e2e = UiE2eScenario::from_env();
+    let ui_e2e_deadline = ui_e2e
+        .as_ref()
+        .map(|scenario| std::time::Instant::now() + scenario.timeout);
     let last_size = std::rc::Rc::new(std::cell::Cell::new(None::<ScreenSize>));
     let cell_metrics = std::rc::Rc::new(std::cell::Cell::new(None::<CellMetrics>));
     let mouse_mode = std::rc::Rc::new(std::cell::Cell::new(crate::backend::MouseMode::default()));
@@ -142,6 +148,14 @@ fn build_ui(app: &Application) {
     }
     canvas.widget().add_controller(scroll_controller);
 
+    if let Some(scenario) = ui_e2e.clone() {
+        let backend = backend_rc.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+            let _ = backend.borrow_mut().write(scenario.input.as_bytes());
+        });
+    }
+
+    let app_for_tick = app.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         let measured_metrics = terminal_metrics_for_widget(canvas.widget());
         cell_metrics.set(measured_metrics.map(|metrics| metrics.cell));
@@ -155,6 +169,23 @@ fn build_ui(app: &Application) {
             mouse_mode.set(content.mouse);
             let rendered = Renderer::render_frame_with_selection(content.clone(), selection.get());
             canvas.set_render(rendered);
+            if let Some(scenario) = &ui_e2e {
+                let text = lines_to_text(&content.lines);
+                if scenario
+                    .expected
+                    .iter()
+                    .all(|expected| text.contains(expected))
+                {
+                    gtk::test_widget_wait_for_draw(canvas.widget());
+                    let _ = write_snapshot(content, "gtk_e2e");
+                    app_for_tick.quit();
+                    return glib::ControlFlow::Break;
+                }
+                if ui_e2e_deadline.is_some_and(|deadline| std::time::Instant::now() > deadline) {
+                    eprintln!("gtk e2e expected content did not appear: {text}");
+                    std::process::exit(1);
+                }
+            }
             if snapshot_enabled
                 && last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
             {
@@ -166,6 +197,38 @@ fn build_ui(app: &Application) {
     });
 
     window.present();
+}
+
+#[derive(Clone)]
+struct UiE2eScenario {
+    input: String,
+    expected: Vec<String>,
+    timeout: std::time::Duration,
+}
+
+impl UiE2eScenario {
+    fn from_env() -> Option<Self> {
+        if std::env::var("CHELOTYPE_UI_E2E").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let input = std::env::var("CHELOTYPE_UI_E2E_INPUT")
+            .unwrap_or_else(|_| "printf 'CHELOTYPE_GTK_E2E_OK\\n'\n".to_string());
+        let expected = std::env::var("CHELOTYPE_UI_E2E_EXPECT")
+            .unwrap_or_else(|_| "CHELOTYPE_GTK_E2E_OK".to_string())
+            .split('|')
+            .map(ToOwned::to_owned)
+            .collect();
+        let timeout = std::env::var("CHELOTYPE_UI_E2E_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or_else(|| std::time::Duration::from_secs(4));
+        Some(Self {
+            input,
+            expected,
+            timeout,
+        })
+    }
 }
 
 fn apply_style(canvas: &gtk::DrawingArea) {

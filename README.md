@@ -29,3 +29,21 @@ bash scripts/with-zig.sh cargo run
 ```
 
 Snapshots are written to `/tmp/chelotype_snapshots` by default. Set `CHELOTYPE_SNAPSHOT_DIR` to override it.
+
+## GTK E2E
+
+Real window smoke tests run under Xvfb:
+
+```sh
+GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 \
+CHELOTYPE_UI_E2E=1 \
+CHELOTYPE_UI_E2E_INPUT="printf 'GTK_E2E_OK\n'\n" \
+CHELOTYPE_UI_E2E_EXPECT='GTK_E2E_OK' \
+xvfb-run -a target/debug/chelotype
+```
+
+Build first with `bash scripts/with-zig.sh cargo build`, or just run the covered test:
+
+```sh
+bash scripts/with-zig.sh cargo test --test gtk_e2e_tests
+```
