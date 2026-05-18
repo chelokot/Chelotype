@@ -2,7 +2,7 @@ use crate::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
 use crate::canvas::TerminalCanvas;
 use crate::cell_text::lines_to_text;
 use crate::input::{KeyAction, key_to_action};
-use crate::interaction::{InteractionEffect, PointerInteraction};
+use crate::interaction::{InteractionEffect, PointerInteraction, cursor_movement_bytes};
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::Renderer;
 use crate::selection::{SelectionRange, selected_text};
@@ -96,6 +96,7 @@ fn build_ui(app: &Application) {
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_dirty = selection_dirty.clone();
+        let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         click_controller.connect_pressed(move |gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
@@ -109,7 +110,13 @@ fn build_ui(app: &Application) {
                     .borrow_mut()
                     .press(mode.get(), button, position);
                 crate::logging::debug_log(&format!("mouse press effects={effects:?}"));
-                apply_interaction_effects(effects, &backend, &selection, &selection_dirty);
+                apply_interaction_effects(
+                    effects,
+                    &backend,
+                    &selection,
+                    &selection_dirty,
+                    &content,
+                );
             }
         });
     }
@@ -119,6 +126,7 @@ fn build_ui(app: &Application) {
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_dirty = selection_dirty.clone();
+        let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
@@ -131,7 +139,13 @@ fn build_ui(app: &Application) {
                     .borrow_mut()
                     .release(mode.get(), position);
                 crate::logging::debug_log(&format!("mouse release effects={effects:?}"));
-                apply_interaction_effects(effects, &backend, &selection, &selection_dirty);
+                apply_interaction_effects(
+                    effects,
+                    &backend,
+                    &selection,
+                    &selection_dirty,
+                    &content,
+                );
             }
         });
     }
@@ -144,6 +158,7 @@ fn build_ui(app: &Application) {
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_dirty = selection_dirty.clone();
+        let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         motion_controller.connect_motion(move |_controller, x, y| {
             crate::logging::debug_log(&format!("mouse motion x={x:.1} y={y:.1}"));
@@ -156,7 +171,13 @@ fn build_ui(app: &Application) {
                     .borrow_mut()
                     .motion(mode.get(), position);
                 crate::logging::debug_log(&format!("mouse motion effects={effects:?}"));
-                apply_interaction_effects(effects, &backend, &selection, &selection_dirty);
+                apply_interaction_effects(
+                    effects,
+                    &backend,
+                    &selection,
+                    &selection_dirty,
+                    &content,
+                );
             }
         });
     }
@@ -351,6 +372,7 @@ fn apply_interaction_effects(
     backend: &std::rc::Rc<std::cell::RefCell<TerminalBackend>>,
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
 ) {
     for effect in effects {
         match effect {
@@ -361,6 +383,14 @@ fn apply_interaction_effects(
                 crate::logging::debug_log(&format!("selection changed {range:?}"));
                 selection.set(range);
                 selection_dirty.set(true);
+            }
+            InteractionEffect::MoveCursorTo(position) => {
+                if let Some(content) = content.borrow().as_ref()
+                    && let Some(bytes) =
+                        cursor_movement_bytes(content.cursor_line, content.cursor_col, position)
+                {
+                    let _ = backend.borrow_mut().write(&bytes);
+                }
             }
         }
     }

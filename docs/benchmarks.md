@@ -14,7 +14,7 @@ Perf signals to track
 - Parser/render-state/snapshot/render should stay below the 4 ms single-frame guard.
 - Parser/render-state/snapshot/render must stay within explicit 60 Hz and 120 Hz frame budgets.
 - Held-key p95 must stay below 4 ms, p99 below 8 ms, and worst frame below 16 ms.
-- These benches now measure the active Ghostty core path. They still do not measure the full GTK/Cairo/Pango paint path visible to the user, but the runtime no longer repaints identical frames on every 16 ms tick.
+- These benches now measure the active Ghostty core path. They still do not measure the full GTK/Cairo/Pango paint path visible to the user, but the runtime no longer repaints identical frames on every 16 ms tick and the canvas now draws each terminal cell at its grid column instead of trusting full-run text layout.
 
 Next additions
 

@@ -8,6 +8,7 @@ use crate::selection::{GridPoint, SelectionRange};
 pub enum InteractionEffect {
     Write(Vec<u8>),
     SelectionChanged(Option<SelectionRange>),
+    MoveCursorTo(MouseGridPosition),
 }
 
 #[derive(Default)]
@@ -68,7 +69,11 @@ impl PointerInteraction {
         } else {
             if !self.selection_moved {
                 self.selection_anchor = None;
+                self.selection_moved = false;
+                return vec![InteractionEffect::MoveCursorTo(position)];
             }
+            self.selection_anchor = None;
+            self.selection_moved = false;
             Vec::new()
         }
     }
@@ -96,6 +101,24 @@ impl PointerInteraction {
         self.selection_moved = true;
         vec![InteractionEffect::SelectionChanged(Some(range))]
     }
+}
+
+pub fn cursor_movement_bytes(
+    cursor_row: i32,
+    cursor_column: i32,
+    target: MouseGridPosition,
+) -> Option<Vec<u8>> {
+    if cursor_row < 0 || cursor_column < 0 || cursor_row as u16 != target.row {
+        return None;
+    }
+    let target_column = i32::from(target.column);
+    let delta = target_column - cursor_column;
+    let sequence = if delta < 0 { b"\x1b[D" } else { b"\x1b[C" };
+    let mut out = Vec::new();
+    for _ in 0..delta.unsigned_abs() {
+        out.extend_from_slice(sequence);
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 #[cfg(test)]
@@ -156,11 +179,47 @@ mod tests {
     }
 
     #[test]
+    fn local_drag_stops_changing_selection_after_release() {
+        let mut interaction = PointerInteraction::default();
+        interaction.press(MouseMode::default(), MouseButton::Left, pos(2, 1));
+        interaction.motion(MouseMode::default(), pos(5, 1));
+        interaction.release(MouseMode::default(), pos(5, 1));
+        assert_eq!(
+            interaction.motion(MouseMode::default(), pos(8, 1)),
+            Vec::new()
+        );
+        assert_eq!(
+            interaction.selection(),
+            Some(SelectionRange::new(
+                GridPoint { row: 1, column: 2 },
+                GridPoint { row: 1, column: 6 }
+            ))
+        );
+    }
+
+    #[test]
     fn local_click_without_drag_does_not_leave_selection() {
         let mut interaction = PointerInteraction::default();
         interaction.press(MouseMode::default(), MouseButton::Left, pos(2, 1));
-        interaction.release(MouseMode::default(), pos(2, 1));
+        assert_eq!(
+            interaction.release(MouseMode::default(), pos(2, 1)),
+            vec![InteractionEffect::MoveCursorTo(pos(2, 1))]
+        );
         assert_eq!(interaction.selection(), None);
+    }
+
+    #[test]
+    fn cursor_movement_uses_arrow_bytes_on_current_row() {
+        assert_eq!(
+            cursor_movement_bytes(2, 5, pos(3, 2)).as_deref(),
+            Some(&b"\x1b[D\x1b[D"[..])
+        );
+        assert_eq!(
+            cursor_movement_bytes(2, 3, pos(5, 2)).as_deref(),
+            Some(&b"\x1b[C\x1b[C"[..])
+        );
+        assert_eq!(cursor_movement_bytes(2, 3, pos(3, 2)), None);
+        assert_eq!(cursor_movement_bytes(2, 3, pos(1, 1)), None);
     }
 
     #[test]

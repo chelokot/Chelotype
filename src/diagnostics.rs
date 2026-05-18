@@ -1,7 +1,7 @@
 use crate::backend::{ScreenSize, TerminalBackend};
 use crate::cell_text::lines_to_text;
 use crate::input::{KeyAction, key_to_action};
-use crate::interaction::{InteractionEffect, PointerInteraction};
+use crate::interaction::{InteractionEffect, PointerInteraction, cursor_movement_bytes};
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderLine, Renderer};
 use crate::selection::{GridPoint, SelectionRange, selected_text};
@@ -177,6 +177,17 @@ impl HeadlessRuntime {
             match effect {
                 InteractionEffect::Write(bytes) => backend.write(&bytes)?,
                 InteractionEffect::SelectionChanged(selection) => self.selection = selection,
+                InteractionEffect::MoveCursorTo(position) => {
+                    if let Some(snapshot) = backend.snapshot_renderable()
+                        && let Some(bytes) = cursor_movement_bytes(
+                            snapshot.cursor_line,
+                            snapshot.cursor_col,
+                            position,
+                        )
+                    {
+                        backend.write(&bytes)?;
+                    }
+                }
             }
         }
         Ok(())

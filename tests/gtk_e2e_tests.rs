@@ -170,7 +170,7 @@ fn gtk_e2e_exports_colored_cells_under_xvfb() {
         .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
         .env(
             "CHELOTYPE_UI_E2E_INPUT",
-            "printf '\\033[31mGTK_RED_STYLE\\033[0m\\n'; printf 'GTK_COLOR_DONE\\n'\n",
+            "printf '\\033[31mGTK_RED_%s\\033[0m\\n' STYLE; printf 'GTK_COLOR_%s\\n' DONE\n",
         )
         .env("CHELOTYPE_UI_E2E_EXPECT", "GTK_COLOR_DONE")
         .output()
@@ -611,6 +611,123 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_drag_release_keeps_selection_stable_for_copy_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk drag release e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-drag-release-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "printf 'DRAG_RELEASE_STABLE\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    if grep -R 'DRAG_RELEASE_STABLE' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'DRAG_RELEASE_STABLE' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "text for drag release copy never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+xdotool mousemove 20 115
+xdotool mousedown 1
+xdotool mousemove 220 115
+xdotool mouseup 1
+for _ in {1..100}; do
+    if grep -F 'primary	DRAG_RELEASE_STABLE' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -F 'primary	DRAG_RELEASE_STABLE' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "initial drag selection did not export expected primary text" >&2
+    cat "$clipboard_trace" >&2 || true
+    exit 1
+fi
+xdotool mousemove 620 420
+sleep 0.2
+xdotool key --window "$window_id" ctrl+shift+c
+for _ in {1..100}; do
+    if grep -F 'clipboard	DRAG_RELEASE_STABLE' "$clipboard_trace" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "released drag selection was not stable enough to copy" >&2
+cat "$clipboard_trace" >&2 || true
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-drag-release-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk drag release e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk drag release e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(
+        trace.contains("clipboard\tDRAG_RELEASE_STABLE"),
+        "selection was not stable after release: {trace}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_copies_selection_to_clipboard_with_ctrl_shift_c_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk clipboard e2e because xvfb-run or xdotool is not installed");
@@ -715,6 +832,101 @@ exit 1
         trace.contains("clipboard\tCLIPBOARD_COPY_OK"),
         "clipboard was not exported: {trace}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_click_moves_shell_cursor_on_current_input_row_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk click cursor e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-click-cursor-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "abcdef"
+sleep 0.2
+xdotool mousemove 44 115
+xdotool click 1
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "Z"
+for _ in {1..100}; do
+    if grep -R 'aZbcdef' "$snapshot_dir" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "click did not move shell cursor before typing Z" >&2
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+for file in "$snapshot_dir"/*.txt; do
+    [ -f "$file" ] || continue
+    echo "===$file" >&2
+    sed -n '1,8p' "$file" >&2
+done
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-click-cursor-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+        ])
+        .output()
+        .expect("run gtk click cursor e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk click cursor e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let text = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .map(|path| read_to_string(path).expect("read text snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("aZbcdef"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

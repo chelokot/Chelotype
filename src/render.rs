@@ -24,7 +24,16 @@ pub struct RenderLine {
     pub region: RenderRegion,
     pub text: String,
     pub markup: String,
+    pub cells: Vec<RenderCell>,
     pub runs: Vec<RenderRun>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RenderCell {
+    pub column: usize,
+    pub columns: usize,
+    pub text: String,
+    pub style: RenderStyle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -133,6 +142,7 @@ impl Renderer {
                     region: RenderRegion::Input,
                     text: line_render.text,
                     markup: line_render.markup,
+                    cells: line_render.cells,
                     runs: line_render.runs,
                 });
             } else {
@@ -145,6 +155,7 @@ impl Renderer {
                     region: RenderRegion::History,
                     text: line_render.text,
                     markup: line_render.markup,
+                    cells: line_render.cells,
                     runs: line_render.runs,
                 });
             }
@@ -192,6 +203,7 @@ fn input_region_range(content: &RenderableContentOwned) -> std::ops::RangeInclus
 struct LineRender {
     text: String,
     markup: String,
+    cells: Vec<RenderCell>,
     runs: Vec<RenderRun>,
 }
 
@@ -307,6 +319,7 @@ fn build_line_render(
     let cells = &cells[..significant_len(cells)];
     let mut text = String::new();
     let mut markup = String::new();
+    let mut render_cells = Vec::new();
     let mut runs = Vec::new();
     let mut idx = 0;
     while idx < cells.len() {
@@ -320,6 +333,15 @@ fn build_line_render(
             push_cell_text(&mut text, &cells[idx]);
             push_cell_text(&mut run_text, &cells[idx]);
             push_escaped_cell(&mut markup, &cells[idx]);
+            if !is_wide_spacer(&cells[idx]) {
+                render_cells.push(RenderCell {
+                    column: idx,
+                    columns: if cells[idx].wide { 2 } else { 1 },
+                    text: cells[idx].text.clone(),
+                    style: CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx))
+                        .into_render_style(),
+                });
+            }
             idx += 1;
         }
         markup.push_str("</span>");
@@ -332,7 +354,12 @@ fn build_line_render(
             });
         }
     }
-    LineRender { text, markup, runs }
+    LineRender {
+        text,
+        markup,
+        cells: render_cells,
+        runs,
+    }
 }
 
 fn is_selected(selection: Option<SelectionRange>, row: usize, column: usize) -> bool {

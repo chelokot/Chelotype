@@ -22,7 +22,7 @@ Prompt-to-artifact checklist
   - Status: done for the active tree.
 - Renderer consumes grid/cell state directly
   - Evidence: `src/ghostty_snapshot.rs` exports `TerminalContent`; `src/render.rs` renders typed cells/runs from that model; `src/canvas.rs` paints structured runs by grid column and draws the cursor from grid coordinates.
-  - Status: partial; canvas no longer paints whole-line markup and has nonblank screenshot plus pixel-level truecolor e2e, but still uses per-run Pango markup for text attributes and does not yet have incremental dirty-row paint or pixel-level cursor assertions.
+  - Status: partial; canvas paints individual terminal cells at fixed grid columns and has nonblank screenshot plus pixel-level truecolor e2e, but does not yet have incremental dirty-row paint or pixel-level cursor assertions.
 - History, scrollback, current input
   - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots, and Ghostty row metadata (`wrapped`, `wrap_continuation`, semantic prompt) exported through `TerminalContent`.
   - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`.
@@ -33,8 +33,8 @@ Prompt-to-artifact checklist
   - Status: partial; real keyboard input reaches the shell through GTK, with more IME/layout scenarios still needed.
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
-  - Coverage: local drag selection tests, SGR mouse reporting tests, headless mouse drag selection e2e, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
-  - Status: partial; PRIMARY/CLIPBOARD export is covered, but no shell cursor placement integration.
+  - Coverage: local drag selection tests, drag-release stop test, SGR mouse reporting tests, headless mouse drag selection e2e, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, real Xvfb+xdotool released-selection copy e2e, real Xvfb+xdotool click-to-cursor e2e, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
+  - Status: partial; PRIMARY/CLIPBOARD export and basic current-row shell cursor placement are covered, but multiline/prompt-aware cursor placement is still primitive.
 - Resize/reflow
   - Evidence: `TerminalBackend::resize` updates PTY winsize and Ghostty terminal dimensions.
   - Coverage: backend resize integration, headless resize event e2e, and real Xvfb+xdotool GTK window resize e2e that verifies changed snapshot rows.
@@ -71,4 +71,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor visual assertions, direct per-cell/incremental drawing, shell cursor placement strategy, advanced grapheme/IME tests, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor visual assertions, multiline/prompt-aware shell cursor placement, advanced grapheme/IME tests, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.

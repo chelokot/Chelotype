@@ -1,4 +1,4 @@
-use crate::render::{RenderFrame, RenderRun};
+use crate::render::{RenderCell, RenderFrame, RenderStyle};
 use gtk::cairo;
 use gtk::pango;
 use gtk::prelude::*;
@@ -66,12 +66,15 @@ fn draw_render_output(widget: &gtk::DrawingArea, context: &cairo::Context, rende
     let cell_width = terminal_cell_width(widget);
     for line in &render.lines {
         let top = line.row as f64 * line_height;
-        for run in &line.runs {
-            draw_run_background(context, run, cell_width, line_height, top);
+        for cell in &line.cells {
+            draw_cell_background(context, cell, cell_width, line_height, top);
         }
-        for run in &line.runs {
-            let left = run.start_column as f64 * cell_width;
-            let layout = terminal_layout(widget, &run_markup(run));
+        for cell in &line.cells {
+            if cell.text == " " {
+                continue;
+            }
+            let left = cell.column as f64 * cell_width;
+            let layout = terminal_layout(widget, &cell_markup(cell));
             gtk::render_layout(&widget.style_context(), context, left, top, &layout);
         }
     }
@@ -90,19 +93,19 @@ fn terminal_layout(widget: &gtk::DrawingArea, markup: &str) -> pango::Layout {
     layout
 }
 
-fn draw_run_background(
+fn draw_cell_background(
     context: &cairo::Context,
-    run: &RenderRun,
+    cell: &RenderCell,
     cell_width: f64,
     line_height: f64,
     top: f64,
 ) {
-    if let Some(color) = run.style.bg.as_deref().and_then(parse_hex_color) {
+    if let Some(color) = cell.style.bg.as_deref().and_then(parse_hex_color) {
         context.set_source_rgb(color.red, color.green, color.blue);
         context.rectangle(
-            run.start_column as f64 * cell_width,
+            cell.column as f64 * cell_width,
             top,
-            run.columns as f64 * cell_width,
+            cell.columns as f64 * cell_width,
             line_height,
         );
         let _ = context.fill();
@@ -117,29 +120,33 @@ fn draw_caret(context: &cairo::Context, render: &RenderFrame, line_height: f64, 
     let _ = context.fill();
 }
 
-fn run_markup(run: &RenderRun) -> String {
+fn cell_markup(cell: &RenderCell) -> String {
     let mut span = String::from("<span");
-    if let Some(fg) = &run.style.fg {
-        span.push_str(&format!(" foreground=\"{}\"", fg));
-    }
-    if run.style.bold {
-        span.push_str(" weight=\"bold\"");
-    }
-    if run.style.italic {
-        span.push_str(" style=\"italic\"");
-    }
-    if run.style.underline {
-        span.push_str(" underline=\"single\"");
-    }
-    if run.style.strikeout {
-        span.push_str(" strikethrough=\"true\"");
-    }
+    push_style_markup(&mut span, &cell.style);
     span.push('>');
-    for ch in run.text.chars() {
+    for ch in cell.text.chars() {
         span.push_str(&markup_escape(ch));
     }
     span.push_str("</span>");
     span
+}
+
+fn push_style_markup(span: &mut String, style: &RenderStyle) {
+    if let Some(fg) = &style.fg {
+        span.push_str(&format!(" foreground=\"{}\"", fg));
+    }
+    if style.bold {
+        span.push_str(" weight=\"bold\"");
+    }
+    if style.italic {
+        span.push_str(" style=\"italic\"");
+    }
+    if style.underline {
+        span.push_str(" underline=\"single\"");
+    }
+    if style.strikeout {
+        span.push_str(" strikethrough=\"true\"");
+    }
 }
 
 fn terminal_line_height(widget: &gtk::DrawingArea) -> f64 {
@@ -191,13 +198,13 @@ fn markup_escape(ch: char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::RenderStyle;
+    use crate::render::RenderCell;
 
     #[test]
-    fn run_markup_escapes_text_and_preserves_style() {
-        let run = RenderRun {
-            start_column: 0,
-            columns: 3,
+    fn cell_markup_escapes_text_and_preserves_style() {
+        let cell = RenderCell {
+            column: 0,
+            columns: 1,
             text: "<&>".to_string(),
             style: RenderStyle {
                 fg: Some("#ff0000".to_string()),
@@ -209,7 +216,7 @@ mod tests {
                 selected: false,
             },
         };
-        let markup = run_markup(&run);
+        let markup = cell_markup(&cell);
         assert!(markup.contains("foreground=\"#ff0000\""));
         assert!(markup.contains("weight=\"bold\""));
         assert!(markup.contains("style=\"italic\""));
