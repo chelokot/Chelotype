@@ -33,8 +33,8 @@ Prompt-to-artifact checklist
   - Status: partial; real keyboard input reaches the shell through GTK and the headless clean zsh fixture, with more IME/layout scenarios still needed.
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
-  - Coverage: local drag selection tests, drag-release stop test, SGR mouse reporting tests, headless mouse drag selection e2e, headless mouse-click cursor movement through zsh line editing, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, real Xvfb+xdotool released-selection copy e2e, real Xvfb+xdotool click-to-cursor e2e, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
-  - Status: partial; PRIMARY/CLIPBOARD export and basic current-row shell cursor placement are covered in both headless and GTK paths, but multiline/prompt-aware cursor placement is still primitive.
+  - Coverage: local drag selection tests, drag-release stop test, SGR mouse reporting tests, headless mouse drag selection e2e, headless mouse-click cursor movement through zsh line editing, headless soft-wrapped input click-to-cursor e2e, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, real Xvfb+xdotool released-selection copy e2e, real Xvfb+xdotool click-to-cursor e2e, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
+  - Status: partial; PRIMARY/CLIPBOARD export, current-row shell cursor placement, and soft-wrapped input cursor placement are covered, but semantic-prompt-aware multi-command cursor placement is still primitive.
 - Resize/reflow
   - Evidence: `TerminalBackend::resize` updates PTY winsize and Ghostty terminal dimensions.
   - Coverage: backend resize integration, headless resize event e2e, and real Xvfb+xdotool GTK window resize e2e that verifies changed snapshot rows.
@@ -71,4 +71,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor position/blink assertions, multiline/prompt-aware shell cursor placement, advanced grapheme/IME tests, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor position/blink assertions, semantic-prompt-aware shell cursor placement beyond soft wraps, advanced grapheme/IME tests, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.

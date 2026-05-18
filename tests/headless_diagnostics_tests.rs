@@ -389,6 +389,47 @@ fn headless_mode_replays_mouse_click_as_shell_cursor_movement() {
 
 #[test]
 #[serial]
+fn headless_mode_moves_cursor_across_soft_wrapped_input_rows() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-wrapped-click-cursor-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "resize:12x6|text:abcdefghijklmnopqrstuv|wait:mnopqrstuv|mouse:press:left:2,0|mouse:release:2,0|text:Z|key:Enter",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "abZcdefghijk|lmnopqrstuv")
+        .env("CHELOTYPE_HEADLESS_STEP_MS", "160")
+        .output()
+        .expect("run wrapped mouse click cursor headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let text_snapshot = snapshot_file_with_extension(&snapshot_paths(&dir), "txt");
+    let text = read_to_string(text_snapshot).expect("read text snapshot");
+    assert!(text.contains("abZcdefghijk"), "{text}");
+    assert!(text.contains("lmnopqrstuv"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_replays_resize_event() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-resize-{}",

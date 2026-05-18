@@ -2,7 +2,9 @@ use crate::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
 use crate::canvas::TerminalCanvas;
 use crate::cell_text::lines_to_text;
 use crate::input::{KeyAction, key_to_action};
-use crate::interaction::{InteractionEffect, PointerInteraction, cursor_movement_bytes};
+use crate::interaction::{
+    InteractionEffect, PointerInteraction, cursor_movement_bytes_for_content,
+};
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::Renderer;
 use crate::selection::{SelectionRange, selected_text};
@@ -386,8 +388,7 @@ fn apply_interaction_effects(
             }
             InteractionEffect::MoveCursorTo(position) => {
                 if let Some(content) = content.borrow().as_ref()
-                    && let Some(bytes) =
-                        cursor_movement_bytes(content.cursor_line, content.cursor_col, position)
+                    && let Some(bytes) = cursor_movement_bytes_for_content(content, position)
                 {
                     let _ = backend.borrow_mut().write(&bytes);
                 }

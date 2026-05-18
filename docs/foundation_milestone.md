@@ -33,7 +33,7 @@ Current state audit
 - Partial: `src/canvas.rs` provides a GTK `DrawingArea` render surface that draws terminal cells at fixed grid columns and draws the caret itself from `RenderFrame`; it is still full-frame rather than dirty-row incremental.
 - Partial: `benches/pipeline.rs` measures the active Ghostty parser/render-state/snapshot/render path, while the app runtime now uses dirty snapshots and skips identical canvas frames.
 - Weak: resize is covered at backend, headless, and GTK window-event level, but scrollback reflow edge cases are still weak.
-- Weak: first-class mouse support has mode-aware click press/release/drag plumbing, terminal mouse-reporting e2e, basic shell cursor placement on the current input row in both headless and GTK paths, a local grid selection model whose drag state stops on release, real GTK drag-selection e2e, and PRIMARY/CLIPBOARD export; multiline/prompt-aware shell cursor placement is still primitive.
+- Weak: first-class mouse support has mode-aware click press/release/drag plumbing, terminal mouse-reporting e2e, basic shell cursor placement on the current input row in both headless and GTK paths, headless soft-wrapped input cursor placement, a local grid selection model whose drag state stops on release, real GTK drag-selection e2e, and PRIMARY/CLIPBOARD export; semantic-prompt-aware multi-command cursor placement is still primitive.
 - Weak: screenshots now prove the GTK surface is nonblank, truecolor text reaches pixels, and the cursor is rendered as a narrow caret, but benchmarks do not yet prove UI-visible GTK paint smoothness.
 
 Next implementation order
@@ -41,7 +41,7 @@ Next implementation order
 1. Extend GTK window event e2e from launch/type/Enter/resize/drag/color/cursor snapshots to stronger cursor position and blinking assertions.
 2. Replace line-level Pango markup rendering with direct per-run/per-cell drawing.
 3. Add clipboard selection export.
-4. Design shell cursor placement for mouse-driven command editing.
+4. Design semantic-prompt-aware shell cursor placement for mouse-driven command editing beyond soft-wrapped current input.
 5. Add smooth scrolling and command blocks.
 6. Add workspace/tab/split model.
 7. Add GTK paint-path perf gates and allocation tracking.
