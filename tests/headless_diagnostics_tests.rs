@@ -104,6 +104,10 @@ fn headless_mode_writes_deterministic_snapshot_files_without_warnings() {
     assert!(json.contains("\"cursor_line\""));
     assert!(json.contains("\"display_offset\""));
     assert!(json.contains("\"mouse\""));
+    assert!(json.contains("\"wrapped\""));
+    assert!(json.contains("\"wrap_continuation\""));
+    assert!(json.contains("\"semantic_prompt\""));
+    assert!(json.contains("\"cells\""));
     assert!(json.contains("\"text\""));
     assert!(json.contains("chelotype headless snapshot"));
 

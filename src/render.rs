@@ -76,11 +76,17 @@ impl Renderer {
         let mut history_markup = String::new();
         let mut input_markup = String::new();
         let mut input_text = String::new();
+        let input_range = input_region_range(&content);
         for (idx, line) in content.lines.iter().enumerate() {
             let markup = cells_to_markup(line, idx, selection);
-            if idx as i32 == content.cursor_line {
+            if input_range.contains(&idx) {
+                if !input_markup.is_empty() {
+                    input_markup.push('\n');
+                }
                 input_markup.push_str(&markup);
-                input_text = cells_to_text(line);
+                if idx as i32 == content.cursor_line {
+                    input_text = cells_to_text(line);
+                }
             } else {
                 history_markup.push_str(&markup);
                 if idx + 1 != content.lines.len() {
@@ -110,11 +116,17 @@ impl Renderer {
         let mut input_markup = String::new();
         let mut input_text = String::new();
         let mut lines = Vec::with_capacity(content.lines.len());
+        let input_range = input_region_range(&content);
         for (idx, line) in content.lines.iter().enumerate() {
             let line_render = build_line_render(line, idx, selection);
-            if idx as i32 == content.cursor_line {
+            if input_range.contains(&idx) {
+                if !input_markup.is_empty() {
+                    input_markup.push('\n');
+                }
                 input_markup.push_str(&line_render.markup);
-                input_text = line_render.text.clone();
+                if idx as i32 == content.cursor_line {
+                    input_text = line_render.text.clone();
+                }
                 lines.push(RenderLine {
                     row: idx,
                     region: RenderRegion::Input,
@@ -150,6 +162,30 @@ impl Renderer {
             lines,
         }
     }
+}
+
+fn input_region_range(content: &RenderableContentOwned) -> std::ops::RangeInclusive<usize> {
+    let cursor = content.cursor_line.max(0) as usize;
+    let end = cursor.min(content.lines.len().saturating_sub(1));
+    let mut start = end;
+    while start > 0 {
+        let current = content
+            .line_metadata
+            .get(start)
+            .copied()
+            .unwrap_or_default();
+        let previous = content
+            .line_metadata
+            .get(start - 1)
+            .copied()
+            .unwrap_or_default();
+        if current.wrap_continuation || previous.wrapped {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    start..=end
 }
 
 struct LineRender {
@@ -371,7 +407,7 @@ fn push_escaped_char(out: &mut String, ch: char) {
 mod tests {
     use super::*;
     use crate::backend::{MouseMode, RenderableContentOwned};
-    use crate::terminal_grid::{TerminalCell, TerminalColors};
+    use crate::terminal_grid::{TerminalCell, TerminalColors, TerminalLineMetadata};
 
     fn cell(text: &str) -> TerminalCell {
         TerminalCell {
@@ -473,6 +509,7 @@ mod tests {
                 vec![cell("o"), cell("l"), cell("d")],
                 vec![cell("n"), cell("e"), cell("w")],
             ],
+            line_metadata: vec![TerminalLineMetadata::default(); 2],
             cursor_line: 1,
             cursor_col: 3,
             cursor_visible: true,
@@ -489,5 +526,39 @@ mod tests {
         assert_eq!(frame.lines[1].text, "new");
         assert_eq!(frame.lines[1].runs[0].start_column, 0);
         assert_eq!(frame.input_text, "new");
+    }
+
+    #[test]
+    fn renderer_marks_soft_wrapped_cursor_line_as_single_input_region() {
+        let content = RenderableContentOwned {
+            lines: vec![
+                vec![cell("o"), cell("l"), cell("d")],
+                vec![cell("l"), cell("o"), cell("n"), cell("g")],
+                vec![cell("c"), cell("m"), cell("d")],
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata::default(),
+                TerminalLineMetadata {
+                    wrapped: true,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    wrap_continuation: true,
+                    ..TerminalLineMetadata::default()
+                },
+            ],
+            cursor_line: 2,
+            cursor_col: 3,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        };
+        let frame = Renderer::render_frame_with_selection(content, None);
+        assert_eq!(frame.lines[0].region, RenderRegion::History);
+        assert_eq!(frame.lines[1].region, RenderRegion::Input);
+        assert_eq!(frame.lines[2].region, RenderRegion::Input);
+        assert_eq!(frame.input_text, "cmd");
+        assert!(frame.input_markup.contains('\n'));
     }
 }

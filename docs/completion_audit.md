@@ -24,9 +24,9 @@ Prompt-to-artifact checklist
   - Evidence: `src/ghostty_snapshot.rs` exports `TerminalContent`; `src/render.rs` renders typed cells/runs from that model.
   - Status: partial; canvas still paints Pango markup lines rather than direct incremental per-cell draw batches.
 - History, scrollback, current input
-  - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots.
-  - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`.
-  - Status: partial; no smooth scroll model and no command-block model.
+  - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots, and Ghostty row metadata (`wrapped`, `wrap_continuation`, semantic prompt) exported through `TerminalContent`.
+  - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`.
+  - Status: partial; soft-wrapped cursor input now stays in one input region, but no smooth scroll model and no command-block model.
 - Keyboard input
   - Evidence: `src/input.rs`.
   - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, and arrow byte e2e.

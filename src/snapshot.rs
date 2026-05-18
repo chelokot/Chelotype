@@ -1,6 +1,6 @@
 use crate::backend::RenderableContentOwned;
 use crate::cell_text::lines_to_text;
-use crate::terminal_grid::TerminalCell;
+use crate::terminal_grid::{TerminalCell, TerminalLineMetadata, TerminalSemanticPrompt};
 use serde::Serialize;
 use std::fs::{File, create_dir_all};
 use std::io::Write;
@@ -30,7 +30,15 @@ struct SnapshotJson {
     display_offset: usize,
     mouse: MouseJson,
     text: String,
-    lines: Vec<Vec<CellJson>>,
+    lines: Vec<LineJson>,
+}
+
+#[derive(Serialize)]
+struct LineJson {
+    wrapped: bool,
+    wrap_continuation: bool,
+    semantic_prompt: &'static str,
+    cells: Vec<CellJson>,
 }
 
 #[derive(Serialize)]
@@ -57,28 +65,40 @@ pub fn write_snapshot(snapshot: RenderableContentOwned, label: &str) -> Option<P
     let lines_json = snapshot
         .lines
         .iter()
-        .map(|line| {
-            line.iter()
-                .map(|cell| CellJson {
-                    text: cell.text.clone(),
-                    fg: cell
-                        .fg
-                        .clone()
-                        .unwrap_or_else(|| snapshot.colors.foreground.clone()),
-                    bg: cell
-                        .bg
-                        .clone()
-                        .unwrap_or_else(|| snapshot.colors.background.clone()),
-                    bold: cell.bold,
-                    underline: cell.underline,
-                    italic: cell.italic,
-                    inverse: cell.inverse,
-                    wide: cell.wide,
-                    wide_spacer: cell.wide_spacer,
-                })
-                .collect()
+        .enumerate()
+        .map(|(line_idx, line)| {
+            let metadata = snapshot
+                .line_metadata
+                .get(line_idx)
+                .copied()
+                .unwrap_or_default();
+            LineJson {
+                wrapped: metadata.wrapped,
+                wrap_continuation: metadata.wrap_continuation,
+                semantic_prompt: semantic_prompt_name(metadata),
+                cells: line
+                    .iter()
+                    .map(|cell| CellJson {
+                        text: cell.text.clone(),
+                        fg: cell
+                            .fg
+                            .clone()
+                            .unwrap_or_else(|| snapshot.colors.foreground.clone()),
+                        bg: cell
+                            .bg
+                            .clone()
+                            .unwrap_or_else(|| snapshot.colors.background.clone()),
+                        bold: cell.bold,
+                        underline: cell.underline,
+                        italic: cell.italic,
+                        inverse: cell.inverse,
+                        wide: cell.wide,
+                        wide_spacer: cell.wide_spacer,
+                    })
+                    .collect(),
+            }
         })
-        .collect::<Vec<Vec<CellJson>>>();
+        .collect::<Vec<LineJson>>();
     let json = SnapshotJson {
         rows: snapshot.lines.len(),
         cols: snapshot.lines.iter().map(Vec::len).max().unwrap_or(0),
@@ -115,12 +135,20 @@ fn snapshot_plain_from_lines(lines: &[Vec<TerminalCell>]) -> String {
     lines_to_text(lines)
 }
 
+fn semantic_prompt_name(metadata: TerminalLineMetadata) -> &'static str {
+    match metadata.semantic_prompt {
+        TerminalSemanticPrompt::None => "none",
+        TerminalSemanticPrompt::Prompt => "prompt",
+        TerminalSemanticPrompt::Continuation => "continuation",
+    }
+}
+
 fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
     let mut out = String::from(
         "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:JetBrains Mono,monospace;font-size:13px;white-space:pre;\">",
     );
     for (line_idx, line) in snapshot.lines.iter().enumerate() {
-        for (col_idx, cell) in line.iter().enumerate() {
+        for (col_idx, cell) in line.cells.iter().enumerate() {
             if cell.wide_spacer {
                 continue;
             }

@@ -48,9 +48,25 @@ impl Default for TerminalColors {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TerminalLineMetadata {
+    pub wrapped: bool,
+    pub wrap_continuation: bool,
+    pub semantic_prompt: TerminalSemanticPrompt,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TerminalSemanticPrompt {
+    #[default]
+    None,
+    Prompt,
+    Continuation,
+}
+
 #[derive(Clone)]
 pub struct TerminalContent {
     pub lines: Vec<Vec<TerminalCell>>,
+    pub line_metadata: Vec<TerminalLineMetadata>,
     pub cursor_line: i32,
     pub cursor_col: i32,
     pub cursor_visible: bool,

@@ -1,6 +1,9 @@
-use crate::terminal_grid::{MouseMode, TerminalCell, TerminalColors, TerminalContent};
+use crate::terminal_grid::{
+    MouseMode, TerminalCell, TerminalColors, TerminalContent, TerminalLineMetadata,
+    TerminalSemanticPrompt,
+};
 use libghostty_vt::render::{CellIterator, Dirty, RowIterator};
-use libghostty_vt::screen::CellWide;
+use libghostty_vt::screen::{CellWide, RowSemanticPrompt};
 use libghostty_vt::style::{RgbColor, Underline};
 use libghostty_vt::terminal::Mode;
 use libghostty_vt::{RenderState, Terminal};
@@ -45,16 +48,19 @@ impl GhosttySnapshotter {
         }) || dirty == Dirty::Full;
         let previous = self.cached.as_ref();
         let mut lines = Vec::with_capacity(rows);
+        let mut line_metadata = Vec::with_capacity(rows);
 
         {
             let mut row_iter = self.row_iter.update(&snapshot)?;
             let mut row_index = 0usize;
             while let Some(row) = row_iter.next() {
+                let metadata = line_metadata_from_ghostty(row.raw_row()?)?;
                 if !full_dirty
                     && !row.dirty()?
                     && let Some(line) = previous.and_then(|content| content.lines.get(row_index))
                 {
                     lines.push(line.clone());
+                    line_metadata.push(metadata);
                     row_index += 1;
                     continue;
                 }
@@ -65,12 +71,14 @@ impl GhosttySnapshotter {
                     line.push(terminal_cell_from_ghostty(cell, &colors)?);
                 }
                 lines.push(line);
+                line_metadata.push(metadata);
                 row_index += 1;
             }
         }
 
         let content = TerminalContent {
             lines,
+            line_metadata,
             cursor_line,
             cursor_col,
             cursor_visible,
@@ -99,6 +107,20 @@ pub fn mouse_mode(terminal: &Terminal<'static, 'static>) -> MouseMode {
         sgr: terminal.mode(Mode::SGR_MOUSE).unwrap_or(false),
         utf8: terminal.mode(Mode::UTF8_MOUSE).unwrap_or(false),
     }
+}
+
+fn line_metadata_from_ghostty(
+    row: libghostty_vt::screen::Row,
+) -> libghostty_vt::error::Result<TerminalLineMetadata> {
+    Ok(TerminalLineMetadata {
+        wrapped: row.is_wrapped()?,
+        wrap_continuation: row.is_wrap_continuation()?,
+        semantic_prompt: match row.semantic_prompt()? {
+            RowSemanticPrompt::None => TerminalSemanticPrompt::None,
+            RowSemanticPrompt::Prompt => TerminalSemanticPrompt::Prompt,
+            RowSemanticPrompt::Continuation => TerminalSemanticPrompt::Continuation,
+        },
+    })
 }
 
 fn terminal_cell_from_ghostty(
@@ -149,4 +171,25 @@ fn style_color_to_hex(
 
 fn rgb_to_hex(color: RgbColor) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libghostty_vt::TerminalOptions;
+
+    #[test]
+    fn snapshot_exports_soft_wrap_metadata() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 4,
+            rows: 3,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        terminal.vt_write(b"abcde");
+        let mut snapshotter = GhosttySnapshotter::new().expect("snapshotter");
+        let snapshot = snapshotter.snapshot(&terminal).expect("snapshot");
+        assert!(snapshot.line_metadata[0].wrapped);
+        assert!(snapshot.line_metadata[1].wrap_continuation);
+    }
 }
