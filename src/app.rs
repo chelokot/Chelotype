@@ -520,7 +520,9 @@ fn build_ui(app: &Application) {
             None
         };
         if let Some(content) = render_content {
+            let render_started = std::time::Instant::now();
             let rendered = Renderer::render_frame_with_selection(content.clone(), selection.get());
+            crate::perf_trace::record_duration("gtk_render", render_started.elapsed());
             canvas.set_render(rendered);
             if selection_changed {
                 copy_selection_to_primary(canvas.widget(), &content, selection.get());

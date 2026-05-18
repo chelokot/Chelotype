@@ -9,6 +9,7 @@ pub mod input;
 pub mod interaction;
 pub mod logging;
 pub mod mouse;
+pub mod perf_trace;
 pub mod render;
 pub mod selection;
 pub mod snapshot;

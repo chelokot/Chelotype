@@ -1,7 +1,7 @@
 use serial_test::serial;
 use std::fs::{read_dir, read_to_string};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn has_command(name: &str) -> bool {
     Command::new("bash")
@@ -98,6 +98,26 @@ fn geometry_metric(path: &std::path::Path, name: &str) -> f64 {
             (key == name).then(|| value.parse::<f64>().expect("numeric geometry metric"))
         })
         .unwrap_or_else(|| panic!("missing geometry metric {name}: {geometry}"))
+}
+
+fn perf_samples(path: &std::path::Path, event: &str) -> Vec<Duration> {
+    read_to_string(path)
+        .expect("read perf trace")
+        .lines()
+        .filter_map(|line| {
+            let (kind, micros) = line.split_once('\t')?;
+            if kind != event {
+                return None;
+            }
+            Some(Duration::from_micros(micros.parse().expect("perf micros")))
+        })
+        .collect()
+}
+
+fn percentile_duration(mut samples: Vec<Duration>, percentile: usize) -> Duration {
+    samples.sort_unstable();
+    let index = ((samples.len() - 1) * percentile) / 100;
+    samples[index]
 }
 
 #[derive(Clone, Copy)]
@@ -898,6 +918,133 @@ exit 1
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("XDO_E2E_OK"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_tracks_held_key_render_and_paint_latency_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk held-key perf e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-held-key-perf-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let zdot = dir.join("zdot");
+    let snapshots = dir.join("snapshots");
+    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    std::fs::create_dir_all(&snapshots).expect("snapshot dir");
+    std::fs::write(
+        zdot.join(".zshrc"),
+        "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
+    )
+    .expect("zshrc fixture");
+    let perf_trace = dir.join("perf.tsv");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+perf_trace="$3"
+zdot="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_PERF_TRACE="$perf_trace" SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.35
+xdotool keydown --window "$window_id" a
+sleep 10
+xdotool keyup --window "$window_id" a
+sleep 0.5
+if [ ! -s "$perf_trace" ]; then
+    echo "held-key perf trace was not written" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+if ! grep -R 'aaaaaaaaaaaaaaaaaaaaaaaa' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "held-key snapshots did not show sustained typed input" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-held-key-perf-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            snapshots.to_str().expect("snapshot dir utf8"),
+            perf_trace.to_str().expect("perf trace path utf8"),
+            zdot.to_str().expect("zdot path utf8"),
+        ])
+        .output()
+        .expect("run gtk held-key perf e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk held-key perf e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let render = perf_samples(&perf_trace, "gtk_render");
+    let paint = perf_samples(&perf_trace, "gtk_paint");
+    assert!(
+        render.len() >= 80,
+        "held-key produced too few render samples: {}",
+        render.len()
+    );
+    assert!(
+        paint.len() >= 80,
+        "held-key produced too few paint samples: {}",
+        paint.len()
+    );
+    let render_p95 = percentile_duration(render.clone(), 95);
+    let render_p99 = percentile_duration(render, 99);
+    let paint_p95 = percentile_duration(paint.clone(), 95);
+    let paint_p99 = percentile_duration(paint, 99);
+    assert!(
+        render_p95 <= Duration::from_millis(8),
+        "held-key gtk_render p95 exceeded 120 Hz budget: {render_p95:?}"
+    );
+    assert!(
+        render_p99 <= Duration::from_millis(16),
+        "held-key gtk_render p99 exceeded 60 Hz budget: {render_p99:?}"
+    );
+    assert!(
+        paint_p95 <= Duration::from_millis(16),
+        "held-key gtk_paint p95 exceeded 60 Hz budget: {paint_p95:?}"
+    );
+    assert!(
+        paint_p99 <= Duration::from_millis(33),
+        "held-key gtk_paint p99 exceeded two-frame budget: {paint_p99:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

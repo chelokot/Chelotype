@@ -33,10 +33,12 @@ impl TerminalCanvas {
         let draw_render = render.clone();
         let draw_cursor_blink = cursor_blink.clone();
         area.set_draw_func(move |widget, context, width, height| {
+            let started = Instant::now();
             draw_background(context, width, height);
             if let Some(render) = draw_render.borrow().as_ref() {
                 draw_render_output(widget, context, render, draw_cursor_blink.get());
             }
+            crate::perf_trace::record_duration("gtk_paint", started.elapsed());
         });
 
         Self {

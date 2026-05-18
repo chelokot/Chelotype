@@ -13,7 +13,7 @@ Prompt-to-artifact checklist
 - One terminal-core state / shell-driven source of truth
   - Evidence: `src/backend.rs` owns one `libghostty_vt::Terminal`; PTY reader bytes are fed into that terminal state.
   - Coverage: backend integration tests and headless snapshots.
-  - Status: partial; active app still rebuilds full render frames every tick.
+  - Status: partial; active app rebuilds render frames only when the active terminal or selection changes, but dirty-row incremental rendering is not implemented yet.
 - Core choice
   - Evidence: `docs/adr_terminal_core.md`.
   - Status: done for this stage; `libghostty-vt` is selected and implemented in the active backend.
@@ -25,24 +25,24 @@ Prompt-to-artifact checklist
   - Status: partial; canvas paints individual terminal cells at fixed grid columns and has nonblank screenshot plus pixel-level truecolor e2e, but does not yet have incremental dirty-row paint or pixel-level cursor assertions.
 - History, scrollback, current input
   - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots, Ghostty row metadata (`wrapped`, `wrap_continuation`, semantic prompt) exported through `TerminalContent`, and semantic prompt rows converted to `RenderFrame.command_blocks`.
-  - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`, and `renderer_exports_prompt_delimited_command_blocks`.
-  - Status: partial; soft-wrapped cursor input stays in one input region and prompt-delimited command-block metadata exists, but no smooth scroll model or command-block UI yet.
+  - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`, `render::tests::renderer_marks_semantic_prompt_continuations_as_input_region`, and `renderer_exports_prompt_delimited_command_blocks`.
+  - Status: partial; soft-wrapped and semantic prompt continuation input stays in one input region and prompt-delimited command-block metadata exists, but no smooth scroll model or command-block UI yet.
 - Keyboard input
   - Evidence: `src/input.rs`.
   - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, arrow byte e2e, `tests/gtk_e2e_tests.rs` real-window Xvfb smoke, and Xvfb+xdotool keyboard input into the actual window.
   - Status: partial; real keyboard input reaches the shell through GTK and the headless clean zsh fixture, with more IME/layout scenarios still needed.
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
-  - Coverage: local drag selection tests, drag-release stop test, SGR mouse reporting tests, headless mouse drag selection e2e, headless mouse-click cursor movement through zsh line editing, headless soft-wrapped input click-to-cursor e2e, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, real Xvfb+xdotool released-selection copy e2e, real Xvfb+xdotool click-to-cursor e2e, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
-  - Status: partial; PRIMARY/CLIPBOARD export, current-row shell cursor placement, and soft-wrapped input cursor placement are covered, but semantic-prompt-aware multi-command cursor placement is still primitive.
+  - Coverage: local drag selection tests, drag-release stop test, SGR mouse reporting tests, headless mouse drag selection e2e, headless mouse-click cursor movement through zsh line editing, headless soft-wrapped input click-to-cursor e2e, semantic prompt continuation cursor movement unit tests, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, real Xvfb+xdotool released-selection copy e2e, real Xvfb+xdotool click-to-cursor e2e, real Xvfb+xdotool click-to-cursor with zsh autosuggestions visible, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
+  - Status: partial; PRIMARY/CLIPBOARD export, current-row shell cursor placement, soft-wrapped input cursor placement, and semantic prompt continuation row cursor placement are covered, but richer multi-command cursor placement is still primitive.
 - Resize/reflow
   - Evidence: `TerminalBackend::resize` updates PTY winsize and Ghostty terminal dimensions.
   - Coverage: backend resize integration, headless resize event e2e, and real Xvfb+xdotool GTK window resize e2e that verifies changed snapshot rows.
   - Status: partial; scrollback reflow edge cases are weak.
 - Colors/styles/zsh prompt fidelity
   - Evidence: Ghostty cell fg/bg/style snapshots and renderer exports.
-  - Coverage: ANSI color backend test, headless Unicode/style JSON test, headless clean-zsh colored prompt cell test, Xvfb real-window smoke snapshot, GTK color e2e that verifies ANSI-colored output cells in JSON, and pixel-level truecolor screenshot e2e.
-  - Status: partial; truecolor and deterministic zsh prompt color reach snapshots/render dumps, but real user theme/plugin fidelity is not deeply asserted.
+  - Coverage: ANSI color backend test, headless Unicode/style JSON test, headless clean-zsh colored prompt cell test, Xvfb real-window smoke snapshot, GTK color e2e that verifies ANSI-colored output cells in JSON, pixel-level truecolor screenshot e2e, and a real zsh-autosuggestions fixture that asserts grey suggestion cells stay on exact grid columns across the styled space.
+  - Status: partial; truecolor, deterministic zsh prompt color, and zsh autosuggestion styling reach snapshots/render dumps, but broader user theme/plugin fidelity is not deeply asserted.
 - Cursor position/shape/visibility
   - Evidence: cursor fields in snapshots, canvas caret drawing.
   - Coverage: backend cursor integration, HTML snapshot cursor-placement unit test, canvas blink reset unit test, real Xvfb screenshot e2e that asserts the cursor-colored pixels form a narrow vertical caret, and real Xvfb screenshot e2e that verifies cursor blink-off plus visible reset after input.
@@ -52,9 +52,9 @@ Prompt-to-artifact checklist
   - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata; headless emoji/ZWJ/ambiguous-width test verifies ZWJ emoji cells and single-width ambiguous characters through snapshots and render dumps.
   - Status: partial; emoji ZWJ and ambiguous-width coverage exists, but IME/composition scenarios are still needed.
 - Perf gates
-  - Evidence: `benches/pipeline.rs`, `docs/benchmarks.md`.
-  - Coverage: active Ghostty app-frame render benchmark, 4 ms latency guard, explicit 60/120 Hz frame-budget gates, held-key scenario, backend dirty-snapshot regression test, and canvas frame equality skip.
-  - Status: partial; active frame construction is gated and idle repaint churn is reduced, but not the full GTK/Cairo/Pango paint path, and there is no memory/allocation gate.
+  - Evidence: `benches/pipeline.rs`, `src/perf_trace.rs`, `tests/gtk_e2e_tests.rs`, `docs/benchmarks.md`.
+  - Coverage: active Ghostty app-frame render benchmark, 4 ms latency guard, explicit 60/120 Hz frame-budget gates, Criterion held-key scenario, backend dirty-snapshot regression test, canvas frame equality skip, and real Xvfb 10-second held-key e2e that records and gates `gtk_render` and `gtk_paint` p95/p99.
+  - Status: partial; active frame construction and GTK paint are gated, but there is no memory/allocation gate.
 - Container-friendly runtime assumptions
   - Evidence: `scripts/with-zig.sh`, binary-level headless mode, clean `zsh -f` diagnostics fixture, README setup/run commands, and Xvfb-based GTK e2e test.
   - Status: partial; no CI container image yet.
@@ -72,4 +72,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor position assertions, semantic-prompt-aware shell cursor placement beyond soft wraps, advanced grapheme/IME tests, split-pane UI, command-block UI, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor position assertions, advanced grapheme/IME tests, split-pane UI, command-block UI, smooth scrolling, and memory/allocation perf gates.
