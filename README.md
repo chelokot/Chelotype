@@ -48,4 +48,4 @@ Build first with `bash scripts/with-zig.sh cargo build`, or just run the covered
 bash scripts/with-zig.sh cargo test --test gtk_e2e_tests
 ```
 
-The same test file also runs an `xdotool` scenario that sends real keyboard events to the Xvfb window and waits until shell output appears in snapshots.
+The same test file also runs `xdotool` scenarios that send real keyboard events, drag-select terminal text with the mouse, resize the GTK window, and verify the resulting structured snapshots.

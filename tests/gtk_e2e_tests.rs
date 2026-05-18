@@ -281,3 +281,118 @@ exit 1
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+#[serial]
+fn gtk_e2e_resizes_real_window_and_terminal_grid_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk resize e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-resize-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+initial_rows=""
+for _ in {1..80}; do
+    latest_json="$(ls "$snapshot_dir"/*.json 2>/dev/null | tail -n 1 || true)"
+    if [ -n "$latest_json" ]; then
+        initial_rows="$(sed -n 's/^  "rows": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+    fi
+    if [ -n "$initial_rows" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$initial_rows" ]; then
+    echo "initial resize snapshot never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+xdotool windowsize "$window_id" 900 320
+for _ in {1..80}; do
+    for json in "$snapshot_dir"/*.json; do
+        [ -f "$json" ] || continue
+        rows="$(sed -n 's/^  "rows": \([0-9][0-9]*\),/\1/p' "$json" | head -n 1)"
+        if [ -n "$rows" ] && [ "$rows" -lt "$initial_rows" ]; then
+            exit 0
+        fi
+    done
+    sleep 0.1
+done
+echo "terminal rows did not shrink after GTK window resize" >&2
+echo "initial rows: $initial_rows" >&2
+grep -R '"rows"' "$snapshot_dir" >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-resize-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+        ])
+        .output()
+        .expect("run gtk resize e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk resize e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("panic"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let rows = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| read_to_string(path).expect("read json snapshot"))
+        .map(|json| {
+            serde_json::from_str::<serde_json::Value>(&json).expect("valid snapshot json")["rows"]
+                .as_u64()
+                .expect("numeric rows")
+        })
+        .collect::<Vec<_>>();
+    let min_rows = rows.iter().min().expect("resize snapshots");
+    let max_rows = rows.iter().max().expect("resize snapshots");
+    assert!(min_rows < max_rows, "resize rows did not change: {rows:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -30,15 +30,15 @@ Prompt-to-artifact checklist
 - Keyboard input
   - Evidence: `src/input.rs`.
   - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, arrow byte e2e, `tests/gtk_e2e_tests.rs` real-window Xvfb smoke, and Xvfb+xdotool keyboard input into the actual window.
-  - Status: partial; real keyboard input reaches the shell through GTK, but GTK mouse event injection is still missing.
+  - Status: partial; real keyboard input reaches the shell through GTK, with more IME/layout scenarios still needed.
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
-  - Coverage: local drag selection tests, SGR mouse reporting tests, headless mouse drag selection e2e.
-  - Status: partial; no GTK drag event injection e2e, no clipboard export, no shell cursor placement integration.
+  - Coverage: local drag selection tests, SGR mouse reporting tests, headless mouse drag selection e2e, and real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`.
+  - Status: partial; no clipboard export and no shell cursor placement integration.
 - Resize/reflow
   - Evidence: `TerminalBackend::resize` updates PTY winsize and Ghostty terminal dimensions.
-  - Coverage: backend resize integration and headless resize event e2e.
-  - Status: partial; no GTK resize e2e and scrollback reflow edge cases are weak.
+  - Coverage: backend resize integration, headless resize event e2e, and real Xvfb+xdotool GTK window resize e2e that verifies changed snapshot rows.
+  - Status: partial; scrollback reflow edge cases are weak.
 - Colors/styles/zsh prompt fidelity
   - Evidence: Ghostty cell fg/bg/style snapshots and renderer exports.
   - Coverage: ANSI color backend test, headless Unicode/style JSON test, and Xvfb real-window smoke snapshot.
@@ -71,4 +71,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are GTK window event e2e, direct per-cell/incremental drawing, shell cursor placement strategy, advanced grapheme/IME tests, clipboard selection, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor/cell/color visual assertions, direct per-cell/incremental drawing, shell cursor placement strategy, advanced grapheme/IME tests, clipboard selection, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.

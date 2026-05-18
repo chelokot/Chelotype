@@ -17,7 +17,7 @@ Current architecture
 Next implementation order
 
 1. Replace Pango-line markup drawing with direct per-run or per-cell drawing batches.
-2. Add GTK window event e2e for launch, typing, Enter, arrows, resize, clicks, drag selection, and warnings/errors.
+2. Extend GTK window event e2e beyond launch, typing, Enter, resize, drag selection, and warnings/errors to cover click-specific cursor behavior, stronger color/cursor assertions, and screenshot/pixel checks.
 3. Add clipboard-backed selection export.
 4. Add shell cursor placement strategy for mouse-driven command editing.
 5. Add smooth scrolling and command-block metadata.
