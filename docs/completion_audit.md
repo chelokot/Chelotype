@@ -29,8 +29,8 @@ Prompt-to-artifact checklist
   - Status: partial; soft-wrapped cursor input now stays in one input region, but no smooth scroll model and no command-block model.
 - Keyboard input
   - Evidence: `src/input.rs`.
-  - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, arrow byte e2e, and `tests/gtk_e2e_tests.rs` real-window Xvfb smoke.
-  - Status: partial; GTK launches and renders under Xvfb, but there is no low-level GTK key event injection yet.
+  - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, arrow byte e2e, `tests/gtk_e2e_tests.rs` real-window Xvfb smoke, and Xvfb+xdotool keyboard input into the actual window.
+  - Status: partial; real keyboard input reaches the shell through GTK, but GTK mouse event injection is still missing.
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
   - Coverage: local drag selection tests, SGR mouse reporting tests, headless mouse drag selection e2e.
