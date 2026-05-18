@@ -1,3 +1,4 @@
+pub mod allocation_trace;
 pub mod app;
 pub mod backend;
 pub mod canvas;
@@ -16,3 +17,6 @@ pub mod snapshot;
 pub mod terminal_font;
 pub mod terminal_grid;
 pub mod workspace;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: allocation_trace::CountingAllocator = allocation_trace::CountingAllocator;

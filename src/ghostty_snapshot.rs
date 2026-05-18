@@ -2,7 +2,7 @@ use crate::terminal_grid::{
     MouseMode, TerminalCell, TerminalColors, TerminalContent, TerminalLineMetadata,
     TerminalSemanticPrompt,
 };
-use libghostty_vt::render::{CellIterator, Dirty, RowIterator};
+use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::screen::{CellWide, RowSemanticPrompt};
 use libghostty_vt::style::{RgbColor, Underline};
 use libghostty_vt::terminal::Mode;
@@ -12,7 +12,6 @@ pub struct GhosttySnapshotter {
     render_state: RenderState<'static>,
     row_iter: RowIterator<'static>,
     cell_iter: CellIterator<'static>,
-    cached: Option<TerminalContent>,
 }
 
 impl GhosttySnapshotter {
@@ -21,13 +20,10 @@ impl GhosttySnapshotter {
             render_state: RenderState::new()?,
             row_iter: RowIterator::new()?,
             cell_iter: CellIterator::new()?,
-            cached: None,
         })
     }
 
-    pub fn invalidate(&mut self) {
-        self.cached = None;
-    }
+    pub fn invalidate(&mut self) {}
 
     pub fn snapshot(
         &mut self,
@@ -42,29 +38,13 @@ impl GhosttySnapshotter {
         let cursor_col = cursor.map(|cursor| i32::from(cursor.x)).unwrap_or(-1);
         let rows = usize::from(snapshot.rows()?);
         let cols = usize::from(snapshot.cols()?);
-        let dirty = snapshot.dirty()?;
-        let full_dirty = self.cached.as_ref().is_none_or(|cached| {
-            cached.lines.len() != rows || cached.lines.iter().any(|line| line.len() != cols)
-        }) || dirty == Dirty::Full;
-        let previous = self.cached.as_ref();
         let mut lines = Vec::with_capacity(rows);
         let mut line_metadata = Vec::with_capacity(rows);
 
         {
             let mut row_iter = self.row_iter.update(&snapshot)?;
-            let mut row_index = 0usize;
             while let Some(row) = row_iter.next() {
                 let metadata = line_metadata_from_ghostty(row.raw_row()?)?;
-                if !full_dirty
-                    && !row.dirty()?
-                    && let Some(line) = previous.and_then(|content| content.lines.get(row_index))
-                {
-                    lines.push(line.clone());
-                    line_metadata.push(metadata);
-                    row_index += 1;
-                    continue;
-                }
-
                 let mut line = Vec::with_capacity(cols);
                 let mut cell_iter = self.cell_iter.update(row)?;
                 while let Some(cell) = cell_iter.next() {
@@ -72,11 +52,10 @@ impl GhosttySnapshotter {
                 }
                 lines.push(line);
                 line_metadata.push(metadata);
-                row_index += 1;
             }
         }
 
-        let content = TerminalContent {
+        Ok(TerminalContent {
             lines,
             line_metadata,
             cursor_line,
@@ -92,9 +71,7 @@ impl GhosttySnapshotter {
                 cursor: colors.cursor.map(rgb_to_hex),
             },
             mouse: mouse_mode(terminal),
-        };
-        self.cached = Some(content.clone());
-        Ok(content)
+        })
     }
 }
 

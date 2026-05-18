@@ -51,7 +51,7 @@ pub struct TerminalBackend {
     snapshotter: GhosttySnapshotter,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    _child: Box<dyn Child + Send>,
+    child: Box<dyn Child + Send>,
     _reader: JoinHandle<()>,
     pty_rx: Receiver<Vec<u8>>,
     pty_responses: Rc<RefCell<Vec<Vec<u8>>>>,
@@ -135,7 +135,7 @@ impl TerminalBackend {
                 .map_err(|error| std::io::Error::other(error.to_string()))?,
             master: pair.master,
             writer: Box::new(writer),
-            _child: child,
+            child,
             _reader: handle,
             pty_rx,
             pty_responses,
@@ -228,5 +228,13 @@ impl TerminalBackend {
             }
         }
         Ok(processed)
+    }
+}
+
+impl Drop for TerminalBackend {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+        }
     }
 }

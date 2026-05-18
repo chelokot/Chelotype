@@ -131,11 +131,17 @@ impl HeadlessRuntime {
                 if let Some(action) = key_to_action(key.key, key.modifiers) {
                     match action {
                         KeyAction::Write(bytes) => backend.write(&bytes),
+                        KeyAction::CursorMove { .. } | KeyAction::SelectInput => Ok(()),
                         KeyAction::ScrollDisplay(lines) => backend.scroll_display(lines),
-                        KeyAction::CopySelection => Ok(()),
-                        KeyAction::NewPane | KeyAction::NextPane | KeyAction::PreviousPane => {
-                            Ok(())
-                        }
+                        KeyAction::CopySelection
+                        | KeyAction::CutSelection
+                        | KeyAction::PasteClipboard
+                        | KeyAction::NewPane
+                        | KeyAction::NextPane
+                        | KeyAction::PreviousPane
+                        | KeyAction::ZoomIn
+                        | KeyAction::ZoomOut
+                        | KeyAction::ZoomReset => Ok(()),
                     }
                 } else {
                     Ok(())

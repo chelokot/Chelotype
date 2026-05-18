@@ -77,7 +77,7 @@ pub fn selected_text(lines: &[Vec<TerminalCell>], range: SelectionRange) -> Stri
             0
         };
         let end_column = if row == range.end.row {
-            range.end.column
+            range.end.column.min(significant_len(line))
         } else {
             significant_len(line)
         };
@@ -93,6 +93,95 @@ pub fn selected_text(lines: &[Vec<TerminalCell>], range: SelectionRange) -> Stri
         }
     }
     out
+}
+
+pub fn line_range(lines: &[Vec<TerminalCell>], row: usize) -> Option<SelectionRange> {
+    let line = lines.get(row)?;
+    let end = significant_len(line);
+    (end > 0).then_some(SelectionRange::new(
+        GridPoint { row, column: 0 },
+        GridPoint { row, column: end },
+    ))
+}
+
+pub fn word_range_at(
+    lines: &[Vec<TerminalCell>],
+    row: usize,
+    column: usize,
+) -> Option<SelectionRange> {
+    let line = lines.get(row)?;
+    let end = significant_len(line);
+    if column >= end || !is_word_cell(line.get(column)?) {
+        return None;
+    }
+    let mut start = column;
+    while start > 0 && is_word_cell(&line[start - 1]) {
+        start -= 1;
+    }
+    let mut word_end = column + 1;
+    while word_end < end && is_word_cell(&line[word_end]) {
+        word_end += 1;
+    }
+    Some(SelectionRange::new(
+        GridPoint { row, column: start },
+        GridPoint {
+            row,
+            column: word_end,
+        },
+    ))
+}
+
+pub fn line_significant_len(line: &[TerminalCell]) -> usize {
+    significant_len(line)
+}
+
+pub fn anchor_range_to_display(range: SelectionRange, display_offset: usize) -> SelectionRange {
+    SelectionRange {
+        start: GridPoint {
+            row: range.start.row + display_offset,
+            column: range.start.column,
+        },
+        end: GridPoint {
+            row: range.end.row + display_offset,
+            column: range.end.column,
+        },
+    }
+}
+
+pub fn viewport_range_for_display(
+    range: SelectionRange,
+    display_offset: usize,
+    viewport_rows: usize,
+) -> Option<SelectionRange> {
+    let viewport_end = display_offset + viewport_rows;
+    if viewport_rows == 0 || range.start.row >= viewport_end || range.end.row < display_offset {
+        return None;
+    }
+    let start = if range.start.row < display_offset {
+        GridPoint { row: 0, column: 0 }
+    } else {
+        GridPoint {
+            row: range.start.row - display_offset,
+            column: range.start.column,
+        }
+    };
+    let end = if range.end.row > viewport_end {
+        GridPoint {
+            row: viewport_rows,
+            column: 0,
+        }
+    } else {
+        GridPoint {
+            row: range.end.row - display_offset,
+            column: range.end.column,
+        }
+    };
+    let visible = SelectionRange::new(start, end);
+    if visible.is_empty() {
+        None
+    } else {
+        Some(visible)
+    }
 }
 
 fn point_le(left: GridPoint, right: GridPoint) -> bool {
@@ -119,6 +208,12 @@ fn significant_len(line: &[TerminalCell]) -> usize {
         })
         .map(|idx| idx + 1)
         .unwrap_or(0)
+}
+
+fn is_word_cell(cell: &TerminalCell) -> bool {
+    cell.text
+        .chars()
+        .any(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 #[cfg(test)]
@@ -244,5 +339,48 @@ mod tests {
             GridPoint { row: 0, column: 5 },
         );
         assert_eq!(selected_text(&lines, range), "ae\u{0301}中b");
+    }
+
+    #[test]
+    fn projects_display_anchored_selection_into_scrolled_viewport() {
+        let range = SelectionRange::new(
+            GridPoint { row: 12, column: 3 },
+            GridPoint { row: 14, column: 5 },
+        );
+        assert_eq!(
+            viewport_range_for_display(range, 10, 6),
+            Some(SelectionRange::new(
+                GridPoint { row: 2, column: 3 },
+                GridPoint { row: 4, column: 5 },
+            ))
+        );
+        assert_eq!(
+            viewport_range_for_display(range, 13, 6),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 0 },
+                GridPoint { row: 1, column: 5 },
+            ))
+        );
+        assert_eq!(viewport_range_for_display(range, 20, 6), None);
+    }
+
+    #[test]
+    fn selects_word_and_line_ranges_from_grid_cells() {
+        let lines = [line("one two-three.")];
+        assert_eq!(
+            word_range_at(&lines, 0, 5),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 4 },
+                GridPoint { row: 0, column: 14 },
+            ))
+        );
+        assert_eq!(word_range_at(&lines, 0, 3), None);
+        assert_eq!(
+            line_range(&lines, 0),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 0 },
+                GridPoint { row: 0, column: 14 },
+            ))
+        );
     }
 }

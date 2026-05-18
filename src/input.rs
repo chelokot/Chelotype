@@ -3,36 +3,101 @@ use gtk::gdk;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeyAction {
     Write(Vec<u8>),
+    CursorMove {
+        direction: CursorDirection,
+        unit: CursorUnit,
+        selecting: bool,
+    },
+    SelectInput,
     ScrollDisplay(i32),
     CopySelection,
+    CutSelection,
+    PasteClipboard,
     NewPane,
     NextPane,
     PreviousPane,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorDirection {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorUnit {
+    Cell,
+    Word,
 }
 
 pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyAction> {
-    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+    let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+    let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+    if matches!(key, gdk::Key::Left | gdk::Key::Right) && (ctrl || shift) {
+        return Some(KeyAction::CursorMove {
+            direction: if key == gdk::Key::Left {
+                CursorDirection::Left
+            } else {
+                CursorDirection::Right
+            },
+            unit: if ctrl {
+                CursorUnit::Word
+            } else {
+                CursorUnit::Cell
+            },
+            selecting: shift,
+        });
+    }
+    if ctrl
+        && !shift
+        && key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'a'))
+    {
+        return Some(KeyAction::SelectInput);
+    }
+    if ctrl {
         match key {
             gdk::Key::Page_Down => return Some(KeyAction::NextPane),
             gdk::Key::Page_Up => return Some(KeyAction::PreviousPane),
+            gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add => return Some(KeyAction::ZoomIn),
+            gdk::Key::minus | gdk::Key::KP_Subtract => return Some(KeyAction::ZoomOut),
+            gdk::Key::_0 | gdk::Key::KP_0 => return Some(KeyAction::ZoomReset),
             _ => {}
         }
     }
-    if state.contains(gdk::ModifierType::CONTROL_MASK)
-        && state.contains(gdk::ModifierType::SHIFT_MASK)
+    if ctrl
+        && shift
         && key
             .to_unicode()
             .is_some_and(|ch| ch.eq_ignore_ascii_case(&'c'))
     {
         return Some(KeyAction::CopySelection);
     }
-    if state.contains(gdk::ModifierType::CONTROL_MASK)
-        && state.contains(gdk::ModifierType::SHIFT_MASK)
+    if ctrl
+        && shift
         && key
             .to_unicode()
             .is_some_and(|ch| ch.eq_ignore_ascii_case(&'t'))
     {
         return Some(KeyAction::NewPane);
+    }
+    if ctrl && !shift {
+        if key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'x'))
+        {
+            return Some(KeyAction::CutSelection);
+        }
+        if key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'v'))
+        {
+            return Some(KeyAction::PasteClipboard);
+        }
     }
     if state.contains(gdk::ModifierType::SHIFT_MASK) {
         match key {
@@ -45,6 +110,24 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
 }
 
 pub fn key_to_terminal_bytes(key: gdk::Key, state: gdk::ModifierType) -> Option<Vec<u8>> {
+    let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+    let alt = state.intersects(
+        gdk::ModifierType::ALT_MASK | gdk::ModifierType::META_MASK | gdk::ModifierType::SUPER_MASK,
+    );
+    if ctrl {
+        match key {
+            gdk::Key::BackSpace => return Some(vec![0x17]),
+            gdk::Key::Delete => return Some(b"\x1bd".to_vec()),
+            _ => {}
+        }
+    }
+    if alt {
+        match key {
+            gdk::Key::BackSpace => return Some(b"\x1b\x7f".to_vec()),
+            gdk::Key::Delete => return Some(b"\x1bd".to_vec()),
+            _ => {}
+        }
+    }
     match key {
         gdk::Key::Return => Some(b"\n".to_vec()),
         gdk::Key::BackSpace => Some(vec![0x7f]),
@@ -115,6 +198,53 @@ mod tests {
     }
 
     #[test]
+    fn maps_arrow_selection_and_word_movement() {
+        assert_eq!(
+            key_to_action(gdk::Key::Left, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::CursorMove {
+                direction: CursorDirection::Left,
+                unit: CursorUnit::Word,
+                selecting: false,
+            })
+        );
+        assert_eq!(
+            key_to_action(
+                gdk::Key::Right,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::CursorMove {
+                direction: CursorDirection::Right,
+                unit: CursorUnit::Word,
+                selecting: true,
+            })
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::Left, gdk::ModifierType::SHIFT_MASK),
+            Some(KeyAction::CursorMove {
+                direction: CursorDirection::Left,
+                unit: CursorUnit::Cell,
+                selecting: true,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_word_delete_shortcuts() {
+        assert_eq!(
+            key_to_terminal_bytes(gdk::Key::BackSpace, gdk::ModifierType::CONTROL_MASK).as_deref(),
+            Some(&[0x17][..])
+        );
+        assert_eq!(
+            key_to_terminal_bytes(gdk::Key::Delete, gdk::ModifierType::CONTROL_MASK).as_deref(),
+            Some(&b"\x1bd"[..])
+        );
+        assert_eq!(
+            key_to_terminal_bytes(gdk::Key::BackSpace, gdk::ModifierType::ALT_MASK).as_deref(),
+            Some(&b"\x1b\x7f"[..])
+        );
+    }
+
+    #[test]
     fn maps_printable_unicode() {
         assert_eq!(
             key_to_terminal_bytes(gdk::Key::Cyrillic_ya, gdk::ModifierType::empty()).as_deref(),
@@ -177,6 +307,30 @@ mod tests {
         assert_eq!(
             key_to_action(gdk::Key::Page_Up, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::PreviousPane)
+        );
+    }
+
+    #[test]
+    fn maps_modern_terminal_editing_shortcuts() {
+        assert_eq!(
+            key_to_action(gdk::Key::a, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::SelectInput)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::x, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::CutSelection)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::v, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::PasteClipboard)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::plus, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::ZoomIn)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::minus, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::ZoomOut)
         );
     }
 }

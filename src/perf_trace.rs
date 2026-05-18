@@ -25,3 +25,12 @@ pub fn record_duration(event: &str, duration: Duration) {
         let _ = writeln!(guard, "{event}\t{}", duration.as_micros());
     }
 }
+
+pub fn record_counter(event: &str, value: u64) {
+    let Some(file) = trace_file() else {
+        return;
+    };
+    if let Ok(mut guard) = file.lock() {
+        let _ = writeln!(guard, "{event}\t{value}");
+    }
+}

@@ -116,7 +116,11 @@ fn draw_render_output(
             }
             let left = cell.column as f64 * cell_width;
             let layout = layout_for(widget, &cell_markup(cell));
+            let _ = context.save();
+            context.rectangle(left, top, cell.columns as f64 * cell_width, line_height);
+            context.clip();
             gtk::render_layout(&widget.style_context(), context, left, top, &layout);
+            let _ = context.restore();
         }
     }
 
