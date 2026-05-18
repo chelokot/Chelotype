@@ -40,7 +40,11 @@ impl TerminalCanvas {
     }
 
     pub fn set_render(&self, render: RenderFrame) {
-        *self.render.borrow_mut() = Some(render);
+        let mut current = self.render.borrow_mut();
+        if current.as_ref() == Some(&render) {
+            return;
+        }
+        *current = Some(render);
         self.area.queue_draw();
     }
 }

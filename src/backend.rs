@@ -55,6 +55,7 @@ pub struct TerminalBackend {
     _reader: JoinHandle<()>,
     pty_rx: Receiver<Vec<u8>>,
     pty_responses: Rc<RefCell<Vec<Vec<u8>>>>,
+    dirty: bool,
 }
 
 impl TerminalBackend {
@@ -134,6 +135,7 @@ impl TerminalBackend {
             _reader: handle,
             pty_rx,
             pty_responses,
+            dirty: true,
         })
     }
 
@@ -150,6 +152,8 @@ impl TerminalBackend {
         self.terminal
             .resize(size.cols, size.rows, 8, 18)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        self.snapshotter.invalidate();
+        self.dirty = true;
         Ok(())
     }
 
@@ -164,16 +168,35 @@ impl TerminalBackend {
     pub fn scroll_display(&mut self, lines: i32) -> std::io::Result<()> {
         self.terminal
             .scroll_viewport(ScrollViewport::Delta(-(lines as isize)));
+        self.snapshotter.invalidate();
+        self.dirty = true;
         Ok(())
     }
 
     pub fn scroll_to_bottom(&mut self) -> std::io::Result<()> {
         self.terminal.scroll_viewport(ScrollViewport::Bottom);
+        self.snapshotter.invalidate();
+        self.dirty = true;
         Ok(())
     }
 
     pub fn snapshot_renderable(&mut self) -> Option<RenderableContentOwned> {
-        self.process_pending().ok()?;
+        if self.process_pending().ok()? {
+            self.dirty = true;
+        }
+        let snapshot = self.snapshotter.snapshot(&self.terminal).ok()?;
+        self.dirty = false;
+        Some(snapshot)
+    }
+
+    pub fn snapshot_renderable_if_dirty(&mut self) -> Option<RenderableContentOwned> {
+        if self.process_pending().ok()? {
+            self.dirty = true;
+        }
+        if !self.dirty {
+            return None;
+        }
+        self.dirty = false;
         self.snapshotter.snapshot(&self.terminal).ok()
     }
 
@@ -189,8 +212,10 @@ impl TerminalBackend {
             .unwrap_or_default()
     }
 
-    fn process_pending(&mut self) -> std::io::Result<()> {
+    fn process_pending(&mut self) -> std::io::Result<bool> {
+        let mut processed = false;
         while let Ok(data) = self.pty_rx.try_recv() {
+            processed = true;
             self.terminal.vt_write(&data);
             self.snapshotter.invalidate();
             let responses = std::mem::take(&mut *self.pty_responses.borrow_mut());
@@ -198,6 +223,6 @@ impl TerminalBackend {
                 self.write(&response)?;
             }
         }
-        Ok(())
+        Ok(processed)
     }
 }

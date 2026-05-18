@@ -1,4 +1,4 @@
-use crate::backend::{ScreenSize, TerminalBackend};
+use crate::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
 use crate::canvas::TerminalCanvas;
 use crate::cell_text::lines_to_text;
 use crate::input::{KeyAction, key_to_action};
@@ -58,6 +58,7 @@ fn build_ui(app: &Application) {
         std::rc::Rc::new(std::cell::RefCell::new(PointerInteraction::default()));
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
     let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
+    let last_content = std::rc::Rc::new(std::cell::RefCell::new(None::<RenderableContentOwned>));
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -187,8 +188,19 @@ fn build_ui(app: &Application) {
         {
             last_size.set(Some(size));
         }
-        if let Some(content) = backend_rc.borrow_mut().snapshot_renderable() {
+        let terminal_content = backend_rc.borrow_mut().snapshot_renderable_if_dirty();
+        let terminal_changed = terminal_content.is_some();
+        if let Some(content) = terminal_content {
             mouse_mode.set(content.mouse);
+            *last_content.borrow_mut() = Some(content);
+        }
+        let selection_changed = selection_dirty.replace(false);
+        let render_content = if terminal_changed || selection_changed {
+            last_content.borrow().clone()
+        } else {
+            None
+        };
+        if let Some(content) = render_content {
             let rendered = Renderer::render_frame_with_selection(content.clone(), selection.get());
             canvas.set_render(rendered);
             if let Some(scenario) = &ui_e2e {
@@ -208,14 +220,15 @@ fn build_ui(app: &Application) {
                     std::process::exit(1);
                 }
             }
-            if snapshot_enabled
-                && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
-                    || selection_dirty.replace(false))
-            {
-                *last_snapshot.borrow_mut() = std::time::Instant::now();
-                crate::logging::debug_log(&format!("snapshot selection {:?}", selection.get()));
-                let _ = write_snapshot_with_selection(content, "frame", selection.get());
-            }
+        }
+        if snapshot_enabled
+            && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+                || selection_changed)
+            && let Some(content) = last_content.borrow().clone()
+        {
+            *last_snapshot.borrow_mut() = std::time::Instant::now();
+            crate::logging::debug_log(&format!("snapshot selection {:?}", selection.get()));
+            let _ = write_snapshot_with_selection(content, "frame", selection.get());
         }
         glib::ControlFlow::Continue
     });

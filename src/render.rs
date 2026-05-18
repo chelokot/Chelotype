@@ -4,7 +4,7 @@ use crate::selection::{GridPoint, SelectionRange};
 use crate::terminal_grid::TerminalCell;
 use serde::Serialize;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RenderCursor {
     pub line: i32,
     pub column: i32,
@@ -46,7 +46,7 @@ pub struct RenderStyle {
     pub selected: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RenderFrame {
     pub history_markup: String,
     pub input_markup: String,
@@ -55,7 +55,7 @@ pub struct RenderFrame {
     pub lines: Vec<RenderLine>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderOutput {
     pub history_markup: String,
     pub input_markup: String,

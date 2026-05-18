@@ -31,7 +31,7 @@ Current state audit
 - Partial: `src/mouse.rs` defines testable SGR mouse event encoding, `src/interaction.rs` owns the pure pointer state machine, Ghostty exposes terminal mouse mode state, and `app.rs` forwards click press/release/drag events to the PTY only when terminal mouse reporting is enabled.
 - Partial: `src/selection.rs` defines a typed half-open grid selection model with extraction tests, `src/render.rs` can highlight selected cells from terminal grid coordinates, and `app.rs` starts local drag selection when terminal mouse reporting is not active. GTK e2e now verifies real Xvfb mouse drag selection and exported `selected_text`.
 - Partial: `src/canvas.rs` provides a GTK `DrawingArea` render surface that draws terminal markup and caret itself from `RenderFrame`; it still uses full-frame Pango markup rather than an incremental cell renderer.
-- Partial: `benches/pipeline.rs` measures the active Ghostty parser/render-state/snapshot/render path.
+- Partial: `benches/pipeline.rs` measures the active Ghostty parser/render-state/snapshot/render path, while the app runtime now uses dirty snapshots and skips identical canvas frames.
 - Weak: resize is covered at backend, headless, and GTK window-event level, but scrollback reflow edge cases are still weak.
 - Weak: first-class mouse support has mode-aware click press/release/drag plumbing, a local grid selection model, and real GTK drag-selection e2e, but selection is not yet exported to clipboard and shell cursor placement is not integrated.
 - Weak: benchmarks do not yet prove UI-visible GTK paint smoothness.

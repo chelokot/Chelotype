@@ -115,6 +115,34 @@ fn backend_resizes_pty_and_terminal_state() {
 
 #[test]
 #[serial]
+fn backend_dirty_snapshot_only_emits_after_state_changes() {
+    let mut command = CommandBuilder::new("/bin/sh");
+    command.args(["-lc", "printf 'dirty-ready'; sleep 0.2"]);
+    let mut backend = TerminalBackend::spawn(command).expect("spawn command");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_text(snapshot).contains("dirty-ready")
+    });
+    assert!(
+        backend.snapshot_renderable_if_dirty().is_none(),
+        "unchanged terminal should not emit a dirty snapshot"
+    );
+
+    backend
+        .resize(ScreenSize::new(90, 20).expect("valid terminal size"))
+        .expect("resize backend");
+    assert!(
+        backend.snapshot_renderable_if_dirty().is_some(),
+        "resize should mark the render state dirty"
+    );
+    assert!(
+        backend.snapshot_renderable_if_dirty().is_none(),
+        "dirty snapshot should be consumed after emission"
+    );
+    let _ = backend.write(b"\x15exit\n");
+}
+
+#[test]
+#[serial]
 fn backend_tracks_sgr_mouse_reporting_mode() {
     let mut backend = TerminalBackend::spawn(color_output_command()).expect("spawn command");
     assert!(
