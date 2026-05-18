@@ -254,6 +254,49 @@ fn headless_mode_replays_keyboard_events_through_input_mapping() {
 
 #[test]
 #[serial]
+fn headless_mode_replays_arrow_key_events_through_input_mapping() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-arrows-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let target = dir.join("arrow-keys.bin");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            format!(
+                "raw:cat > {}\\n|key:Left|key:Right|key:Enter|key:Ctrl+d|raw:printf 'ARROWS='; od -An -tx1 {}; echo\\n",
+                target.display(),
+                target.display()
+            ),
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "ARROWS= 1b 5b 44 1b 5b 43")
+        .output()
+        .expect("run arrow headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let text_snapshot = snapshot_file_with_extension(&snapshot_paths(&dir), "txt");
+    let text = read_to_string(text_snapshot).expect("read text snapshot");
+    assert!(text.contains("ARROWS= 1b 5b 44 1b 5b 43"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_replays_mouse_drag_selection_events() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-mouse-{}",
