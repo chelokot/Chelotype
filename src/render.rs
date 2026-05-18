@@ -1,5 +1,6 @@
 use crate::backend::RenderableContentOwned;
 use crate::cell_text::{is_wide_spacer, push_cell_text};
+use crate::command_blocks::{CommandBlock, command_blocks};
 use crate::selection::{GridPoint, SelectionRange};
 use crate::terminal_grid::TerminalCell;
 use serde::Serialize;
@@ -62,6 +63,7 @@ pub struct RenderFrame {
     pub cursor: RenderCursor,
     pub input_text: String,
     pub lines: Vec<RenderLine>,
+    pub command_blocks: Vec<CommandBlock>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,6 +174,7 @@ impl Renderer {
             },
             input_text,
             lines,
+            command_blocks: command_blocks(&content),
         }
     }
 }
@@ -437,7 +440,9 @@ fn push_escaped_char(out: &mut String, ch: char) {
 mod tests {
     use super::*;
     use crate::backend::{MouseMode, RenderableContentOwned};
-    use crate::terminal_grid::{TerminalCell, TerminalColors, TerminalLineMetadata};
+    use crate::terminal_grid::{
+        TerminalCell, TerminalColors, TerminalLineMetadata, TerminalSemanticPrompt,
+    };
 
     fn cell(text: &str) -> TerminalCell {
         TerminalCell {
@@ -625,5 +630,46 @@ mod tests {
         assert_eq!(frame.lines[2].region, RenderRegion::Input);
         assert_eq!(frame.input_text, "cmd");
         assert!(frame.input_markup.contains('\n'));
+    }
+
+    #[test]
+    fn renderer_exports_prompt_delimited_command_blocks() {
+        let content = RenderableContentOwned {
+            lines: vec![
+                vec![cell("p")],
+                vec![cell(">")],
+                vec![cell("o")],
+                vec![cell("p")],
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Continuation,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata::default(),
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+            ],
+            cursor_line: 3,
+            cursor_col: 1,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        };
+        let frame = Renderer::render_frame_with_selection(content, None);
+        assert_eq!(frame.command_blocks.len(), 2);
+        assert_eq!(frame.command_blocks[0].prompt_start_row, 0);
+        assert_eq!(frame.command_blocks[0].prompt_end_row, 1);
+        assert_eq!(frame.command_blocks[0].output_start_row(), Some(2));
+        assert_eq!(frame.command_blocks[0].output_end_row(), Some(2));
+        assert_eq!(frame.command_blocks[1].prompt_start_row, 3);
+        assert_eq!(frame.command_blocks[1].output_start_row(), None);
     }
 }
