@@ -41,7 +41,7 @@ Prompt-to-artifact checklist
   - Status: partial; scrollback reflow edge cases are weak.
 - Colors/styles/zsh prompt fidelity
   - Evidence: Ghostty cell fg/bg/style snapshots and renderer exports.
-  - Coverage: ANSI color backend test, headless Unicode/style JSON test, and Xvfb real-window smoke snapshot.
+  - Coverage: ANSI color backend test, headless Unicode/style JSON test, Xvfb real-window smoke snapshot, and GTK color e2e that verifies ANSI-colored output cells in JSON.
   - Status: partial; no screenshot/pixel-level app renderer verification yet.
 - Cursor position/shape/visibility
   - Evidence: cursor fields in snapshots, canvas caret drawing.
@@ -71,4 +71,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor/cell/color visual assertions, direct per-cell/incremental drawing, shell cursor placement strategy, advanced grapheme/IME tests, clipboard selection, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.
+The milestone is not complete. The next highest-value gaps are stronger GTK cursor visual assertions, screenshot/pixel checks, direct per-cell/incremental drawing, shell cursor placement strategy, advanced grapheme/IME tests, clipboard selection, workspace/pane model, command blocks, smooth scrolling, and full GTK paint-path perf gates.

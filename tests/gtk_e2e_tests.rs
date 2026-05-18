@@ -25,6 +25,44 @@ fn snapshot_paths(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     paths
 }
 
+fn assert_clean_gtk_stderr(stderr: &str) {
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("panic"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+}
+
+fn json_snapshots(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    snapshot_paths(dir)
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| read_to_string(path).expect("read json snapshot"))
+        .map(|json| serde_json::from_str::<serde_json::Value>(&json).expect("valid snapshot json"))
+        .collect()
+}
+
+fn snapshot_has_colored_text(snapshot: &serde_json::Value, needle: &str) -> bool {
+    let Some(lines) = snapshot["lines"].as_array() else {
+        return false;
+    };
+    lines.iter().any(|line| {
+        let Some(cells) = line["cells"].as_array() else {
+            return false;
+        };
+        let line_text = cells
+            .iter()
+            .filter_map(|cell| cell["text"].as_str())
+            .collect::<String>();
+        line_text.trim_end() == needle
+            && cells.iter().any(|cell| {
+                cell["text"].as_str().is_some_and(|text| !text.is_empty())
+                    && cell["fg"].as_str().is_some_and(|color| color != "#e5e7eb")
+            })
+    })
+}
+
 #[test]
 #[serial]
 fn gtk_e2e_renders_real_window_to_snapshot_under_xvfb() {
@@ -61,9 +99,7 @@ fn gtk_e2e_renders_real_window_to_snapshot_under_xvfb() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
-    assert!(!stderr.contains("panic"), "{stderr}");
-    assert!(!stderr.contains("error:"), "{stderr}");
+    assert_clean_gtk_stderr(&stderr);
 
     let json_snapshot = snapshot_paths(&dir)
         .into_iter()
@@ -77,6 +113,58 @@ fn gtk_e2e_renders_real_window_to_snapshot_under_xvfb() {
     assert!(json.contains("\"lines\""));
     assert!(json.contains("\"cells\""));
     assert!(json.contains("\"cursor_visible\""));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_exports_colored_cells_under_xvfb() {
+    if !has_command("xvfb-run") {
+        eprintln!("skipping gtk color e2e because xvfb-run is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-color-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let output = Command::new("xvfb-run")
+        .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
+        .env("GDK_BACKEND", "x11")
+        .env("GSETTINGS_BACKEND", "memory")
+        .env("NO_AT_BRIDGE", "1")
+        .env("CHELOTYPE_UI_E2E", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_UI_E2E_INPUT",
+            "printf '\\033[31mGTK_RED_STYLE\\033[0m\\n'\n",
+        )
+        .env("CHELOTYPE_UI_E2E_EXPECT", "GTK_RED_STYLE")
+        .output()
+        .expect("run gtk color e2e binary under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk color e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let snapshots = json_snapshots(&dir);
+    assert!(
+        snapshots
+            .iter()
+            .any(|snapshot| snapshot_has_colored_text(snapshot, "GTK_RED_STYLE")),
+        "colored GTK_RED_STYLE output was not preserved in JSON snapshots"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -154,9 +242,7 @@ exit 1
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
-    assert!(!stderr.contains("panic"), "{stderr}");
-    assert!(!stderr.contains("error:"), "{stderr}");
+    assert_clean_gtk_stderr(&stderr);
 
     let text = snapshot_paths(&dir)
         .into_iter()
@@ -264,9 +350,7 @@ exit 1
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
-    assert!(!stderr.contains("panic"), "{stderr}");
-    assert!(!stderr.contains("error:"), "{stderr}");
+    assert_clean_gtk_stderr(&stderr);
 
     let json = snapshot_paths(&dir)
         .into_iter()
@@ -373,9 +457,7 @@ exit 1
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
-    assert!(!stderr.contains("panic"), "{stderr}");
-    assert!(!stderr.contains("error:"), "{stderr}");
+    assert_clean_gtk_stderr(&stderr);
 
     let rows = snapshot_paths(&dir)
         .into_iter()

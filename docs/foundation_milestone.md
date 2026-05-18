@@ -23,6 +23,7 @@ Current state audit
 - Partial: `src/diagnostics.rs` and `src/snapshot.rs` provide structured snapshot exports with rows/cols, cursor, mouse mode, plain text, and per-cell text/color/style records.
 - Partial: `tests/backend_integration_tests.rs` verifies real PTY write/read, ANSI color preservation, cursor tracking, resize, mouse modes, and scrollback against the active backend.
 - Partial: `tests/headless_diagnostics_tests.rs` launches the binary in headless mode, verifies JSON/HTML/text/markup snapshot files, checks expected terminal content, supports scripted action/expectation env overrides, and fails on stderr warnings/errors.
+- Partial: `tests/gtk_e2e_tests.rs` verifies real GTK launch snapshots, ANSI-colored cell export, real Xvfb keyboard input, real mouse drag selection, and real GTK window resize without GTK warnings.
 - Partial: headless diagnostics support event-level automation for raw/text writes, key events, resize, scroll, mouse press/drag/release, and selection export.
 - Partial: `TerminalBackend::resize` updates both the PTY winsize and Ghostty terminal dimensions; `app.rs` derives terminal size from the GTK viewport.
 - Partial: `TerminalBackend::scroll_display` and `scroll_to_bottom` expose scrollback viewport movement from the terminal core, and snapshots export `display_offset`.
@@ -37,7 +38,7 @@ Current state audit
 
 Next implementation order
 
-1. Extend GTK window event e2e from launch/type/Enter/resize/drag to click-specific cursor behavior and stronger cells/cursor/colors assertions.
+1. Extend GTK window event e2e from launch/type/Enter/resize/drag/color snapshots to click-specific cursor behavior, cursor visual assertions, and screenshot/pixel checks.
 2. Replace line-level Pango markup rendering with direct per-run/per-cell drawing.
 3. Add clipboard selection export.
 4. Design shell cursor placement for mouse-driven command editing.
