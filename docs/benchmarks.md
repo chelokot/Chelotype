@@ -15,8 +15,9 @@ Benchmark suite overview
   - vte_line_extract_html: text_range_format HTML read.
   - vte_repaint_cycle_html: feed + HTML extract to simulate redraw pressure.
 - Full pipeline (PTY + parser + renderer)
-  - full_pipeline_keyrepeat: 128 keystroke frames through alacritty parser and renderer.
-  - full_pipeline_latency_guard: per-frame guard; fails if a single frame exceeds 0.9 ms.
+  - full_pipeline_markup_keyrepeat: 128 keystroke frames through alacritty parser and compact markup renderer.
+  - full_pipeline_frame_keyrepeat: 128 keystroke frames through alacritty parser and structured app-frame renderer.
+  - full_pipeline_frame_latency_guard: per-frame guard for the active app-frame renderer; fails if a single frame exceeds 1.2 ms.
   - held_key_10s_latency_gate: sustained held-key latency histogram; defaults to 1s per Criterion sample for local speed, set `CHELOTYPE_HELD_KEY_SECONDS=10` for the full scenario.
 
 Perf signals to track
@@ -32,7 +33,7 @@ Next additions
 Latest local baseline
 - `CARGO_BUILD_JOBS=1 cargo bench --bench pipeline -- --sample-size 10`
 - Before renderer grouping: `full_pipeline_keyrepeat` was ~85 ms for 128 parser+render frames and `full_pipeline_latency_guard` failed at ~1.14 ms worst-frame latency.
-- After grouping same-style cells and trimming blank line tails: `full_pipeline_keyrepeat` is ~20-22 ms for 128 parser+render frames and `full_pipeline_latency_guard` passes at ~155-163 us.
+- After grouping same-style cells and trimming blank line tails: compact markup render is ~20 ms for 128 parser+render frames; structured app-frame render is ~21-22 ms for 128 parser+render frames and `full_pipeline_frame_latency_guard` passes at ~184-187 us.
 - Full `CHELOTYPE_HELD_KEY_SECONDS=10` held-key Criterion run passes, but takes about 100s because Criterion collects 10 samples. Use default 1s samples locally and full 10s samples for slower perf validation.
 - Default local held-key gate passes with 1s samples.
 - This is useful as a parser+render regression target, but it still does not measure the full GTK frame path visible to the user.

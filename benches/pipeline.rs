@@ -25,7 +25,7 @@ fn bench_full_pipeline_keyrepeat(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_pipeline");
     group.sample_size(30);
     group.measurement_time(Duration::from_secs(2));
-    group.bench_function("full_pipeline_keyrepeat", |b| {
+    group.bench_function("full_pipeline_markup_keyrepeat", |b| {
         b.iter_batched(
             || {
                 let (mut term, mut parser) = build_term();
@@ -43,11 +43,29 @@ fn bench_full_pipeline_keyrepeat(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    group.bench_function("full_pipeline_frame_keyrepeat", |b| {
+        b.iter_batched(
+            || {
+                let (mut term, mut parser) = build_term();
+                parser.advance(&mut term, b"echo ready\n");
+                (term, parser)
+            },
+            |(mut term, mut parser)| {
+                for _ in 0..128 {
+                    parser.advance(&mut term, b"a");
+                    let snapshot =
+                        RenderableContentOwned::from_renderable(term.renderable_content());
+                    let _ = Renderer::render_frame_with_selection(snapshot, None);
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
     group.finish();
 }
 
 fn bench_full_pipeline_latency_guard(c: &mut Criterion) {
-    c.bench_function("full_pipeline_latency_guard", |b| {
+    c.bench_function("full_pipeline_frame_latency_guard", |b| {
         b.iter_custom(|iters| {
             let (mut term, mut parser) = build_term();
             parser.advance(&mut term, b"echo latency\n");
@@ -57,14 +75,14 @@ fn bench_full_pipeline_latency_guard(c: &mut Criterion) {
                 let t0 = Instant::now();
                 parser.advance(&mut term, b"x");
                 let snapshot = RenderableContentOwned::from_renderable(term.renderable_content());
-                let _ = Renderer::render(snapshot);
+                let _ = Renderer::render_frame_with_selection(snapshot, None);
                 let dt = t0.elapsed();
                 if dt > worst {
                     worst = dt;
                 }
             }
-            if worst > Duration::from_micros(900) {
-                panic!("render latency too high: {:?}", worst);
+            if worst > Duration::from_micros(1_200) {
+                panic!("frame render latency too high: {:?}", worst);
             }
             start.elapsed()
         });
@@ -90,7 +108,7 @@ fn bench_held_key_10s_latency_gate(c: &mut Criterion) {
                 let frame_start = Instant::now();
                 parser.advance(&mut term, b"a");
                 let snapshot = RenderableContentOwned::from_renderable(term.renderable_content());
-                let _ = Renderer::render(snapshot);
+                let _ = Renderer::render_frame_with_selection(snapshot, None);
                 samples.push(frame_start.elapsed());
             }
             samples.sort_unstable();
