@@ -41,8 +41,8 @@ Prompt-to-artifact checklist
   - Status: partial; scrollback reflow edge cases are weak.
 - Colors/styles/zsh prompt fidelity
   - Evidence: Ghostty cell fg/bg/style snapshots and renderer exports.
-  - Coverage: ANSI color backend test, headless Unicode/style JSON test, Xvfb real-window smoke snapshot, GTK color e2e that verifies ANSI-colored output cells in JSON, and pixel-level truecolor screenshot e2e.
-  - Status: partial; truecolor reaches pixels, but zsh prompt/theme fidelity is still not deeply asserted.
+  - Coverage: ANSI color backend test, headless Unicode/style JSON test, headless clean-zsh colored prompt cell test, Xvfb real-window smoke snapshot, GTK color e2e that verifies ANSI-colored output cells in JSON, and pixel-level truecolor screenshot e2e.
+  - Status: partial; truecolor and deterministic zsh prompt color reach snapshots/render dumps, but real user theme/plugin fidelity is not deeply asserted.
 - Cursor position/shape/visibility
   - Evidence: cursor fields in snapshots, canvas caret drawing.
   - Coverage: backend cursor integration, HTML snapshot cursor-placement unit test, canvas blink reset unit test, real Xvfb screenshot e2e that asserts the cursor-colored pixels form a narrow vertical caret, and real Xvfb screenshot e2e that verifies cursor blink-off plus visible reset after input.

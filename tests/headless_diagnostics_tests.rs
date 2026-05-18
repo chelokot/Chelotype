@@ -594,3 +594,75 @@ fn headless_mode_exports_unicode_and_style_cells_in_json() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+#[serial]
+fn headless_mode_preserves_zsh_colored_prompt_cells() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-zsh-prompt-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "raw:PS1=\"%F{green}❯%f \"\\n|raw:printf PROMPT_READY\\n",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "PROMPT_READY")
+        .env("CHELOTYPE_HEADLESS_STEP_MS", "160")
+        .output()
+        .expect("run zsh prompt headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let snapshot: serde_json::Value = serde_json::from_str(
+        &read_to_string(snapshot_file_with_extension(&paths, "json")).expect("read json snapshot"),
+    )
+    .expect("parse json snapshot");
+    let lines = snapshot["lines"].as_array().expect("snapshot lines");
+    assert!(
+        lines.iter().any(|line| {
+            let cells = line["cells"].as_array().expect("line cells");
+            cells.first().is_some_and(|cell| {
+                cell["text"].as_str() == Some("❯")
+                    && cell["fg"].as_str().is_some_and(|fg| fg != "#ffffff")
+            })
+        }),
+        "snapshot did not preserve colored zsh prompt cells: {snapshot}"
+    );
+
+    let render_dump: serde_json::Value = serde_json::from_str(
+        &read_to_string(snapshot_file_ending_with(&paths, ".render.json"))
+            .expect("read render dump"),
+    )
+    .expect("parse render dump");
+    let render_lines = render_dump["lines"].as_array().expect("render lines");
+    assert!(
+        render_lines.iter().any(|line| {
+            let cells = line["cells"].as_array().expect("render cells");
+            cells.first().is_some_and(|cell| {
+                cell["text"].as_str() == Some("❯")
+                    && cell["style"]["fg"]
+                        .as_str()
+                        .is_some_and(|fg| fg != "#ffffff")
+            })
+        }),
+        "render dump did not preserve colored zsh prompt cells: {render_dump}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
