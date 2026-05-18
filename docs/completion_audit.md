@@ -22,7 +22,7 @@ Prompt-to-artifact checklist
   - Status: done for the active tree.
 - Renderer consumes grid/cell state directly
   - Evidence: `src/ghostty_snapshot.rs` exports `TerminalContent`; `src/render.rs` renders typed cells/runs from that model; `src/canvas.rs` paints structured runs by grid column and draws the cursor from grid coordinates.
-  - Status: partial; canvas paints individual terminal cells at fixed grid columns and has nonblank screenshot plus pixel-level truecolor e2e, but does not yet have incremental dirty-row paint or pixel-level cursor assertions.
+  - Status: partial; canvas paints individual terminal cells at fixed grid columns and has nonblank screenshot, pixel-level truecolor e2e, and pixel-level cursor position assertions, but does not yet have incremental dirty-row paint.
 - History, scrollback, current input
   - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots, Ghostty row metadata (`wrapped`, `wrap_continuation`, semantic prompt) exported through `TerminalContent`, and semantic prompt rows converted to `RenderFrame.command_blocks`.
   - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`, `render::tests::renderer_marks_semantic_prompt_continuations_as_input_region`, and `renderer_exports_prompt_delimited_command_blocks`.
@@ -45,8 +45,8 @@ Prompt-to-artifact checklist
   - Status: partial; truecolor, deterministic zsh prompt color, and zsh autosuggestion styling reach snapshots/render dumps, but broader user theme/plugin fidelity is not deeply asserted.
 - Cursor position/shape/visibility
   - Evidence: cursor fields in snapshots, canvas caret drawing.
-  - Coverage: backend cursor integration, HTML snapshot cursor-placement unit test, canvas blink reset unit test, real Xvfb screenshot e2e that asserts the cursor-colored pixels form a narrow vertical caret, and real Xvfb screenshot e2e that verifies cursor blink-off plus visible reset after input.
-  - Status: partial; visual cursor shape and blink/reset are covered, but stronger pixel-level position assertions are still needed.
+  - Coverage: backend cursor integration, HTML snapshot cursor-placement unit test, canvas blink reset unit test, real Xvfb screenshot e2e that asserts the cursor-colored pixels form a narrow vertical caret at the snapshot cursor row/column, and real Xvfb screenshot e2e that verifies cursor blink-off plus visible reset after input.
+  - Status: partial; visual cursor shape, position, and blink/reset are covered; cursor behavior under IME/composition is still missing.
 - Unicode/graphemes
   - Evidence: Ghostty grapheme extraction, shared `src/cell_text.rs`, structured cell JSON with wide-cell flags.
   - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata; headless emoji/ZWJ/ambiguous-width test verifies ZWJ emoji cells and single-width ambiguous characters through snapshots and render dumps.
@@ -72,4 +72,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are stronger GTK cursor position assertions, advanced grapheme/IME tests, split-pane UI, command-block UI, smooth scrolling, and memory/allocation perf gates.
+The milestone is not complete. The next highest-value gaps are advanced grapheme/IME tests, split-pane UI, command-block UI, smooth scrolling, and memory/allocation perf gates.

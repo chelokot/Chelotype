@@ -657,13 +657,15 @@ fn gtk_e2e_renders_narrow_cursor_pixels_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let screenshot = dir.join("window.png");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 screenshot="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+geometry_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -681,8 +683,31 @@ fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "abc def"
+for _ in {1..100}; do
+    if grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "cursor position snapshot never contained typed text" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+xdotool type --window "$window_id" --delay 2 "Z"
 sleep 0.15
 import -window "$window_id" "$screenshot"
+for _ in {1..100}; do
+    if grep -R 'abc defZ' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'abc defZ' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "cursor reset snapshot never contained final typed text" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
 "#;
 
     let output = Command::new("xvfb-run")
@@ -697,6 +722,7 @@ import -window "$window_id" "$screenshot"
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             screenshot.to_str().expect("screenshot path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk cursor pixel e2e under xvfb");
@@ -725,6 +751,32 @@ import -window "$window_id" "$screenshot"
     assert!(
         bounds.count >= 16,
         "cursor should have enough visible pixels, got {bounds:?}"
+    );
+    let cursor_snapshot = json_snapshots(&dir)
+        .into_iter()
+        .find(|snapshot| {
+            snapshot["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("abc defZ"))
+        })
+        .expect("cursor position snapshot");
+    let cursor_column = cursor_snapshot["cursor_col"]
+        .as_f64()
+        .expect("numeric cursor column");
+    let cursor_line = cursor_snapshot["cursor_line"]
+        .as_f64()
+        .expect("numeric cursor line");
+    let expected_x = geometry_metric(&geometry_trace, "canvas_x")
+        + cursor_column * geometry_metric(&geometry_trace, "cell_width");
+    let expected_y = geometry_metric(&geometry_trace, "canvas_y")
+        + cursor_line * geometry_metric(&geometry_trace, "line_height");
+    assert!(
+        (bounds.min_x as f64 - expected_x).abs() <= 6.0,
+        "cursor x should match terminal cursor column: bounds={bounds:?} expected_x={expected_x:.2}"
+    );
+    assert!(
+        (bounds.min_y as f64 - expected_y).abs() <= 6.0,
+        "cursor y should match terminal cursor row: bounds={bounds:?} expected_y={expected_y:.2}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

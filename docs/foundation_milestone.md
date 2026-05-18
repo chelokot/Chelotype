@@ -23,7 +23,7 @@ Current state audit
 - Partial: `src/diagnostics.rs` and `src/snapshot.rs` provide structured snapshot exports with rows/cols, cursor, mouse mode, plain text, and per-cell text/color/style records.
 - Partial: `tests/backend_integration_tests.rs` verifies real PTY write/read, ANSI color preservation, cursor tracking, resize, mouse modes, and scrollback against the active backend.
 - Partial: `tests/headless_diagnostics_tests.rs` launches the binary in headless mode against a clean interactive `zsh -f` fixture, verifies JSON/HTML/text/markup snapshot files, checks expected terminal content, covers deterministic zsh prompt color cells and emoji/ZWJ/ambiguous-width cells, supports scripted action/expectation env overrides, and fails on stderr warnings/errors.
-- Partial: `tests/gtk_e2e_tests.rs` verifies real GTK launch snapshots, ANSI-colored cell export, nonblank real-window screenshots, pixel-level truecolor output, pixel-level narrow cursor shape, cursor blink/reset, real Xvfb keyboard input, click-to-cursor movement on the current input row, zsh autosuggestion grid/click behavior, terminal mouse-reporting bytes forwarded to the PTY, real mouse drag selection, stable released-selection copy, PRIMARY/CLIPBOARD selection export, real GTK held-key render/paint latency, and real GTK window resize without GTK warnings.
+- Partial: `tests/gtk_e2e_tests.rs` verifies real GTK launch snapshots, ANSI-colored cell export, nonblank real-window screenshots, pixel-level truecolor output, pixel-level narrow cursor shape and position, cursor blink/reset, real Xvfb keyboard input, click-to-cursor movement on the current input row, zsh autosuggestion grid/click behavior, terminal mouse-reporting bytes forwarded to the PTY, real mouse drag selection, stable released-selection copy, PRIMARY/CLIPBOARD selection export, real GTK held-key render/paint latency, and real GTK window resize without GTK warnings.
 - Partial: headless diagnostics support event-level automation for raw/text writes, key events, resize, scroll, mouse press/drag/release, click-to-cursor movement, and selection export.
 - Partial: `TerminalBackend::resize` updates both the PTY winsize and Ghostty terminal dimensions; `app.rs` derives terminal size from the GTK viewport.
 - Partial: `TerminalBackend::scroll_display` and `scroll_to_bottom` expose scrollback viewport movement from the terminal core, and snapshots export `display_offset`.
@@ -40,10 +40,7 @@ Current state audit
 
 Next implementation order
 
-1. Extend GTK window event e2e from launch/type/Enter/resize/drag/color/cursor snapshots to stronger cursor position assertions.
-2. Replace line-level Pango markup rendering with direct per-run/per-cell drawing.
-3. Add clipboard selection export.
-4. Design semantic-prompt-aware shell cursor placement for mouse-driven command editing beyond soft-wrapped current input.
-5. Add smooth scrolling and command-block UI.
-6. Add split-pane UI on top of the workspace model.
-7. Add allocation tracking.
+1. Add advanced grapheme/IME tests.
+2. Add smooth scrolling and command-block UI.
+3. Add split-pane UI on top of the workspace model.
+4. Add allocation tracking.
