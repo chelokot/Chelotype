@@ -78,6 +78,41 @@ fn bench_full_pipeline_latency_guard(c: &mut Criterion) {
     });
 }
 
+fn bench_frame_budget_gates(c: &mut Criterion) {
+    let mut group = c.benchmark_group("frame_budget");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(2));
+    group.bench_function("frame_budget_60hz_gate", |b| {
+        b.iter_custom(|iters| run_frame_budget_gate(iters, Duration::from_micros(16_667)));
+    });
+    group.bench_function("frame_budget_120hz_gate", |b| {
+        b.iter_custom(|iters| run_frame_budget_gate(iters, Duration::from_micros(8_333)));
+    });
+    group.finish();
+}
+
+fn run_frame_budget_gate(iters: u64, budget: Duration) -> Duration {
+    let (mut terminal, mut snapshotter) = build_core();
+    let mut worst = Duration::ZERO;
+    let start = Instant::now();
+    for _ in 0..iters {
+        let frame_start = Instant::now();
+        terminal.vt_write(b"x");
+        snapshotter.invalidate();
+        let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
+        let _ = Renderer::render_frame_with_selection(snapshot, None);
+        let elapsed = frame_start.elapsed();
+        if elapsed > worst {
+            worst = elapsed;
+        }
+    }
+    assert!(
+        worst <= budget,
+        "frame budget exceeded: worst={worst:?}, budget={budget:?}"
+    );
+    start.elapsed()
+}
+
 fn bench_held_key_10s_latency_gate(c: &mut Criterion) {
     let mut group = c.benchmark_group("held_key");
     group.sample_size(10);
@@ -129,6 +164,7 @@ criterion_group!(
     pipeline,
     bench_full_pipeline_keyrepeat,
     bench_full_pipeline_latency_guard,
+    bench_frame_budget_gates,
     bench_held_key_10s_latency_gate
 );
 criterion_main!(pipeline);

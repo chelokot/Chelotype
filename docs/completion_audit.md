@@ -53,7 +53,7 @@ Prompt-to-artifact checklist
   - Status: partial; emoji ZWJ, ambiguous-width, and IME/composition scenarios are still needed.
 - Perf gates
   - Evidence: `benches/pipeline.rs`, `docs/benchmarks.md`.
-  - Coverage: active Ghostty app-frame render benchmark, latency guard, held-key scenario, backend dirty-snapshot regression test, and canvas frame equality skip.
+  - Coverage: active Ghostty app-frame render benchmark, 4 ms latency guard, explicit 60/120 Hz frame-budget gates, held-key scenario, backend dirty-snapshot regression test, and canvas frame equality skip.
   - Status: partial; active frame construction is gated and idle repaint churn is reduced, but not the full GTK/Cairo/Pango paint path, and there is no memory/allocation gate.
 - Container-friendly runtime assumptions
   - Evidence: `scripts/with-zig.sh`, binary-level headless mode, README setup/run commands, and Xvfb-based GTK e2e test.
