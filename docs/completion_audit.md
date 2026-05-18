@@ -22,7 +22,7 @@ Prompt-to-artifact checklist
   - Status: done for the active tree.
 - Renderer consumes grid/cell state directly
   - Evidence: `src/ghostty_snapshot.rs` exports `TerminalContent`; `src/render.rs` renders typed cells/runs from that model; `src/canvas.rs` paints structured runs by grid column and draws the cursor from grid coordinates.
-  - Status: partial; canvas no longer paints whole-line markup, but still uses per-run Pango markup for text attributes and does not yet have incremental dirty-row paint or screenshot/pixel e2e.
+  - Status: partial; canvas no longer paints whole-line markup and has a nonblank screenshot e2e, but still uses per-run Pango markup for text attributes and does not yet have incremental dirty-row paint or pixel-level color/cursor assertions.
 - History, scrollback, current input
   - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots, and Ghostty row metadata (`wrapped`, `wrap_continuation`, semantic prompt) exported through `TerminalContent`.
   - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`.
@@ -42,7 +42,7 @@ Prompt-to-artifact checklist
 - Colors/styles/zsh prompt fidelity
   - Evidence: Ghostty cell fg/bg/style snapshots and renderer exports.
   - Coverage: ANSI color backend test, headless Unicode/style JSON test, Xvfb real-window smoke snapshot, and GTK color e2e that verifies ANSI-colored output cells in JSON.
-  - Status: partial; no screenshot/pixel-level app renderer verification yet.
+  - Status: partial; screenshot e2e proves the GTK surface is nonblank, but not pixel-level color fidelity yet.
 - Cursor position/shape/visibility
   - Evidence: cursor fields in snapshots, canvas caret drawing.
   - Coverage: backend cursor integration and canvas byte-index unit test.

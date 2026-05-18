@@ -171,6 +171,119 @@ fn gtk_e2e_exports_colored_cells_under_xvfb() {
 
 #[test]
 #[serial]
+fn gtk_e2e_captures_nonblank_window_screenshot_under_xvfb() {
+    if !has_command("xvfb-run")
+        || !has_command("xdotool")
+        || !has_command("import")
+        || !has_command("identify")
+    {
+        eprintln!(
+            "skipping gtk screenshot e2e because xvfb-run, xdotool, import, or identify is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-screenshot-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let screenshot = dir.join("window.png");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+screenshot="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "printf 'SCREENSHOT_OK\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    if grep -R 'SCREENSHOT_OK' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'SCREENSHOT_OK' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "screenshot marker never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+import -window "$window_id" "$screenshot"
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-screenshot-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            screenshot.to_str().expect("screenshot path utf8"),
+        ])
+        .output()
+        .expect("run gtk screenshot e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk screenshot e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let identify = Command::new("identify")
+        .args([
+            "-format",
+            "%w %h %k",
+            screenshot.to_str().expect("screenshot path utf8"),
+        ])
+        .output()
+        .expect("identify screenshot");
+    assert!(
+        identify.status.success(),
+        "identify failed: {}",
+        String::from_utf8_lossy(&identify.stderr)
+    );
+    let metrics = String::from_utf8_lossy(&identify.stdout);
+    let values = metrics
+        .split_whitespace()
+        .map(|value| value.parse::<usize>().expect("numeric identify metric"))
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 3, "unexpected identify metrics: {metrics}");
+    assert!(values[0] > 100, "screenshot width too small: {metrics}");
+    assert!(values[1] > 100, "screenshot height too small: {metrics}");
+    assert!(values[2] > 1, "screenshot appears blank: {metrics}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_accepts_real_keyboard_input_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk keyboard e2e because xvfb-run or xdotool is not installed");
