@@ -9,10 +9,10 @@ use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::Renderer;
 use crate::selection::{SelectionRange, selected_text};
 use crate::snapshot::write_snapshot_with_selection;
+use crate::terminal_font::metrics_for_widget;
 use adw::Application;
 use adw::prelude::*;
 use gtk::glib;
-use gtk::pango;
 
 pub fn run_app() -> glib::ExitCode {
     let app = Application::builder()
@@ -55,6 +55,9 @@ fn build_ui(app: &Application) {
         .map(|scenario| std::time::Instant::now() + scenario.timeout);
     let last_size = std::rc::Rc::new(std::cell::Cell::new(None::<ScreenSize>));
     let cell_metrics = std::rc::Rc::new(std::cell::Cell::new(None::<CellMetrics>));
+    let geometry_trace = std::env::var("CHELOTYPE_GEOMETRY_TRACE")
+        .ok()
+        .map(std::path::PathBuf::from);
     let mouse_mode = std::rc::Rc::new(std::cell::Cell::new(crate::backend::MouseMode::default()));
     let pointer_interaction =
         std::rc::Rc::new(std::cell::RefCell::new(PointerInteraction::default()));
@@ -100,7 +103,9 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let canvas_widget = canvas.widget().clone();
         click_controller.connect_pressed(move |gesture, _press_count, x, y| {
+            canvas_widget.grab_focus();
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
             if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
                 crate::logging::debug_log(&format!(
@@ -132,7 +137,12 @@ fn build_ui(app: &Application) {
         let pointer_interaction = pointer_interaction.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
-            if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
+            if let Some(cell_position) = pointer_grid_position(metrics.get(), x, y) {
+                let position = if mode.get().sends_press_release() {
+                    cell_position
+                } else {
+                    pointer_cursor_position(metrics.get(), x, y).unwrap_or(cell_position)
+                };
                 crate::logging::debug_log(&format!(
                     "mouse release grid col={} row={}",
                     position.column, position.row
@@ -148,7 +158,29 @@ fn build_ui(app: &Application) {
                     &selection_dirty,
                     &content,
                 );
+            } else {
+                let effects = pointer_interaction.borrow_mut().cancel();
+                crate::logging::debug_log(&format!("mouse release outside effects={effects:?}"));
+                apply_interaction_effects(
+                    effects,
+                    &backend,
+                    &selection,
+                    &selection_dirty,
+                    &content,
+                );
             }
+        });
+    }
+    {
+        let backend = backend_rc.clone();
+        let selection = selection.clone();
+        let selection_dirty = selection_dirty.clone();
+        let content = last_content.clone();
+        let pointer_interaction = pointer_interaction.clone();
+        gtk::prelude::GestureExt::connect_cancel(&click_controller, move |_gesture, _sequence| {
+            let effects = pointer_interaction.borrow_mut().cancel();
+            crate::logging::debug_log(&format!("mouse gesture cancelled effects={effects:?}"));
+            apply_interaction_effects(effects, &backend, &selection, &selection_dirty, &content);
         });
     }
     canvas.widget().add_controller(click_controller);
@@ -219,6 +251,9 @@ fn build_ui(app: &Application) {
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         let measured_metrics = terminal_metrics_for_widget(canvas.widget());
         cell_metrics.set(measured_metrics.map(|metrics| metrics.cell));
+        if let (Some(path), Some(metrics)) = (&geometry_trace, measured_metrics) {
+            trace_geometry(path, canvas.widget(), metrics);
+        }
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
             && last_size.get() != Some(size)
             && backend_rc.borrow_mut().resize(size).is_ok()
@@ -377,6 +412,25 @@ fn apply_style(canvas: &gtk::DrawingArea) {
     );
 }
 
+fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: TerminalMetrics) {
+    use std::io::Write;
+    let Ok(mut file) = std::fs::File::create(path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "canvas_x={}\ncanvas_y={}\ncanvas_width={}\ncanvas_height={}\ncell_width={:.6}\nline_height={:.6}\ncols={}\nrows={}",
+        widget.allocation().x(),
+        widget.allocation().y(),
+        widget.allocated_width(),
+        widget.allocated_height(),
+        metrics.cell.width,
+        metrics.cell.height,
+        metrics.size.cols,
+        metrics.size.rows,
+    );
+}
+
 fn apply_interaction_effects(
     effects: Vec<InteractionEffect>,
     backend: &std::rc::Rc<std::cell::RefCell<TerminalBackend>>,
@@ -413,8 +467,8 @@ struct TerminalMetrics {
 
 #[derive(Clone, Copy)]
 struct CellMetrics {
-    width: i32,
-    height: i32,
+    width: f64,
+    height: f64,
 }
 
 fn terminal_metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalMetrics> {
@@ -423,22 +477,16 @@ fn terminal_metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalMetr
     if width <= 0 || height <= 0 {
         return None;
     }
-    let metrics = widget.pango_context().metrics(
-        Some(&pango::FontDescription::from_string("JetBrains Mono 13")),
-        None,
-    );
-    let char_width = metrics.approximate_char_width() / pango::SCALE;
-    let line_height = metrics.height() / pango::SCALE;
-    if char_width <= 0 || line_height <= 0 {
-        return None;
-    }
-    let cols = (width / char_width).clamp(1, u16::MAX as i32) as u16;
-    let rows = (height / line_height).clamp(1, u16::MAX as i32) as u16;
+    let font_metrics = metrics_for_widget(widget)?;
+    let cols =
+        ((width as f64 / font_metrics.cell_width).floor() as i32).clamp(1, u16::MAX as i32) as u16;
+    let rows = ((height as f64 / font_metrics.line_height).floor() as i32).clamp(1, u16::MAX as i32)
+        as u16;
     Some(TerminalMetrics {
         size: ScreenSize::new(cols, rows).ok()?,
         cell: CellMetrics {
-            width: char_width,
-            height: line_height,
+            width: font_metrics.cell_width,
+            height: font_metrics.line_height,
         },
     })
 }
@@ -449,12 +497,27 @@ fn pointer_grid_position(
     y: f64,
 ) -> Option<MouseGridPosition> {
     let metrics = metrics?;
-    if x < 0.0 || y < 0.0 || metrics.width <= 0 || metrics.height <= 0 {
+    if x < 0.0 || y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
         return None;
     }
     Some(MouseGridPosition {
-        column: (x as i32 / metrics.width).clamp(0, u16::MAX as i32) as u16,
-        row: (y as i32 / metrics.height).clamp(0, u16::MAX as i32) as u16,
+        column: ((x / metrics.width).floor() as i32).clamp(0, u16::MAX as i32) as u16,
+        row: ((y / metrics.height).floor() as i32).clamp(0, u16::MAX as i32) as u16,
+    })
+}
+
+fn pointer_cursor_position(
+    metrics: Option<CellMetrics>,
+    x: f64,
+    y: f64,
+) -> Option<MouseGridPosition> {
+    let metrics = metrics?;
+    if x < 0.0 || y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
+        return None;
+    }
+    Some(MouseGridPosition {
+        column: ((x / metrics.width).round() as i32).clamp(0, u16::MAX as i32) as u16,
+        row: ((y / metrics.height).floor() as i32).clamp(0, u16::MAX as i32) as u16,
     })
 }
 

@@ -11,4 +11,5 @@ pub mod mouse;
 pub mod render;
 pub mod selection;
 pub mod snapshot;
+pub mod terminal_font;
 pub mod terminal_grid;

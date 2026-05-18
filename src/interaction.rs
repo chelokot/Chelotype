@@ -78,6 +78,13 @@ impl PointerInteraction {
         }
     }
 
+    pub fn cancel(&mut self) -> Vec<InteractionEffect> {
+        self.pressed_button = None;
+        self.selection_anchor = None;
+        self.selection_moved = false;
+        Vec::new()
+    }
+
     pub fn motion(
         &mut self,
         mode: MouseMode,
@@ -269,6 +276,25 @@ mod tests {
         interaction.press(MouseMode::default(), MouseButton::Left, pos(2, 1));
         interaction.motion(MouseMode::default(), pos(5, 1));
         interaction.release(MouseMode::default(), pos(5, 1));
+        assert_eq!(
+            interaction.motion(MouseMode::default(), pos(8, 1)),
+            Vec::new()
+        );
+        assert_eq!(
+            interaction.selection(),
+            Some(SelectionRange::new(
+                GridPoint { row: 1, column: 2 },
+                GridPoint { row: 1, column: 6 }
+            ))
+        );
+    }
+
+    #[test]
+    fn local_drag_stops_changing_selection_after_cancelled_release() {
+        let mut interaction = PointerInteraction::default();
+        interaction.press(MouseMode::default(), MouseButton::Left, pos(2, 1));
+        interaction.motion(MouseMode::default(), pos(5, 1));
+        assert_eq!(interaction.cancel(), Vec::new());
         assert_eq!(
             interaction.motion(MouseMode::default(), pos(8, 1)),
             Vec::new()

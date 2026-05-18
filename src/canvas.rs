@@ -1,6 +1,6 @@
 use crate::render::{RenderCell, RenderFrame, RenderStyle};
+use crate::terminal_font::{layout_for, metrics_for_widget};
 use gtk::cairo;
-use gtk::pango;
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -26,6 +26,7 @@ impl TerminalCanvas {
         area.set_margin_top(8);
         area.set_margin_bottom(12);
         area.add_css_class("term-canvas");
+        area.set_cursor_from_name(Some("text"));
 
         let render = Rc::new(RefCell::new(None::<RenderFrame>));
         let cursor_blink = Rc::new(Cell::new(CursorBlinkState::default()));
@@ -97,8 +98,11 @@ fn draw_render_output(
     render: &RenderFrame,
     cursor_blink: CursorBlinkState,
 ) {
-    let line_height = terminal_line_height(widget);
-    let cell_width = terminal_cell_width(widget);
+    let Some(metrics) = metrics_for_widget(widget) else {
+        return;
+    };
+    let line_height = metrics.line_height;
+    let cell_width = metrics.cell_width;
     for line in &render.lines {
         let top = line.row as f64 * line_height;
         for cell in &line.cells {
@@ -109,7 +113,7 @@ fn draw_render_output(
                 continue;
             }
             let left = cell.column as f64 * cell_width;
-            let layout = terminal_layout(widget, &cell_markup(cell));
+            let layout = layout_for(widget, &cell_markup(cell));
             gtk::render_layout(&widget.style_context(), context, left, top, &layout);
         }
     }
@@ -176,15 +180,6 @@ impl CursorBlinkState {
     }
 }
 
-fn terminal_layout(widget: &gtk::DrawingArea, markup: &str) -> pango::Layout {
-    let layout = widget.create_pango_layout(None);
-    layout.set_font_description(Some(&pango::FontDescription::from_string(
-        "JetBrains Mono 13",
-    )));
-    layout.set_markup(markup);
-    layout
-}
-
 fn draw_cell_background(
     context: &cairo::Context,
     cell: &RenderCell,
@@ -239,22 +234,6 @@ fn push_style_markup(span: &mut String, style: &RenderStyle) {
     if style.strikeout {
         span.push_str(" strikethrough=\"true\"");
     }
-}
-
-fn terminal_line_height(widget: &gtk::DrawingArea) -> f64 {
-    let metrics = widget.pango_context().metrics(
-        Some(&pango::FontDescription::from_string("JetBrains Mono 13")),
-        None,
-    );
-    metrics.height() as f64 / pango::SCALE as f64
-}
-
-fn terminal_cell_width(widget: &gtk::DrawingArea) -> f64 {
-    let metrics = widget.pango_context().metrics(
-        Some(&pango::FontDescription::from_string("JetBrains Mono 13")),
-        None,
-    );
-    metrics.approximate_char_width() as f64 / pango::SCALE as f64
 }
 
 struct Rgb {

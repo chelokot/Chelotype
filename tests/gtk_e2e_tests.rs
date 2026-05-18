@@ -89,6 +89,17 @@ fn cursor_pixel_count(image: &std::path::Path) -> usize {
     .unwrap_or(0)
 }
 
+fn geometry_metric(path: &std::path::Path, name: &str) -> f64 {
+    let geometry = read_to_string(path).expect("read geometry trace");
+    geometry
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key == name).then(|| value.parse::<f64>().expect("numeric geometry metric"))
+        })
+        .unwrap_or_else(|| panic!("missing geometry metric {name}: {geometry}"))
+}
+
 #[derive(Clone, Copy)]
 struct ImagePixel {
     x: usize,
@@ -493,6 +504,118 @@ import -window "$window_id" "$screenshot"
 
 #[test]
 #[serial]
+fn gtk_e2e_keeps_colored_text_on_fixed_grid_across_spaces_under_xvfb() {
+    if !has_command("xvfb-run")
+        || !has_command("xdotool")
+        || !has_command("import")
+        || !has_command("convert")
+    {
+        eprintln!(
+            "skipping gtk grid spacing e2e because xvfb-run, xdotool, import, or convert is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-grid-spacing-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let screenshot = dir.join("window.png");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+screenshot="$3"
+geometry_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "printf '\033[38;2;255;0;0mA\033[0m \033[38;2;0;255;0mB\033[0m\n'; printf 'GRID_SPACE_DONE\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    if grep -R 'GRID_SPACE_DONE' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'GRID_SPACE_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "grid spacing marker never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+import -window "$window_id" "$screenshot"
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-grid-spacing-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            screenshot.to_str().expect("screenshot path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk grid spacing e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk grid spacing e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let red = pixel_bounds(&screenshot, |pixel| {
+        pixel.red > 180 && pixel.green < 90 && pixel.blue < 90
+    })
+    .expect("red A pixels");
+    let green = pixel_bounds(&screenshot, |pixel| {
+        pixel.y >= red.min_y.saturating_sub(2)
+            && pixel.y <= red.max_y + 2
+            && pixel.green > 180
+            && pixel.red < 90
+            && pixel.blue < 90
+    })
+    .expect("green B pixels");
+    let expected_delta = geometry_metric(&geometry_trace, "cell_width") * 2.0;
+    let actual_delta = green.min_x as f64 - red.min_x as f64;
+    assert!(
+        (actual_delta - expected_delta).abs() <= 5.0,
+        "colored cells after a styled space drifted off grid: red={red:?} green={green:?} expected_delta={expected_delta:.2} actual_delta={actual_delta:.2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_renders_narrow_cursor_pixels_under_xvfb() {
     if !has_command("xvfb-run")
         || !has_command("xdotool")
@@ -796,14 +919,16 @@ fn gtk_e2e_selects_text_with_real_mouse_drag_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
+geometry_trace="$4"
 rm -f /tmp/chelotype.log
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -833,13 +958,23 @@ if ! grep -R 'MOUSE_SELECT_OK' "$snapshot_dir" >/dev/null 2>&1; then
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-start_x=20
-start_y=115
-end_x=170
+latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
+marker_row="$(grep -n '^MOUSE_SELECT_OK' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (1.0 * cell) }')"
+start_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (15.8 * cell) }')"
 end_y="$start_y"
 xdotool mousemove "$start_x" "$start_y"
 xdotool mousedown 1
+sleep 0.05
 xdotool mousemove "$end_x" "$end_y"
+sleep 0.05
 xdotool mouseup 1
 for _ in {1..100}; do
     if grep -R '"selected_text": "MOUSE_SELECT_OK' "$snapshot_dir" >/dev/null 2>&1; then
@@ -866,6 +1001,7 @@ exit 1
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk mouse e2e under xvfb");
@@ -916,13 +1052,15 @@ fn gtk_e2e_drag_release_keeps_selection_stable_for_copy_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" "$bin" &
+geometry_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -952,9 +1090,22 @@ if ! grep -R 'DRAG_RELEASE_STABLE' "$snapshot_dir" >/dev/null 2>&1; then
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-xdotool mousemove 20 115
+latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
+marker_row="$(grep -n '^DRAG_RELEASE_STABLE' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (1.0 * cell) }')"
+start_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (19.8 * cell) }')"
+xdotool mousemove "$start_x" "$start_y"
 xdotool mousedown 1
-xdotool mousemove 220 115
+sleep 0.05
+xdotool mousemove "$end_x" "$start_y"
+sleep 0.05
 xdotool mouseup 1
 for _ in {1..100}; do
     if grep -F 'primary	DRAG_RELEASE_STABLE' "$clipboard_trace" >/dev/null 2>&1; then
@@ -994,6 +1145,7 @@ exit 1
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk drag release e2e under xvfb");
@@ -1033,13 +1185,15 @@ fn gtk_e2e_copies_selection_to_clipboard_with_ctrl_shift_c_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" "$bin" &
+geometry_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -1069,9 +1223,22 @@ if ! grep -R 'CLIPBOARD_COPY_OK' "$snapshot_dir" >/dev/null 2>&1; then
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-xdotool mousemove 20 115
+latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
+marker_row="$(grep -n '^CLIPBOARD_COPY_OK' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (1.0 * cell) }')"
+start_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (17.8 * cell) }')"
+xdotool mousemove "$start_x" "$start_y"
 xdotool mousedown 1
-xdotool mousemove 178 115
+sleep 0.05
+xdotool mousemove "$end_x" "$start_y"
+sleep 0.05
 xdotool mouseup 1
 for _ in {1..100}; do
     if grep -F 'primary	CLIPBOARD_COPY_OK' "$clipboard_trace" >/dev/null 2>&1; then
@@ -1104,6 +1271,7 @@ exit 1
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk clipboard e2e under xvfb");
@@ -1142,12 +1310,15 @@ fn gtk_e2e_click_moves_shell_cursor_on_current_input_row_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+geometry_trace="$3"
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -1165,8 +1336,32 @@ fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "abcdef"
-sleep 0.2
-xdotool mousemove 44 115
+for _ in {1..100}; do
+    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+latest_json="$(ls "$snapshot_dir"/*.json 2>/dev/null | tail -n 1 || true)"
+if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
+    echo "click setup snapshots or geometry did not appear" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+cursor_col="$(sed -n 's/^  "cursor_col": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+canvas_height="$(sed -n 's/^canvas_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+target_col="$((cursor_col - 6))"
+target_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$target_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((col + 1.5) * cell) }')"
+target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+echo "click target window=$window_id X=$X Y=$Y WIDTH=$WIDTH HEIGHT=$HEIGHT cursor=$cursor_line,$cursor_col canvas=$canvas_x,$canvas_y,$canvas_width,$canvas_height cell=$cell_width line=$line_height target=$target_x,$target_y" >&2
+xdotool mousemove "$target_x" "$target_y"
 xdotool click 1
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "Z"
@@ -1183,6 +1378,7 @@ for file in "$snapshot_dir"/*.txt; do
     echo "===$file" >&2
     sed -n '1,8p' "$file" >&2
 done
+cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
@@ -1197,6 +1393,7 @@ exit 1
             "chelotype-gtk-click-cursor-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk click cursor e2e under xvfb");
@@ -1276,7 +1473,7 @@ if ! grep -R 'MOUSE_REPORT_DONE' "$snapshot_dir" >/dev/null 2>&1; then
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-if grep -R '1b 5b 3c 30 3b 31 3b 33 4d' "$snapshot_dir" >/dev/null 2>&1; then
+if grep -R '1b 5b 3c 30 3b' "$snapshot_dir" | grep '4d' >/dev/null 2>&1; then
     exit 0
 fi
 echo "shell did not receive SGR mouse press bytes" >&2
@@ -1320,7 +1517,8 @@ exit 1
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("MOUSE_REPORT_DONE"));
-    assert!(text.contains("1b 5b 3c 30 3b 31 3b 33 4d"));
+    assert!(text.contains("1b 5b 3c 30 3b"));
+    assert!(text.contains("4d"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

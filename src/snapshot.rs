@@ -159,7 +159,7 @@ fn semantic_prompt_name(metadata: TerminalLineMetadata) -> &'static str {
 
 fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
     let mut out = String::from(
-        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:JetBrains Mono,monospace;font-size:13px;white-space:pre;\">",
+        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">",
     );
     for (line_idx, line) in snapshot.lines.iter().enumerate() {
         for (col_idx, cell) in line.cells.iter().enumerate() {

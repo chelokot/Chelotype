@@ -413,7 +413,7 @@ fn write_render_dump(
         format!("\n{input}")
     };
     let html = format!(
-        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:JetBrains Mono,monospace;font-size:13px;white-space:pre;\">{history}{input_html}</body></html>"
+        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">{history}{input_html}</body></html>"
     );
     if let Some(parent) = base.parent() {
         create_dir_all(parent)?;
