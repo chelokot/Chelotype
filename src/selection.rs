@@ -1,5 +1,6 @@
+use crate::cell_text::push_cell_text;
 use crate::mouse::MouseGridPosition;
-use alacritty_terminal::term::cell::Cell;
+use crate::terminal_grid::TerminalCell;
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -61,7 +62,7 @@ impl SelectionRange {
     }
 }
 
-pub fn selected_text(lines: &[Vec<Cell>], range: SelectionRange) -> String {
+pub fn selected_text(lines: &[Vec<TerminalCell>], range: SelectionRange) -> String {
     if range.is_empty() {
         return String::new();
     }
@@ -80,8 +81,12 @@ pub fn selected_text(lines: &[Vec<Cell>], range: SelectionRange) -> String {
         } else {
             significant_len(line)
         };
-        for column in start_column..end_column.min(line.len()) {
-            out.push(line[column].c);
+        for cell in line
+            .iter()
+            .take(end_column.min(line.len()))
+            .skip(start_column)
+        {
+            push_cell_text(&mut out, cell);
         }
         if row != range.end.row && row + 1 < lines.len() {
             out.push('\n');
@@ -98,9 +103,20 @@ fn point_lt(left: GridPoint, right: GridPoint) -> bool {
     left.row < right.row || left.row == right.row && left.column < right.column
 }
 
-fn significant_len(line: &[Cell]) -> usize {
+fn significant_len(line: &[TerminalCell]) -> usize {
     line.iter()
-        .rposition(|cell| cell.c != ' ' || cell.zerowidth().is_some() || !cell.flags.is_empty())
+        .rposition(|cell| {
+            cell.text != " "
+                || cell.fg.is_some()
+                || cell.bg.is_some()
+                || cell.bold
+                || cell.italic
+                || cell.underline
+                || cell.inverse
+                || cell.strikeout
+                || cell.wide
+                || cell.wide_spacer
+        })
         .map(|idx| idx + 1)
         .unwrap_or(0)
 }
@@ -109,11 +125,11 @@ fn significant_len(line: &[Cell]) -> usize {
 mod tests {
     use super::*;
 
-    fn line(text: &str) -> Vec<Cell> {
+    fn line(text: &str) -> Vec<TerminalCell> {
         text.chars()
-            .map(|ch| Cell {
-                c: ch,
-                ..Cell::default()
+            .map(|ch| TerminalCell {
+                text: ch.to_string(),
+                ..TerminalCell::blank()
             })
             .collect()
     }
@@ -184,7 +200,7 @@ mod tests {
     #[test]
     fn trims_plain_blank_tail_on_full_middle_lines() {
         let mut padded = line("gh");
-        padded.extend([Cell::default(), Cell::default()]);
+        padded.extend([TerminalCell::blank(), TerminalCell::blank()]);
         let lines = [line("abcdef"), padded, line("mnopqr")];
         let range = SelectionRange::new(
             GridPoint { row: 0, column: 5 },
@@ -201,5 +217,32 @@ mod tests {
             GridPoint { row: 0, column: 2 },
         );
         assert_eq!(selected_text(&lines, range), "");
+    }
+
+    #[test]
+    fn selected_text_preserves_grapheme_cells_and_skips_wide_spacers() {
+        let composed = TerminalCell {
+            text: "e\u{0301}".to_string(),
+            ..TerminalCell::blank()
+        };
+        let mut wide = TerminalCell {
+            text: "中".to_string(),
+            ..TerminalCell::blank()
+        };
+        wide.wide = true;
+        let mut spacer = TerminalCell::blank();
+        spacer.wide_spacer = true;
+        let lines = [vec![
+            line("a")[0].clone(),
+            composed,
+            wide,
+            spacer,
+            line("b")[0].clone(),
+        ]];
+        let range = SelectionRange::new(
+            GridPoint { row: 0, column: 0 },
+            GridPoint { row: 0, column: 5 },
+        );
+        assert_eq!(selected_text(&lines, range), "ae\u{0301}中b");
     }
 }

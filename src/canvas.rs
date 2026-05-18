@@ -45,6 +45,12 @@ impl TerminalCanvas {
     }
 }
 
+impl Default for TerminalCanvas {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn draw_background(context: &cairo::Context, width: i32, height: i32) {
     context.set_source_rgb(15.0 / 255.0, 17.0 / 255.0, 21.0 / 255.0);
     context.rectangle(0.0, 0.0, width as f64, height as f64);

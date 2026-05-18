@@ -1,4 +1,5 @@
 use crate::backend::{ScreenSize, TerminalBackend};
+use crate::cell_text::lines_to_text;
 use crate::input::{KeyAction, key_to_action};
 use crate::interaction::{InteractionEffect, PointerInteraction};
 use crate::mouse::{MouseButton, MouseGridPosition};
@@ -26,18 +27,18 @@ pub fn run_headless() -> glib::ExitCode {
 }
 
 pub fn run_headless_scenario() -> std::io::Result<PathBuf> {
-    let mut backend = TerminalBackend::spawn_shell()?;
+    let mut backend = TerminalBackend::spawn_headless_shell()?;
     let scenario = HeadlessScenario::from_env();
     let mut runtime = HeadlessRuntime::default();
     for action in &scenario.actions {
         runtime.apply(&mut backend, action)?;
         sleep(Duration::from_millis(scenario.step_delay_ms));
     }
-    let content = wait_for_headless_content(&backend, &scenario.expected)?;
+    let content = wait_for_headless_content(&mut backend, &scenario.expected)?;
     let selection = scenario.selection.or(runtime.selection);
     let rendered = Renderer::render_frame_with_selection(content.clone(), selection);
     let path = write_snapshot(content.clone(), "headless")
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "snapshot write failed"))?;
+        .ok_or_else(|| std::io::Error::other("snapshot write failed"))?;
     write_render_dump(
         path.clone(),
         &rendered.history_markup,
@@ -361,17 +362,13 @@ fn decode_action(input: &str) -> String {
 }
 
 fn wait_for_headless_content(
-    backend: &TerminalBackend,
+    backend: &mut TerminalBackend,
     expected: &[String],
 ) -> std::io::Result<crate::backend::RenderableContentOwned> {
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if let Some(content) = backend.snapshot_renderable() {
-            let text = content
-                .lines
-                .iter()
-                .flat_map(|line| line.iter().map(|cell| cell.c))
-                .collect::<String>();
+            let text = lines_to_text(&content.lines);
             if expected.iter().all(|needle| text.contains(needle)) {
                 return Ok(content);
             }
@@ -400,17 +397,13 @@ fn write_render_dump(
         selection,
     };
     let json = serde_json::to_vec_pretty(&dump)?;
+    let input_html = if input.is_empty() {
+        String::new()
+    } else {
+        format!("\n{input}")
+    };
     let html = format!(
-        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:JetBrains Mono,monospace;font-size:13px;white-space:pre;\">{}</body></html>",
-        format!(
-            "{}{}",
-            history,
-            if input.is_empty() {
-                "".to_string()
-            } else {
-                format!("\n{input}")
-            }
-        )
+        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:JetBrains Mono,monospace;font-size:13px;white-space:pre;\">{history}{input_html}</body></html>"
     );
     if let Some(parent) = base.parent() {
         create_dir_all(parent)?;

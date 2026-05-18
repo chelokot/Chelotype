@@ -1,6 +1,6 @@
 use crate::backend::RenderableContentOwned;
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use crate::cell_text::lines_to_text;
+use crate::terminal_grid::TerminalCell;
 use serde::Serialize;
 use std::fs::{File, create_dir_all};
 use std::io::Write;
@@ -9,13 +9,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize)]
 struct CellJson {
-    ch: char,
+    text: String,
     fg: String,
     bg: String,
     bold: bool,
     underline: bool,
     italic: bool,
     inverse: bool,
+    wide: bool,
+    wide_spacer: bool,
 }
 
 #[derive(Serialize)]
@@ -58,13 +60,21 @@ pub fn write_snapshot(snapshot: RenderableContentOwned, label: &str) -> Option<P
         .map(|line| {
             line.iter()
                 .map(|cell| CellJson {
-                    ch: cell.c,
-                    fg: hex_for(cell.fg, &snapshot.colors),
-                    bg: hex_for(cell.bg, &snapshot.colors),
-                    bold: cell.flags.contains(Flags::BOLD),
-                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                    italic: cell.flags.contains(Flags::ITALIC),
-                    inverse: cell.flags.contains(Flags::INVERSE),
+                    text: cell.text.clone(),
+                    fg: cell
+                        .fg
+                        .clone()
+                        .unwrap_or_else(|| snapshot.colors.foreground.clone()),
+                    bg: cell
+                        .bg
+                        .clone()
+                        .unwrap_or_else(|| snapshot.colors.background.clone()),
+                    bold: cell.bold,
+                    underline: cell.underline,
+                    italic: cell.italic,
+                    inverse: cell.inverse,
+                    wide: cell.wide,
+                    wide_spacer: cell.wide_spacer,
                 })
                 .collect()
         })
@@ -101,17 +111,8 @@ fn snapshot_to_plain(snapshot: &SnapshotJson) -> String {
     snapshot.text.clone()
 }
 
-fn snapshot_plain_from_lines(lines: &[Vec<alacritty_terminal::term::cell::Cell>]) -> String {
-    let mut out = String::new();
-    for (idx, line) in lines.iter().enumerate() {
-        for cell in line {
-            out.push(cell.c);
-        }
-        if idx + 1 != lines.len() {
-            out.push('\n');
-        }
-    }
-    out
+fn snapshot_plain_from_lines(lines: &[Vec<TerminalCell>]) -> String {
+    lines_to_text(lines)
 }
 
 fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
@@ -120,6 +121,9 @@ fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
     );
     for (line_idx, line) in snapshot.lines.iter().enumerate() {
         for (col_idx, cell) in line.iter().enumerate() {
+            if cell.wide_spacer {
+                continue;
+            }
             let mut span = String::from("<span style=\"");
             span.push_str(&format!("color:{};", cell.fg));
             span.push_str(&format!("background-color:{};", cell.bg));
@@ -133,7 +137,9 @@ fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
                 span.push_str("text-decoration:underline;");
             }
             span.push_str("\">");
-            span.push_str(&html_escape(cell.ch));
+            for ch in cell.text.chars() {
+                span.push_str(&html_escape(ch));
+            }
             span.push_str("</span>");
             if snapshot.cursor_visible
                 && snapshot.cursor_line == line_idx as i32
@@ -160,18 +166,6 @@ fn html_escape(ch: char) -> String {
     }
 }
 
-fn hex_for(color: Color, palette: &alacritty_terminal::term::color::Colors) -> String {
-    match color {
-        Color::Named(named) => palette[named]
-            .map(|rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b))
-            .unwrap_or_else(|| default_named(named)),
-        Color::Indexed(idx) => palette[idx as usize]
-            .map(|rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b))
-            .unwrap_or_else(|| default_indexed(idx)),
-        Color::Spec(rgb) => format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b),
-    }
-}
-
 fn write_file(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         create_dir_all(parent)?;
@@ -181,48 +175,31 @@ fn write_file(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
     Ok(())
 }
 
-fn default_named(color: NamedColor) -> String {
-    match color {
-        NamedColor::Background => "#0f1115".to_string(),
-        NamedColor::Foreground => "#e5e7eb".to_string(),
-        NamedColor::Black => "#000000".to_string(),
-        NamedColor::Red => "#ff5f5f".to_string(),
-        NamedColor::Green => "#5fff87".to_string(),
-        NamedColor::Yellow => "#f1fa8c".to_string(),
-        NamedColor::Blue => "#5fafff".to_string(),
-        NamedColor::Magenta => "#ff7bff".to_string(),
-        NamedColor::Cyan => "#5fffff".to_string(),
-        NamedColor::White => "#e5e7eb".to_string(),
-        NamedColor::BrightBlack => "#555555".to_string(),
-        NamedColor::BrightRed => "#ff7b7b".to_string(),
-        NamedColor::BrightGreen => "#7bffaf".to_string(),
-        NamedColor::BrightYellow => "#ffffb3".to_string(),
-        NamedColor::BrightBlue => "#7bb7ff".to_string(),
-        NamedColor::BrightMagenta => "#ff9dff".to_string(),
-        NamedColor::BrightCyan => "#7bffff".to_string(),
-        NamedColor::BrightWhite => "#ffffff".to_string(),
-        _ => "#e5e7eb".to_string(),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn default_indexed(idx: u8) -> String {
-    match idx {
-        0 => "#000000".to_string(),
-        1 => "#ff5f5f".to_string(),
-        2 => "#5fff87".to_string(),
-        3 => "#f1fa8c".to_string(),
-        4 => "#5fafff".to_string(),
-        5 => "#ff7bff".to_string(),
-        6 => "#5fffff".to_string(),
-        7 => "#e5e7eb".to_string(),
-        8 => "#555555".to_string(),
-        9 => "#ff7b7b".to_string(),
-        10 => "#7bffaf".to_string(),
-        11 => "#ffffb3".to_string(),
-        12 => "#7bb7ff".to_string(),
-        13 => "#ff9dff".to_string(),
-        14 => "#7bffff".to_string(),
-        15 => "#ffffff".to_string(),
-        _ => "#e5e7eb".to_string(),
+    fn cell(text: &str) -> TerminalCell {
+        TerminalCell {
+            text: text.to_string(),
+            ..TerminalCell::blank()
+        }
+    }
+
+    #[test]
+    fn plain_snapshot_preserves_combining_marks() {
+        let composed = cell("e\u{0301}");
+        let lines = vec![vec![cell("a"), composed, cell("b")]];
+        assert_eq!(snapshot_plain_from_lines(&lines), "ae\u{0301}b");
+    }
+
+    #[test]
+    fn plain_snapshot_skips_wide_spacer_cells() {
+        let mut wide = cell("中");
+        wide.wide = true;
+        let mut spacer = TerminalCell::blank();
+        spacer.wide_spacer = true;
+        let lines = vec![vec![cell("a"), wide, spacer, cell("b")]];
+        assert_eq!(snapshot_plain_from_lines(&lines), "a中b");
     }
 }

@@ -1,4 +1,3 @@
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use chelotype::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
 use portable_pty::CommandBuilder;
 use serial_test::serial;
@@ -27,7 +26,7 @@ fn snapshot_contains(snapshot: &RenderableContentOwned, needle: &str) -> bool {
     snapshot_text(snapshot).contains(needle)
 }
 
-fn wait_for_snapshot<F>(backend: &TerminalBackend, predicate: F) -> RenderableContentOwned
+fn wait_for_snapshot<F>(backend: &mut TerminalBackend, predicate: F) -> RenderableContentOwned
 where
     F: Fn(&RenderableContentOwned) -> bool,
 {
@@ -47,7 +46,7 @@ fn snapshot_text(snapshot: &RenderableContentOwned) -> String {
     let mut text = String::new();
     for line in &snapshot.lines {
         for cell in line {
-            text.push(cell.c);
+            text.push_str(&cell.text);
         }
         text.push('\n');
     }
@@ -61,7 +60,7 @@ fn backend_writes_to_single_pty_and_reads_shell_output() {
     backend
         .write(b"printf 'CHELOTYPE_BACKEND_OK\\n'\n")
         .expect("write command");
-    let snapshot = wait_for_snapshot(&backend, |snapshot| {
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot_text(snapshot).contains("CHELOTYPE_BACKEND_OK")
     });
     assert!(snapshot_text(&snapshot).contains("CHELOTYPE_BACKEND_OK"));
@@ -72,8 +71,8 @@ fn backend_writes_to_single_pty_and_reads_shell_output() {
 #[test]
 #[serial]
 fn backend_preserves_ansi_foreground_colors_in_cells() {
-    let backend = TerminalBackend::spawn(color_output_command()).expect("spawn color command");
-    let snapshot = wait_for_snapshot(&backend, |snapshot| {
+    let mut backend = TerminalBackend::spawn(color_output_command()).expect("spawn color command");
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot_text(snapshot).contains("CHELOTYPE_RED")
     });
     let red_cell = snapshot
@@ -81,11 +80,7 @@ fn backend_preserves_ansi_foreground_colors_in_cells() {
         .iter()
         .flat_map(|line| line.iter())
         .find(|cell| {
-            cell.c == 'C'
-                && matches!(
-                    cell.fg,
-                    Color::Named(NamedColor::Red) | Color::Indexed(1) | Color::Spec(_)
-                )
+            cell.text == "C" && cell.fg.as_deref().is_some_and(|color| color != "#e5e7eb")
         });
     assert!(red_cell.is_some(), "red output cell was not colorized");
 }
@@ -95,7 +90,9 @@ fn backend_preserves_ansi_foreground_colors_in_cells() {
 fn backend_tracks_cursor_after_shell_echo() {
     let mut backend = TerminalBackend::spawn(interactive_shell()).expect("spawn shell");
     backend.write(b"abc").expect("write input");
-    let snapshot = wait_for_snapshot(&backend, |snapshot| snapshot_text(snapshot).contains("abc"));
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_text(snapshot).contains("abc")
+    });
     assert!(snapshot.cursor_col >= 3);
     let _ = backend.write(b"\x15exit\n");
 }
@@ -103,13 +100,13 @@ fn backend_tracks_cursor_after_shell_echo() {
 #[test]
 #[serial]
 fn backend_resizes_pty_and_terminal_state() {
-    let backend = TerminalBackend::spawn(interactive_shell()).expect("spawn shell");
+    let mut backend = TerminalBackend::spawn(interactive_shell()).expect("spawn shell");
     let size = ScreenSize::new(100, 24).expect("valid terminal size");
     backend.resize(size).expect("resize backend");
     let pty_size = backend.pty_size().expect("pty size");
     assert_eq!(pty_size.cols, 100);
     assert_eq!(pty_size.rows, 24);
-    let snapshot = wait_for_snapshot(&backend, |snapshot| {
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot.lines.len() == 24 && snapshot.lines.iter().all(|line| line.len() == 100)
     });
     assert_eq!(snapshot.lines.len(), 24);
@@ -119,9 +116,9 @@ fn backend_resizes_pty_and_terminal_state() {
 #[test]
 #[serial]
 fn backend_tracks_sgr_mouse_reporting_mode() {
-    let backend = TerminalBackend::spawn(color_output_command()).expect("spawn command");
+    let mut backend = TerminalBackend::spawn(color_output_command()).expect("spawn command");
     assert!(
-        !wait_for_snapshot(&backend, |_| true)
+        !wait_for_snapshot(&mut backend, |_| true)
             .mouse
             .sends_press_release()
     );
@@ -130,7 +127,9 @@ fn backend_tracks_sgr_mouse_reporting_mode() {
     backend
         .write(b"printf '\\033[?1000h\\033[?1006h'\n")
         .expect("enable mouse reporting");
-    let snapshot = wait_for_snapshot(&backend, |snapshot| snapshot.mouse.sends_press_release());
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot.mouse.sends_press_release()
+    });
     assert!(snapshot.mouse.click);
     assert!(snapshot.mouse.sgr);
     assert!(snapshot.mouse.sends_press_release());
@@ -145,7 +144,7 @@ fn backend_tracks_sgr_mouse_drag_reporting_mode() {
     backend
         .write(b"printf '\\033[?1002h\\033[?1006h'\n")
         .expect("enable drag mouse reporting");
-    let snapshot = wait_for_snapshot(&backend, |snapshot| snapshot.mouse.sends_drag());
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| snapshot.mouse.sends_drag());
     assert!(snapshot.mouse.drag);
     assert!(snapshot.mouse.sgr);
     assert!(snapshot.mouse.sends_press_release());
@@ -164,21 +163,21 @@ fn backend_exposes_scrollback_display_offset() {
         .write(b"for n in $(seq 1 24); do printf 'SCROLL_%02d\\n' \"$n\"; done\n")
         .expect("write scrollback command");
 
-    let bottom = wait_for_snapshot(&backend, |snapshot| {
+    let bottom = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot_contains(snapshot, "SCROLL_24")
     });
     assert_eq!(bottom.display_offset, 0);
     assert!(snapshot_contains(&bottom, "SCROLL_24"));
 
     backend.scroll_display(10).expect("scroll up");
-    let scrolled = wait_for_snapshot(&backend, |snapshot| {
+    let scrolled = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot.display_offset > 0 && snapshot_contains(snapshot, "SCROLL_")
     });
     assert!(scrolled.display_offset > 0);
     assert!(!snapshot_contains(&scrolled, "SCROLL_24"));
 
     backend.scroll_to_bottom().expect("scroll bottom");
-    let bottom_again = wait_for_snapshot(&backend, |snapshot| {
+    let bottom_again = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot.display_offset == 0 && snapshot_contains(snapshot, "SCROLL_24")
     });
     assert_eq!(bottom_again.display_offset, 0);

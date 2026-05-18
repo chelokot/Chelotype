@@ -63,7 +63,7 @@ fn build_ui(app: &Application) {
                         let _ = backend.borrow_mut().write(&data);
                     }
                     KeyAction::ScrollDisplay(lines) => {
-                        let _ = backend.borrow().scroll_display(lines);
+                        let _ = backend.borrow_mut().scroll_display(lines);
                     }
                 }
                 glib::Propagation::Stop
@@ -133,7 +133,7 @@ fn build_ui(app: &Application) {
         let backend = backend_rc.clone();
         scroll_controller.connect_scroll(move |_controller, _dx, dy| {
             if let Some(lines) = crate::interaction::wheel_scroll_lines(dy) {
-                let _ = backend.borrow().scroll_display(lines);
+                let _ = backend.borrow_mut().scroll_display(lines);
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -147,12 +147,11 @@ fn build_ui(app: &Application) {
         cell_metrics.set(measured_metrics.map(|metrics| metrics.cell));
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
             && last_size.get() != Some(size)
+            && backend_rc.borrow_mut().resize(size).is_ok()
         {
-            if backend_rc.borrow().resize(size).is_ok() {
-                last_size.set(Some(size));
-            }
+            last_size.set(Some(size));
         }
-        if let Some(content) = backend_rc.borrow().snapshot_renderable() {
+        if let Some(content) = backend_rc.borrow_mut().snapshot_renderable() {
             mouse_mode.set(content.mouse);
             let rendered = Renderer::render_frame_with_selection(content.clone(), selection.get());
             canvas.set_render(rendered);

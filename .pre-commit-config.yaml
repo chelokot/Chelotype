@@ -3,16 +3,16 @@ repos:
   hooks:
   - id: cargo-fmt
     name: cargo fmt
-    entry: cargo fmt -- --check
+    entry: bash scripts/with-zig.sh cargo fmt -- --check
     language: system
     pass_filenames: false
   - id: cargo-clippy
     name: cargo clippy
-    entry: cargo clippy -- -D warnings
+    entry: bash scripts/with-zig.sh cargo clippy --all-targets -- -D warnings
     language: system
     pass_filenames: false
   - id: cargo-test
     name: cargo test
-    entry: cargo test
+    entry: bash scripts/with-zig.sh cargo test
     language: system
     pass_filenames: false

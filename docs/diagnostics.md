@@ -3,7 +3,7 @@ Headless snapshots
 - Snapshot files go to `/tmp/chelotype_snapshots` by default or `CHELOTYPE_SNAPSHOT_DIR`.
 - Each run produces `.json`, `.html`, `.txt`, and `markup.html` captures with colors, cursor, and rendered markup.
 - Selection runs also produce `.render.json` with history/input markup, selected text, and the selected grid range.
-- JSON snapshots include `rows`, `cols`, cursor fields, mouse mode fields, plain `text`, and per-cell text/color/style records.
+- JSON snapshots include `rows`, `cols`, cursor fields, mouse mode fields, plain `text`, and per-cell text/color/style records, including zero-width combining marks and wide-cell spacer metadata.
 - Override actions with `CHELOTYPE_HEADLESS_ACTIONS`; split actions with `|`, and use `\n`, `\r`, `\t`, `\e`, and `\\` escapes.
 - Prefer `CHELOTYPE_HEADLESS_EVENTS` for input-path e2e. Supported events: `raw:<bytes>`, `text:<text>`, `key:<name>`, `resize:<cols>x<rows>`, `scroll:<lines>`, `mouse:press:<button>:<col>,<row>`, `mouse:drag:<col>,<row>`, and `mouse:release:<col>,<row>`.
 - Override expected terminal text with `CHELOTYPE_HEADLESS_EXPECT`; split expected substrings with `|`.

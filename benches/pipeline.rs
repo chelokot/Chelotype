@@ -1,23 +1,20 @@
-use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::term::Config;
-use alacritty_terminal::term::Term;
-use alacritty_terminal::vte::ansi::Processor;
-use chelotype::backend::{RenderableContentOwned, ScreenSize};
+use chelotype::ghostty_snapshot::GhosttySnapshotter;
 use chelotype::render::Renderer;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use libghostty_vt::{Terminal, TerminalOptions};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Default)]
-struct BenchListener;
-
-impl EventListener for BenchListener {
-    fn send_event(&self, _: Event) {}
-}
-
-fn build_term() -> (Term<BenchListener>, Processor) {
+fn build_core() -> (Terminal<'static, 'static>, GhosttySnapshotter) {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 120,
+        rows: 36,
+        max_scrollback: 10000,
+    })
+    .expect("create ghostty terminal");
+    terminal.vt_write(b"echo ready\n");
     (
-        Term::new(Config::default(), &ScreenSize::default(), BenchListener),
-        Processor::new(),
+        terminal,
+        GhosttySnapshotter::new().expect("create ghostty snapshotter"),
     )
 }
 
@@ -27,16 +24,12 @@ fn bench_full_pipeline_keyrepeat(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(2));
     group.bench_function("full_pipeline_markup_keyrepeat", |b| {
         b.iter_batched(
-            || {
-                let (mut term, mut parser) = build_term();
-                parser.advance(&mut term, b"echo ready\n");
-                (term, parser)
-            },
-            |(mut term, mut parser)| {
+            build_core,
+            |(mut terminal, mut snapshotter)| {
                 for _ in 0..128 {
-                    parser.advance(&mut term, b"a");
-                    let snapshot =
-                        RenderableContentOwned::from_renderable(term.renderable_content());
+                    terminal.vt_write(b"a");
+                    snapshotter.invalidate();
+                    let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
                     let _ = Renderer::render(snapshot);
                 }
             },
@@ -45,16 +38,12 @@ fn bench_full_pipeline_keyrepeat(c: &mut Criterion) {
     });
     group.bench_function("full_pipeline_frame_keyrepeat", |b| {
         b.iter_batched(
-            || {
-                let (mut term, mut parser) = build_term();
-                parser.advance(&mut term, b"echo ready\n");
-                (term, parser)
-            },
-            |(mut term, mut parser)| {
+            build_core,
+            |(mut terminal, mut snapshotter)| {
                 for _ in 0..128 {
-                    parser.advance(&mut term, b"a");
-                    let snapshot =
-                        RenderableContentOwned::from_renderable(term.renderable_content());
+                    terminal.vt_write(b"a");
+                    snapshotter.invalidate();
+                    let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
                     let _ = Renderer::render_frame_with_selection(snapshot, None);
                 }
             },
@@ -67,22 +56,22 @@ fn bench_full_pipeline_keyrepeat(c: &mut Criterion) {
 fn bench_full_pipeline_latency_guard(c: &mut Criterion) {
     c.bench_function("full_pipeline_frame_latency_guard", |b| {
         b.iter_custom(|iters| {
-            let (mut term, mut parser) = build_term();
-            parser.advance(&mut term, b"echo latency\n");
+            let (mut terminal, mut snapshotter) = build_core();
             let mut worst = Duration::ZERO;
             let start = Instant::now();
             for _ in 0..iters {
-                let t0 = Instant::now();
-                parser.advance(&mut term, b"x");
-                let snapshot = RenderableContentOwned::from_renderable(term.renderable_content());
+                let frame_start = Instant::now();
+                terminal.vt_write(b"x");
+                snapshotter.invalidate();
+                let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
                 let _ = Renderer::render_frame_with_selection(snapshot, None);
-                let dt = t0.elapsed();
-                if dt > worst {
-                    worst = dt;
+                let elapsed = frame_start.elapsed();
+                if elapsed > worst {
+                    worst = elapsed;
                 }
             }
-            if worst > Duration::from_micros(1_200) {
-                panic!("frame render latency too high: {:?}", worst);
+            if worst > Duration::from_millis(4) {
+                panic!("frame render latency too high: {worst:?}");
             }
             start.elapsed()
         });
@@ -95,8 +84,8 @@ fn bench_held_key_10s_latency_gate(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
     group.bench_function("held_key_10s_latency_gate", |b| {
         b.iter_custom(|_| {
-            let (mut term, mut parser) = build_term();
-            parser.advance(&mut term, b"held-key-start\n");
+            let (mut terminal, mut snapshotter) = build_core();
+            terminal.vt_write(b"held-key-start\n");
             let scenario_seconds = std::env::var("CHELOTYPE_HELD_KEY_SECONDS")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -106,8 +95,9 @@ fn bench_held_key_10s_latency_gate(c: &mut Criterion) {
             let mut samples = Vec::with_capacity(60_000);
             while Instant::now() < deadline {
                 let frame_start = Instant::now();
-                parser.advance(&mut term, b"a");
-                let snapshot = RenderableContentOwned::from_renderable(term.renderable_content());
+                terminal.vt_write(b"a");
+                snapshotter.invalidate();
+                let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
                 let _ = Renderer::render_frame_with_selection(snapshot, None);
                 samples.push(frame_start.elapsed());
             }

@@ -1,9 +1,9 @@
 pub mod app;
 pub mod backend;
-#[cfg(feature = "legacy-vte-bridge")]
-pub mod bridge;
 pub mod canvas;
+pub mod cell_text;
 pub mod diagnostics;
+pub mod ghostty_snapshot;
 pub mod input;
 pub mod interaction;
 pub mod logging;
@@ -11,3 +11,4 @@ pub mod mouse;
 pub mod render;
 pub mod selection;
 pub mod snapshot;
+pub mod terminal_grid;

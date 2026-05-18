@@ -1,7 +1,7 @@
 use crate::backend::RenderableContentOwned;
+use crate::cell_text::{is_wide_spacer, push_cell_text};
 use crate::selection::{GridPoint, SelectionRange};
-use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use crate::terminal_grid::TerminalCell;
 use serde::Serialize;
 
 #[derive(Clone, Serialize)]
@@ -77,7 +77,7 @@ impl Renderer {
         let mut input_markup = String::new();
         let mut input_text = String::new();
         for (idx, line) in content.lines.iter().enumerate() {
-            let markup = cells_to_markup(line, &content.colors, idx, selection);
+            let markup = cells_to_markup(line, idx, selection);
             if idx as i32 == content.cursor_line {
                 input_markup.push_str(&markup);
                 input_text = cells_to_text(line);
@@ -111,7 +111,7 @@ impl Renderer {
         let mut input_text = String::new();
         let mut lines = Vec::with_capacity(content.lines.len());
         for (idx, line) in content.lines.iter().enumerate() {
-            let line_render = build_line_render(line, &content.colors, idx, selection);
+            let line_render = build_line_render(line, idx, selection);
             if idx as i32 == content.cursor_line {
                 input_markup.push_str(&line_render.markup);
                 input_text = line_render.text.clone();
@@ -158,66 +158,59 @@ struct LineRender {
     runs: Vec<RenderRun>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 struct CellStyle {
-    fg: Color,
-    bg: Color,
-    flags: Flags,
+    fg: Option<String>,
+    bg: Option<String>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikeout: bool,
     selected: bool,
 }
 
 impl CellStyle {
-    fn from_cell(cell: &Cell, selected: bool) -> Self {
+    fn from_cell(cell: &TerminalCell, selected: bool) -> Self {
         Self {
-            fg: cell.fg,
-            bg: cell.bg,
-            flags: cell.flags,
+            fg: cell.fg.clone(),
+            bg: cell.bg.clone(),
+            bold: cell.bold,
+            italic: cell.italic,
+            underline: cell.underline,
+            strikeout: cell.strikeout,
             selected,
         }
     }
 }
 
-fn style_open(style: CellStyle, colors: &alacritty_terminal::term::color::Colors) -> String {
+fn style_open(style: &CellStyle) -> String {
     let mut span = String::from("<span");
-    if let Some(rgb) = color_to_hex(style.fg, colors) {
+    if let Some(rgb) = &style.fg {
         span.push_str(&format!(" foreground=\"{}\"", rgb));
     }
     if style.selected {
         span.push_str(" background=\"#264f78\"");
-    } else if let Some(bg) = color_to_hex(style.bg, colors) {
+    } else if let Some(bg) = &style.bg {
         span.push_str(&format!(" background=\"{}\"", bg));
     }
-    if style.flags.contains(Flags::BOLD) {
+    if style.bold {
         span.push_str(" weight=\"bold\"");
     }
-    if style.flags.contains(Flags::ITALIC) {
+    if style.italic {
         span.push_str(" style=\"italic\"");
     }
-    if style.flags.intersects(Flags::ALL_UNDERLINES) {
+    if style.underline {
         span.push_str(" underline=\"single\"");
     }
-    if style.flags.contains(Flags::STRIKEOUT) {
+    if style.strikeout {
         span.push_str(" strikethrough=\"true\"");
     }
     span.push('>');
     span
 }
 
-fn color_to_hex(color: Color, palette: &alacritty_terminal::term::color::Colors) -> Option<String> {
-    match color {
-        Color::Named(named) => {
-            palette[named].map(|rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b))
-        }
-        Color::Indexed(idx) => {
-            palette[idx as usize].map(|rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b))
-        }
-        Color::Spec(rgb) => Some(format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)),
-    }
-}
-
 fn cells_to_markup(
-    cells: &[Cell],
-    colors: &alacritty_terminal::term::color::Colors,
+    cells: &[TerminalCell],
     row: usize,
     selection: Option<SelectionRange>,
 ) -> String {
@@ -226,11 +219,11 @@ fn cells_to_markup(
     let mut idx = 0;
     while idx < cells.len() {
         let style = CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx));
-        out.push_str(&style_open(style, colors));
+        out.push_str(&style_open(&style));
         while idx < cells.len()
             && CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx)) == style
         {
-            push_escaped_char(&mut out, cells[idx].c);
+            push_escaped_cell(&mut out, &cells[idx]);
             idx += 1;
         }
         out.push_str("</span>");
@@ -240,8 +233,7 @@ fn cells_to_markup(
 
 #[cfg(test)]
 fn cells_to_runs(
-    cells: &[Cell],
-    colors: &alacritty_terminal::term::color::Colors,
+    cells: &[TerminalCell],
     row: usize,
     selection: Option<SelectionRange>,
 ) -> Vec<RenderRun> {
@@ -255,21 +247,22 @@ fn cells_to_runs(
         while idx < cells.len()
             && CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx)) == style
         {
-            text.push(cells[idx].c);
+            push_cell_text(&mut text, &cells[idx]);
             idx += 1;
         }
-        runs.push(RenderRun {
-            start_column: start,
-            text,
-            style: style.to_render_style(colors),
-        });
+        if !text.is_empty() {
+            runs.push(RenderRun {
+                start_column: start,
+                text,
+                style: style.into_render_style(),
+            });
+        }
     }
     runs
 }
 
 fn build_line_render(
-    cells: &[Cell],
-    colors: &alacritty_terminal::term::color::Colors,
+    cells: &[TerminalCell],
     row: usize,
     selection: Option<SelectionRange>,
 ) -> LineRender {
@@ -282,22 +275,23 @@ fn build_line_render(
         let start = idx;
         let style = CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx));
         let mut run_text = String::new();
-        markup.push_str(&style_open(style, colors));
+        markup.push_str(&style_open(&style));
         while idx < cells.len()
             && CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx)) == style
         {
-            let ch = cells[idx].c;
-            text.push(ch);
-            run_text.push(ch);
-            push_escaped_char(&mut markup, ch);
+            push_cell_text(&mut text, &cells[idx]);
+            push_cell_text(&mut run_text, &cells[idx]);
+            push_escaped_cell(&mut markup, &cells[idx]);
             idx += 1;
         }
         markup.push_str("</span>");
-        runs.push(RenderRun {
-            start_column: start,
-            text: run_text,
-            style: style.to_render_style(colors),
-        });
+        if !run_text.is_empty() {
+            runs.push(RenderRun {
+                start_column: start,
+                text: run_text,
+                style: style.into_render_style(),
+            });
+        }
     }
     LineRender { text, markup, runs }
 }
@@ -309,32 +303,32 @@ fn is_selected(selection: Option<SelectionRange>, row: usize, column: usize) -> 
 }
 
 impl CellStyle {
-    fn to_render_style(self, colors: &alacritty_terminal::term::color::Colors) -> RenderStyle {
+    fn into_render_style(self) -> RenderStyle {
         RenderStyle {
-            fg: color_to_hex(self.fg, colors),
+            fg: self.fg,
             bg: if self.selected {
                 Some("#264f78".to_string())
             } else {
-                color_to_hex(self.bg, colors)
+                self.bg
             },
-            bold: self.flags.contains(Flags::BOLD),
-            italic: self.flags.contains(Flags::ITALIC),
-            underline: self.flags.intersects(Flags::ALL_UNDERLINES),
-            strikeout: self.flags.contains(Flags::STRIKEOUT),
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+            strikeout: self.strikeout,
             selected: self.selected,
         }
     }
 }
 
-fn cells_to_text(cells: &[Cell]) -> String {
+fn cells_to_text(cells: &[TerminalCell]) -> String {
     let mut out = String::new();
     for cell in &cells[..significant_len(cells)] {
-        out.push(cell.c);
+        push_cell_text(&mut out, cell);
     }
     out
 }
 
-fn significant_len(cells: &[Cell]) -> usize {
+fn significant_len(cells: &[TerminalCell]) -> usize {
     cells
         .iter()
         .rposition(|cell| !is_trimmable_blank(cell))
@@ -342,11 +336,26 @@ fn significant_len(cells: &[Cell]) -> usize {
         .unwrap_or(0)
 }
 
-fn is_trimmable_blank(cell: &Cell) -> bool {
-    cell.c == ' '
-        && cell.zerowidth().is_none()
-        && cell.flags.is_empty()
-        && matches!(cell.bg, Color::Named(NamedColor::Background))
+fn is_trimmable_blank(cell: &TerminalCell) -> bool {
+    cell.text == " "
+        && cell.fg.is_none()
+        && cell.bg.is_none()
+        && !cell.bold
+        && !cell.italic
+        && !cell.underline
+        && !cell.inverse
+        && !cell.strikeout
+        && !cell.wide
+        && !cell.wide_spacer
+}
+
+fn push_escaped_cell(out: &mut String, cell: &TerminalCell) {
+    if is_wide_spacer(cell) {
+        return;
+    }
+    for ch in cell.text.chars() {
+        push_escaped_char(out, ch);
+    }
 }
 
 fn push_escaped_char(out: &mut String, ch: char) {
@@ -362,50 +371,53 @@ fn push_escaped_char(out: &mut String, ch: char) {
 mod tests {
     use super::*;
     use crate::backend::{MouseMode, RenderableContentOwned};
-    use alacritty_terminal::term::cell::Cell;
-    use alacritty_terminal::term::color::Colors;
-    use alacritty_terminal::vte::ansi::NamedColor;
+    use crate::terminal_grid::{TerminalCell, TerminalColors};
 
-    fn cell(ch: char) -> Cell {
-        Cell {
-            c: ch,
-            ..Cell::default()
+    fn cell(text: &str) -> TerminalCell {
+        TerminalCell {
+            text: text.to_string(),
+            ..TerminalCell::blank()
         }
     }
 
     #[test]
     fn markup_escapes_text_cells() {
-        let cells = [cell('<'), cell('&'), cell('>')];
-        let markup = cells_to_markup(&cells, &Colors::default(), 0, None);
+        let cells = [cell("<"), cell("&"), cell(">")];
+        let markup = cells_to_markup(&cells, 0, None);
         assert!(markup.contains("&lt;&amp;&gt;"));
     }
 
     #[test]
     fn markup_trims_plain_blank_tail() {
-        let cells = [cell('o'), cell('k'), Cell::default(), Cell::default()];
-        let markup = cells_to_markup(&cells, &Colors::default(), 0, None);
+        let cells = [
+            cell("o"),
+            cell("k"),
+            TerminalCell::blank(),
+            TerminalCell::blank(),
+        ];
+        let markup = cells_to_markup(&cells, 0, None);
         assert!(markup.contains(">ok</span>"));
         assert!(!markup.contains("ok  "));
     }
 
     #[test]
     fn markup_preserves_styled_blank_tail() {
-        let mut styled_blank = Cell::default();
-        styled_blank.bg = Color::Named(NamedColor::Red);
-        let cells = [cell('x'), styled_blank];
-        let markup = cells_to_markup(&cells, &Colors::default(), 0, None);
+        let mut styled_blank = TerminalCell::blank();
+        styled_blank.bg = Some("#ff0000".to_string());
+        let cells = [cell("x"), styled_blank];
+        let markup = cells_to_markup(&cells, 0, None);
         assert!(markup.contains(">x</span>"));
         assert!(markup.contains("> </span>"));
     }
 
     #[test]
     fn markup_marks_selected_cells_without_changing_text() {
-        let cells = [cell('a'), cell('b'), cell('c'), cell('d')];
+        let cells = [cell("a"), cell("b"), cell("c"), cell("d")];
         let selection = SelectionRange::new(
             GridPoint { row: 0, column: 1 },
             GridPoint { row: 0, column: 3 },
         );
-        let markup = cells_to_markup(&cells, &Colors::default(), 0, Some(selection));
+        let markup = cells_to_markup(&cells, 0, Some(selection));
         assert!(markup.contains(">a</span>"));
         assert!(markup.contains("background=\"#264f78\">bc</span>"));
         assert!(markup.contains(">d</span>"));
@@ -413,12 +425,12 @@ mod tests {
 
     #[test]
     fn runs_group_adjacent_cells_by_style_and_selection() {
-        let cells = [cell('a'), cell('b'), cell('c'), cell('d')];
+        let cells = [cell("a"), cell("b"), cell("c"), cell("d")];
         let selection = SelectionRange::new(
             GridPoint { row: 0, column: 1 },
             GridPoint { row: 0, column: 3 },
         );
-        let runs = cells_to_runs(&cells, &Colors::default(), 0, Some(selection));
+        let runs = cells_to_runs(&cells, 0, Some(selection));
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[0].start_column, 0);
         assert_eq!(runs[0].text, "a");
@@ -432,17 +444,40 @@ mod tests {
     }
 
     #[test]
+    fn text_and_markup_preserve_zerowidth_combining_marks() {
+        let composed = cell("e\u{0301}");
+        let cells = [cell("x"), composed, cell("y")];
+        assert_eq!(cells_to_text(&cells), "xe\u{0301}y");
+        let markup = cells_to_markup(&cells, 0, None);
+        assert!(markup.contains("xe\u{0301}y"));
+    }
+
+    #[test]
+    fn text_and_runs_skip_wide_char_spacer_cells() {
+        let mut wide = cell("中");
+        wide.wide = true;
+        let mut spacer = TerminalCell::blank();
+        spacer.wide_spacer = true;
+        let cells = [cell("a"), wide, spacer, cell("b")];
+        assert_eq!(cells_to_text(&cells), "a中b");
+        let runs = cells_to_runs(&cells, 0, None);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "a中b");
+        assert_eq!(runs[0].start_column, 0);
+    }
+
+    #[test]
     fn renderer_exports_structured_history_and_input_lines() {
         let content = RenderableContentOwned {
             lines: vec![
-                vec![cell('o'), cell('l'), cell('d')],
-                vec![cell('n'), cell('e'), cell('w')],
+                vec![cell("o"), cell("l"), cell("d")],
+                vec![cell("n"), cell("e"), cell("w")],
             ],
             cursor_line: 1,
             cursor_col: 3,
             cursor_visible: true,
             display_offset: 0,
-            colors: Colors::default(),
+            colors: TerminalColors::default(),
             mouse: MouseMode::default(),
         };
         let frame = Renderer::render_frame_with_selection(content, None);

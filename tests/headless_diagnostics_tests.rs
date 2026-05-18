@@ -476,9 +476,12 @@ fn headless_mode_exports_unicode_and_style_cells_in_json() {
         .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
         .env(
             "CHELOTYPE_HEADLESS_ACTIONS",
-            "printf \\x27UNICODE Я λ 中\\x5cn\\x27\\n|printf \\x27\\x5c033[1mBOLD\\x5c033[0m \\x5c033[3mITALIC\\x5c033[0m \\x5c033[4mUNDER\\x5c033[0m \\x5c033[35mMAGENTA\\x5c033[0m\\x5cn\\x27\\n",
+            "printf \\x27UNICODE Я λ 中\\x5cn\\x27\\n|printf 'COMBO é WIDE 中\\n'\n|printf \\x27\\x5c033[1mBOLD\\x5c033[0m \\x5c033[3mITALIC\\x5c033[0m \\x5c033[4mUNDER\\x5c033[0m \\x5c033[35mMAGENTA\\x5c033[0m\\x5cn\\x27\\n",
         )
-        .env("CHELOTYPE_HEADLESS_EXPECT", "UNICODE Я λ 中|BOLD ITALIC UNDER MAGENTA")
+        .env(
+            "CHELOTYPE_HEADLESS_EXPECT",
+            "UNICODE Я λ 中|COMBO é WIDE 中|BOLD ITALIC UNDER MAGENTA",
+        )
         .output()
         .expect("run style headless binary");
     assert!(
@@ -495,6 +498,10 @@ fn headless_mode_exports_unicode_and_style_cells_in_json() {
     let json_snapshot = snapshot_file_with_extension(&paths, "json");
     let json = read_to_string(json_snapshot).expect("read json snapshot");
     assert!(json.contains("UNICODE Я λ 中"));
+    assert!(json.contains("COMBO é WIDE 中"));
+    assert!(json.contains("\"text\": \"é\""));
+    assert!(json.contains("\"wide\": true"));
+    assert!(json.contains("\"wide_spacer\": true"));
     assert!(json.contains("\"bold\": true"));
     assert!(json.contains("\"italic\": true"));
     assert!(json.contains("\"underline\": true"));

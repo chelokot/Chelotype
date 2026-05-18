@@ -2,58 +2,32 @@ ADR: terminal core
 
 Status
 
-Pending buildable `libghostty-vt` probe.
+Accepted and implemented for the active backend: `libghostty-vt`.
 
 Context
 
-Chelotype needs one PTY, one terminal-core state, and a custom renderer that can display history, scrollback, and current input from the same shell-driven source of truth. The previous VTE bridge approach caused hidden terminal state, duplicated input, HTML scraping, and weak testability. The current `alacritty_terminal` prototype proves that a Rust terminal core can be embedded, but it has not yet been compared against `libghostty-vt`.
+Chelotype needs one PTY, one terminal-core state, and a custom renderer that can display history, scrollback, and current input from the same shell-driven source of truth. The previous VTE bridge approach caused hidden terminal state, duplicated input, HTML scraping, and weak testability.
 
 Decision
 
-Pending.
+Use `libghostty-vt` as the product terminal core. It is built around VT parsing, terminal state, render-state extraction, scrollback/reflow, Unicode/graphemes, keyboard/mouse protocol support, and renderer-owned UI. The old VTE bridge code and the previous parser baseline have been removed from the product tree.
 
-Candidates
+Evidence
 
-- `alacritty_terminal`
-- `libghostty-vt`
+- `Cargo.toml` depends on `libghostty-vt` and no longer depends on `alacritty_terminal`, `vte4`, or bridge-only parsing helpers.
+- `src/backend.rs` owns one `portable_pty` session and one `libghostty_vt::Terminal`.
+- `src/ghostty_snapshot.rs` converts Ghostty render-state rows/cells into Chelotype's typed `TerminalContent`.
+- `src/render.rs`, `src/snapshot.rs`, and `src/selection.rs` consume Chelotype's own terminal grid model, not backend-specific cell types.
+- `tests/backend_integration_tests.rs` proves PTY write/read, ANSI colors, cursor tracking, resize, mouse modes, and scrollback on the active `libghostty-vt` backend.
+- `tests/headless_diagnostics_tests.rs` proves binary-level automation, warnings/errors checks, keyboard events, mouse drag selection, resize, scroll, Unicode, wide cells, and style exports.
+- `benches/pipeline.rs` measures the active `libghostty-vt` parser/render-state/snapshot/renderer path.
 
-Required evidence
+Risks
 
-- PTY spawn and write path.
-- Parser/grid correctness for zsh prompt, command echo, command output, and ANSI colors.
-- Cursor position, visibility, and shape.
-- Scrollback and viewport access.
-- Resize/reflow behavior.
-- Unicode/grapheme behavior.
-- Keyboard and mouse protocol support.
-- Snapshot/export support for e2e tests.
-- Sustained held-key latency and frame budget measurements.
-- Build, packaging, and container compatibility.
+- `libghostty-vt` API signatures are still young, so keep the integration behind small Chelotype-owned modules.
+- The vendored native build needs Zig 0.15.2. `scripts/with-zig.sh` installs a local ignored Zig toolchain before running Cargo commands.
+- Ghostty VT objects are `!Send + !Sync`; Chelotype keeps terminal state on the owning thread and moves PTY bytes across a channel.
 
-Current evidence
+Migration Outcome
 
-- `alacritty_terminal` is already integrated in `src/backend.rs`.
-- `alacritty_terminal` currently passes backend integration tests for PTY write/read, ANSI colors, cursor tracking, resize, and mouse mode tracking.
-- `libghostty-vt` was researched through Ghostty docs, Ghostty README, Ghostling README, and Ghostling source.
-- Ghostling was cloned locally and inspected at commit `32c2dd5cd691c6bf226535be5ff7ec099ddd3360`.
-- Ghostling pins Ghostty commit `fdb6e3d2c8543e2e756b7e07f44372efbc0fba4b`.
-- Local Ghostling CMake configure currently fails because `zig` is not installed.
-- Detailed findings are recorded in `docs/libghostty_spike_findings.md`.
-
-Decision criteria
-
-- Prefer the candidate that gives the strongest terminal correctness while keeping the build and API maintainable.
-- Reject any candidate that forces hidden terminals, duplicated shell state, HTML scraping, or untestable UI behavior.
-- Reject any candidate that cannot expose enough render-state data for a custom renderer.
-- Treat unstable APIs as acceptable only if the feature/correctness gain is large and isolated behind a small adapter.
-
-Outcome
-
-Pending. Do not switch away from `alacritty_terminal` until `libghostty-vt` builds locally and a minimal render-state probe reproduces the active backend tests.
-
-Migration plan
-
-- Keep the `alacritty_terminal` path as the working product path for now.
-- Add a separate `libghostty-vt` probe only after Zig 0.15.x is available in the dev/build environment.
-- Keep any unsafe/FFI code behind a small adapter crate or module.
-- Compare both cores against the same backend integration scenarios before choosing.
+The active product path has been migrated. Remaining work is no longer "choose the core"; it is improving the renderer, GTK e2e automation, clipboard/selection, workspaces, panes, command blocks, smooth scrolling, and stronger perf/memory gates on top of the chosen core.

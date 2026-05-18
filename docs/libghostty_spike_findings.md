@@ -61,17 +61,17 @@ Risks:
 - C API signatures are still in flux.
 - Rust integration requires a small FFI crate or generated bindings.
 - Packaging needs a clear plan for building or vendoring `ghostty-vt`.
-- Current repo already has a working `alacritty_terminal` path, so switching must be justified by measured correctness/features.
+- The repo previously had a working parser baseline, so the switch had to be justified by measured correctness/features.
 
 Decision status
 
-Do not switch yet.
+Switched.
 
-`libghostty-vt` looks technically aligned with Chelotype's target architecture, but local build validation is blocked by missing Zig. The next concrete spike step is to install/provide Zig 0.15.x in a controlled way, build Ghostling, then write a tiny C or Rust FFI probe that feeds bytes and exports cells/cursor/colors.
+The active Chelotype backend now uses the safe Rust `libghostty-vt` bindings. Zig 0.15.2 is provided locally through `scripts/with-zig.sh`, and the product tree no longer depends on the old VTE bridge or the previous parser baseline.
 
-Pass criteria for next spike step
+Pass criteria met
 
-- Ghostling release build completes locally.
-- A minimal non-windowed probe can create a terminal, feed ANSI output, resize, update render state, and dump cells/cursor/colors.
-- Rust can call the probe through a contained FFI boundary.
-- The probe can reproduce Chelotype's backend tests: text echo, ANSI colors, cursor state, resize, and mouse mode state.
+- `libghostty-vt` builds locally through the Rust binding.
+- The active backend creates a terminal, feeds PTY bytes, resizes, updates render state, and dumps cells/cursor/colors.
+- The probe became the product path in `src/backend.rs` and `src/ghostty_snapshot.rs`.
+- The backend reproduces Chelotype's integration tests: text echo, ANSI colors, cursor state, resize, scrollback, and mouse mode state.
