@@ -2642,6 +2642,137 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_wayland_drag_selects_output_under_nested_weston() {
+    for command in ["xvfb-run", "weston", "xdotool"] {
+        if !has_command(command) {
+            eprintln!("skipping nested Wayland drag e2e because {command} is not installed");
+            return;
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-wayland-drag-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+geometry_trace="$4"
+window_id="$CHELOTYPE_NESTED_WAYLAND_X_WINDOW"
+ZSH_DISABLE_COMPFIX=true DISABLE_AUTO_UPDATE=true DISABLE_UPDATE_PROMPT=true GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_TEST_SUPPRESS_MOTION_BUTTON_MASK=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+app_pid="$!"
+cleanup() {
+    kill "$app_pid" 2>/dev/null || true
+    wait "$app_pid" 2>/dev/null || true
+}
+trap cleanup EXIT
+xdotool windowfocus "$window_id" || true
+sleep 0.8
+xdotool type --window "$window_id" --delay 2 "printf 'WAYLAND alpha beta\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..120}; do
+    if grep -R '^WAYLAND alpha beta' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '^WAYLAND alpha beta' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "nested Wayland output target never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
+marker_row="$(grep -n '^WAYLAND alpha beta' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (0.8 * cell) }')"
+mid_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (8.8 * cell) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (7.8 * cell) }')"
+target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+xdotool mousemove "$start_x" "$target_y"
+xdotool mousedown 1
+sleep 0.12
+xdotool mousemove "$mid_x" "$target_y"
+sleep 0.12
+xdotool mousemove "$end_x" "$target_y"
+sleep 0.12
+xdotool mouseup 1
+for _ in {1..100}; do
+    if grep -F 'primary	WAYLAND' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -F 'primary	WAYLAND' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "nested Wayland drag did not export selected text" >&2
+    echo "window=$window_id row=$marker_row start=$start_x,$target_y end=$end_x,$target_y" >&2
+    cat "$clipboard_trace" >&2 || true
+    cat "$latest_txt" >&2 || true
+    exit 1
+fi
+word_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (14.5 * cell) }')"
+xdotool mousemove "$word_x" "$target_y"
+xdotool click --repeat 2 --delay 60 1
+for _ in {1..100}; do
+    if grep -F 'primary	beta' "$clipboard_trace" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.05
+done
+echo "nested Wayland double click did not select word" >&2
+echo "window=$window_id row=$marker_row word=$word_x,$target_y" >&2
+cat "$clipboard_trace" >&2 || true
+cat "$latest_txt" >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("scripts/with-nested-wayland.sh")
+        .args([
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-wayland-drag-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk drag e2e under nested Wayland");
+
+    assert!(
+        output.status.success(),
+        "nested Wayland drag e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(trace.lines().any(|line| line.starts_with("primary\tWAYLAND")));
+    assert!(trace.lines().any(|line| line == "primary\tbeta"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_manual_like_mouse_drag_selects_output_and_input_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!(
