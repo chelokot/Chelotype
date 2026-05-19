@@ -27,7 +27,7 @@ Current state audit
 - Partial: headless diagnostics support event-level automation for raw/text writes, key events, resize, scroll, mouse press/drag/release, click-to-cursor movement, and selection export.
 - Partial: `TerminalBackend::resize` updates both the PTY winsize and Ghostty terminal dimensions; `app.rs` derives terminal size from the GTK viewport.
 - Partial: `TerminalBackend::scroll_display` and `scroll_to_bottom` expose scrollback viewport movement from the terminal core, and snapshots export `display_offset`.
-- Partial: `src/workspace.rs` owns a typed tab list where every tab owns one `TerminalBackend`; `app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active tab; the header exposes tab buttons and a new-tab button; unit and GTK e2e tests prove tab switching and isolated terminal state across two PTYs.
+- Partial: `src/workspace.rs` owns a typed tab/session model where every tab owns one or more panes and every pane owns one `TerminalBackend`; `app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active pane; the header exposes tab buttons and a new-tab button; unit and GTK e2e tests prove tab switching, isolated terminal state across two top-level tabs, and isolated terminal state across two panes inside one tab.
 - Partial: `src/command_blocks.rs` converts semantic-prompt rows from the terminal core into prompt/output block metadata, `RenderFrame.command_blocks` exports it for renderer/diagnostic consumers, and `.render.json` headless dumps now include OSC 133-derived command blocks.
 - Partial: `src/input.rs` defines a testable keyboard-to-terminal-byte mapping used by the active GTK app.
 - Partial: `src/mouse.rs` defines testable SGR mouse event encoding, `src/interaction.rs` owns the pure pointer state machine, Ghostty exposes terminal mouse mode state, and `app.rs` forwards click press/release/drag events to the PTY only when terminal mouse reporting is enabled.
@@ -42,5 +42,5 @@ Next implementation order
 
 1. Add advanced grapheme/IME tests.
 2. Add smooth scrolling and command-block UI.
-3. Add split-pane UI inside the typed tab/session model.
+3. Add GTK split-pane layout on top of the typed tab/session model.
 4. Add allocation tracking.
