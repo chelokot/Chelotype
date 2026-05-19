@@ -1718,6 +1718,173 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_drag_selection_stays_in_origin_split_pane_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") || !has_command("python3") {
+        eprintln!(
+            "skipping gtk split selection e2e because xvfb-run, xdotool, or python3 is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-split-selection-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+geometry_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+wait_contains() {
+    needle="$1"
+    for _ in {1..140}; do
+        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "snapshot never contained $needle" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "printf 'LEFT_SPLIT_SELECTION\n'"
+xdotool key --window "$window_id" Return
+wait_contains 'LEFT_SPLIT_SELECTION'
+xdotool key --window "$window_id" ctrl+shift+e
+sleep 0.5
+xdotool type --window "$window_id" --delay 2 "printf 'RIGHT_SPLIT_SELECTION\n'"
+xdotool key --window "$window_id" Return
+wait_contains 'RIGHT_SPLIT_SELECTION'
+latest_json=""
+for _ in {1..120}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ] && grep -F 'LEFT_SPLIT_SELECTION' "$latest_json" >/dev/null 2>&1 && grep -F 'RIGHT_SPLIT_SELECTION' "$latest_json" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
+    echo "split selection setup snapshots or geometry did not appear" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+read -r left_origin right_origin marker_row < <(python3 - "$latest_json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    frame = json.load(handle)
+left = frame["panes"][0]
+right = frame["panes"][1]
+row = next(
+    line["row"]
+    for line in left["frame"]["lines"]
+    if line["text"].startswith("LEFT_SPLIT_SELECTION")
+)
+print(left["origin_col"], right["origin_col"], row)
+PY
+)
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v origin="$left_origin" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((origin + 0.5) * cell) }')"
+start_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v origin="$right_origin" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((origin + 2.5) * cell) }')"
+echo "split selection drag window=$window_id X=$X Y=$Y left_origin=$left_origin right_origin=$right_origin row=$marker_row start=$start_x,$start_y end=$end_x,$start_y" >&2
+xdotool mousemove "$start_x" "$start_y"
+xdotool mousedown 1
+sleep 0.05
+xdotool mousemove "$end_x" "$start_y"
+sleep 0.05
+xdotool mouseup 1
+for _ in {1..120}; do
+    if grep -R '"selected_text": "LEFT_SPLIT_SELECTION' "$snapshot_dir" >/dev/null 2>&1 && grep -F 'primary	LEFT_SPLIT_SELECTION' "$clipboard_trace" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "split drag selection did not stay in the origin pane" >&2
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+cat "$clipboard_trace" >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-split-selection-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk split selection e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk split selection e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let json = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| read_to_string(path).expect("read json snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(json.contains("\"selected_text\": \"LEFT_SPLIT_SELECTION"));
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(
+        trace
+            .lines()
+            .any(|line| line == "primary\tLEFT_SPLIT_SELECTION"),
+        "primary selection was not exported exactly: {trace}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_selects_text_with_real_mouse_drag_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk mouse e2e because xvfb-run or xdotool is not installed");

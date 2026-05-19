@@ -107,6 +107,7 @@ fn build_ui(app: &Application) {
     let mouse_mode = std::rc::Rc::new(std::cell::Cell::new(crate::backend::MouseMode::default()));
     let pointer_interaction =
         std::rc::Rc::new(std::cell::RefCell::new(PointerInteraction::default()));
+    let pointer_pane_capture = std::rc::Rc::new(std::cell::Cell::new(None::<PaneHit>));
     let drag_gesture_moved = std::rc::Rc::new(std::cell::Cell::new(false));
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
     let selection_text = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
@@ -335,6 +336,7 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         let canvas_widget = canvas.widget().clone();
         click_controller.connect_pressed(move |gesture, press_count, x, y| {
@@ -344,6 +346,7 @@ fn build_ui(app: &Application) {
             if let Some(target) =
                 pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
             {
+                pointer_pane_capture.set(target.pane);
                 activate_pointer_pane(
                     target,
                     PointerPaneActivation {
@@ -404,11 +407,13 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
             let current_mode = current_mouse_mode(&content, mode.get());
             if drag_gesture_moved.get() && !current_mode.sends_press_release() {
+                pointer_pane_capture.set(None);
                 let effects = pointer_interaction.borrow_mut().cancel();
                 crate::logging::debug_log(&format!(
                     "mouse release after drag gesture effects={effects:?}"
@@ -423,9 +428,13 @@ fn build_ui(app: &Application) {
                 );
                 return;
             }
-            if let Some(target) =
-                pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
-            {
+            if let Some(target) = pointer_grid_position_for_capture_or_panes(
+                metrics.get(),
+                pointer_pane_capture.get(),
+                &pane_hits.borrow(),
+                x,
+                y,
+            ) {
                 activate_pointer_pane(
                     target,
                     PointerPaneActivation {
@@ -472,6 +481,7 @@ fn build_ui(app: &Application) {
                     &content,
                 );
             }
+            pointer_pane_capture.set(None);
         });
     }
     {
@@ -481,7 +491,9 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let pointer_pane_capture = pointer_pane_capture.clone();
         gtk::prelude::GestureExt::connect_cancel(&click_controller, move |_gesture, _sequence| {
+            pointer_pane_capture.set(None);
             let effects = pointer_interaction.borrow_mut().cancel();
             crate::logging::debug_log(&format!("mouse gesture cancelled effects={effects:?}"));
             apply_interaction_effects(
@@ -509,6 +521,7 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         let canvas_widget = canvas.widget().clone();
         drag_controller.connect_drag_begin(move |_gesture, x, y| {
@@ -520,6 +533,7 @@ fn build_ui(app: &Application) {
             if let Some(target) =
                 pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
             {
+                pointer_pane_capture.set(target.pane);
                 activate_pointer_pane(
                     target,
                     PointerPaneActivation {
@@ -559,6 +573,7 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         drag_controller.connect_drag_update(move |gesture, offset_x, offset_y| {
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
@@ -567,8 +582,9 @@ fn build_ui(app: &Application) {
             let Some((start_x, start_y)) = gesture.start_point() else {
                 return;
             };
-            if let Some(target) = pointer_grid_position_for_panes(
+            if let Some(target) = pointer_grid_position_for_capture_or_panes(
                 metrics.get(),
+                pointer_pane_capture.get(),
                 &pane_hits.borrow(),
                 start_x + offset_x,
                 start_y + offset_y,
@@ -604,6 +620,7 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         drag_controller.connect_drag_end(move |gesture, offset_x, offset_y| {
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
@@ -612,8 +629,9 @@ fn build_ui(app: &Application) {
             let Some((start_x, start_y)) = gesture.start_point() else {
                 return;
             };
-            let effects = if let Some(target) = pointer_grid_position_for_panes(
+            let effects = if let Some(target) = pointer_grid_position_for_capture_or_panes(
                 metrics.get(),
+                pointer_pane_capture.get(),
                 &pane_hits.borrow(),
                 start_x + offset_x,
                 start_y + offset_y,
@@ -641,6 +659,7 @@ fn build_ui(app: &Application) {
                 &selection_dirty,
                 &content,
             );
+            pointer_pane_capture.set(None);
         });
     }
     {
@@ -650,9 +669,11 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         gtk::prelude::GestureExt::connect_cancel(&drag_controller, move |_gesture, _sequence| {
             drag_gesture_moved.set(false);
+            pointer_pane_capture.set(None);
             let effects = pointer_interaction.borrow_mut().cancel();
             crate::logging::debug_log(&format!("drag gesture cancelled effects={effects:?}"));
             apply_interaction_effects(
@@ -678,15 +699,20 @@ fn build_ui(app: &Application) {
         let selection_dirty = selection_dirty.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
+        let pointer_pane_capture = pointer_pane_capture.clone();
         motion_controller.connect_motion(move |_controller, x, y| {
             crate::logging::debug_log(&format!("mouse motion x={x:.1} y={y:.1}"));
             let current_mode = current_mouse_mode(&content, mode.get());
             if !current_mode.sends_drag() {
                 return;
             }
-            if let Some(target) =
-                pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
-            {
+            if let Some(target) = pointer_grid_position_for_capture_or_panes(
+                metrics.get(),
+                pointer_pane_capture.get(),
+                &pane_hits.borrow(),
+                x,
+                y,
+            ) {
                 crate::logging::debug_log(&format!(
                     "mouse motion grid col={} row={}",
                     target.position.column, target.position.row
@@ -2292,6 +2318,41 @@ fn pointer_grid_position_for_panes(
     })
 }
 
+fn pointer_grid_position_for_capture_or_panes(
+    metrics: Option<CellMetrics>,
+    captured_pane: Option<PaneHit>,
+    panes: &[PaneHit],
+    x: f64,
+    y: f64,
+) -> Option<PointerPanePosition> {
+    if let Some(pane) = captured_pane {
+        pointer_grid_position_for_pane(metrics, pane, x, y)
+    } else {
+        pointer_grid_position_for_panes(metrics, panes, x, y)
+    }
+}
+
+fn pointer_grid_position_for_pane(
+    metrics: Option<CellMetrics>,
+    pane: PaneHit,
+    x: f64,
+    y: f64,
+) -> Option<PointerPanePosition> {
+    let metrics = metrics?;
+    if y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
+        return None;
+    }
+    let local_x = x - pane.origin_col as f64 * metrics.width;
+    let max_column = pane.cols.saturating_sub(1).min(u16::MAX as usize);
+    Some(PointerPanePosition {
+        pane: Some(pane),
+        position: MouseGridPosition {
+            column: ((local_x / metrics.width).floor() as i32).clamp(0, max_column as i32) as u16,
+            row: ((y / metrics.height).floor() as i32).clamp(0, u16::MAX as i32) as u16,
+        },
+    })
+}
+
 fn pointer_cursor_position_for_target(
     metrics: Option<CellMetrics>,
     target: PointerPanePosition,
@@ -2342,5 +2403,61 @@ fn mouse_button_from_gesture(gesture: &gtk::GestureClick) -> Option<MouseButton>
         2 => Some(MouseButton::Middle),
         3 => Some(MouseButton::Right),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metrics() -> Option<CellMetrics> {
+        Some(CellMetrics {
+            width: 10.0,
+            height: 20.0,
+        })
+    }
+
+    fn pane(origin_col: usize, cols: usize) -> PaneHit {
+        PaneHit {
+            id: PaneId::from_raw(origin_col as u64 + 1),
+            origin_col,
+            cols,
+        }
+    }
+
+    #[test]
+    fn captured_pane_keeps_drag_coordinates_local_after_crossing_split_boundary() {
+        let left = pane(0, 40);
+        let right = pane(40, 40);
+        let target = pointer_grid_position_for_capture_or_panes(
+            metrics(),
+            Some(left),
+            &[left, right],
+            430.0,
+            50.0,
+        )
+        .expect("captured pointer position");
+
+        assert_eq!(target.pane.expect("pane").id, left.id);
+        assert_eq!(target.position.column, 39);
+        assert_eq!(target.position.row, 2);
+    }
+
+    #[test]
+    fn uncaptured_pointer_uses_pane_under_coordinates() {
+        let left = pane(0, 40);
+        let right = pane(40, 40);
+        let target = pointer_grid_position_for_capture_or_panes(
+            metrics(),
+            None,
+            &[left, right],
+            430.0,
+            50.0,
+        )
+        .expect("uncaptured pointer position");
+
+        assert_eq!(target.pane.expect("pane").id, right.id);
+        assert_eq!(target.position.column, 3);
+        assert_eq!(target.position.row, 2);
     }
 }
