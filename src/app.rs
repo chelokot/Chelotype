@@ -2895,7 +2895,7 @@ fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: Te
 fn trace_tabs(path: &std::path::Path, tab_bar: &adw::TabBar, workspace: &TerminalWorkspace) {
     let tabs = workspace.tabs();
     let selected_index = tabs.iter().position(|tab| tab.active).unwrap_or(0);
-    let content = format!(
+    let mut content = format!(
         "tab_bar_x={}\ntab_bar_y={}\ntab_bar_width={}\ntab_bar_height={}\ntab_count={}\nselected_index={}",
         tab_bar.allocation().x(),
         tab_bar.allocation().y(),
@@ -2904,6 +2904,18 @@ fn trace_tabs(path: &std::path::Path, tab_bar: &adw::TabBar, workspace: &Termina
         tabs.len(),
         selected_index,
     );
+    for tab in tabs {
+        if let Some(title) = workspace.tab_title(tab.id) {
+            content.push_str(&format!("\ntab_{}_title={title}", tab.index));
+        }
+        if let Some(target) = workspace.tab_launch_target(tab.id) {
+            content.push_str(&format!(
+                "\ntab_{}_launch_target={}",
+                tab.index,
+                target.id()
+            ));
+        }
+    }
     write_trace_file(path, &content);
 }
 
