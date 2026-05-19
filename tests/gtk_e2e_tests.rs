@@ -4085,6 +4085,158 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_replaces_active_input_after_double_and_triple_click_selection_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!(
+            "skipping gtk input click replacement e2e because xvfb-run or xdotool is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-input-click-replacement-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+geometry_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+latest_json() {
+    ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1
+}
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+wait_latest_text() {
+    local text="$1"
+    for _ in {1..100}; do
+        latest="$(latest_txt || true)"
+        if [ -n "$latest" ] && grep -F "$text" "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text did not become: $text" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    cat "$clipboard_trace" >&2 || true
+    return 1
+}
+wait_primary() {
+    local text="$1"
+    for _ in {1..80}; do
+        if grep -F "primary	$text" "$clipboard_trace" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "primary selection did not become: $text" >&2
+    cat "$clipboard_trace" >&2 || true
+    return 1
+}
+input_point() {
+    local col="$1"
+    json="$(latest_json)"
+    cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$json" | head -n 1)"
+    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    eval "$(xdotool getwindowgeometry --shell "$window_id")"
+    point_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" -v col="$col" 'BEGIN { printf "%d", left + canvas_x + (col * cell) }')"
+    point_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+}
+clear_input() {
+    xdotool key --window "$window_id" ctrl+a
+    sleep 0.1
+    xdotool key --window "$window_id" BackSpace
+    sleep 0.2
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "alpha beta gamma"
+wait_latest_text '❯ alpha beta gamma'
+input_point "9.5"
+xdotool mousemove "$point_x" "$point_y"
+xdotool click --repeat 2 --delay 40 1
+wait_primary "beta"
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ alpha X gamma'
+clear_input
+
+xdotool type --window "$window_id" --delay 2 "alpha beta gamma"
+wait_latest_text '❯ alpha beta gamma'
+input_point "9.5"
+xdotool mousemove "$point_x" "$point_y"
+xdotool click --repeat 3 --delay 40 1
+wait_primary "alpha beta gamma"
+xdotool type --window "$window_id" --delay 2 "Y"
+wait_latest_text '❯ Y'
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-input-click-replacement-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk input click replacement e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk input click replacement e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(trace.lines().any(|line| line == "primary\tbeta"));
+    assert!(
+        trace
+            .lines()
+            .any(|line| line == "primary\talpha beta gamma")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_keeps_selection_copy_stable_after_scrollback_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk scroll selection e2e because xvfb-run or xdotool is not installed");
