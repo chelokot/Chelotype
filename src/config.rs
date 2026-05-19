@@ -38,6 +38,10 @@ pub fn write_value(key: &str, value: &str) {
     let _ = std::fs::write(path, content);
 }
 
+pub fn cursor_animation_enabled() -> bool {
+    read_value("cursor_animation").as_deref() != Some("off")
+}
+
 fn config_path() -> Option<std::path::PathBuf> {
     if let Ok(path) = std::env::var("CHELOTYPE_CONFIG_DIR") {
         return Some(std::path::PathBuf::from(path).join("config"));
@@ -79,6 +83,32 @@ mod tests {
             read_value("startup_launch_target").as_deref(),
             Some("toolbox:fedora-toolbox-latest")
         );
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn cursor_animation_is_enabled_unless_explicitly_disabled() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-cursor-animation-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert!(cursor_animation_enabled());
+        write_value("cursor_animation", "off");
+        assert!(!cursor_animation_enabled());
+        write_value("cursor_animation", "on");
+        assert!(cursor_animation_enabled());
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");

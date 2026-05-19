@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(530);
+const CURSOR_MOTION_DURATION: Duration = Duration::from_millis(110);
 const COMMAND_BLOCK_RAIL: RgbU8 = RgbU8 {
     red: 46,
     green: 166,
@@ -24,6 +25,7 @@ pub struct TerminalCanvas {
     area: gtk::DrawingArea,
     render: Rc<RefCell<Option<CanvasRenderFrame>>>,
     cursor_blink: Rc<Cell<CursorBlinkState>>,
+    cursor_motion: Rc<Cell<CursorMotionState>>,
 }
 
 impl TerminalCanvas {
@@ -41,13 +43,21 @@ impl TerminalCanvas {
 
         let render = Rc::new(RefCell::new(None::<CanvasRenderFrame>));
         let cursor_blink = Rc::new(Cell::new(CursorBlinkState::default()));
+        let cursor_motion = Rc::new(Cell::new(CursorMotionState::default()));
         let draw_render = render.clone();
         let draw_cursor_blink = cursor_blink.clone();
+        let draw_cursor_motion = cursor_motion.clone();
         area.set_draw_func(move |widget, context, width, height| {
             let started = Instant::now();
             draw_background(context, width, height);
             if let Some(render) = draw_render.borrow().as_ref() {
-                draw_canvas_render(widget, context, render, draw_cursor_blink.get());
+                draw_canvas_render(
+                    widget,
+                    context,
+                    render,
+                    draw_cursor_blink.get(),
+                    draw_cursor_motion.get().position(Instant::now()),
+                );
             }
             crate::perf_trace::record_duration("gtk_paint", started.elapsed());
         });
@@ -56,6 +66,7 @@ impl TerminalCanvas {
             area,
             render,
             cursor_blink,
+            cursor_motion,
         }
     }
 
@@ -73,17 +84,23 @@ impl TerminalCanvas {
 
     fn set_canvas_render(&self, render: CanvasRenderFrame) {
         let mut current = self.render.borrow_mut();
+        let now = Instant::now();
+        let identity = render
+            .active_cursor_identity()
+            .unwrap_or_else(CursorIdentity::hidden);
         let previous_blink = self.cursor_blink.get();
-        self.cursor_blink.set(
-            previous_blink.sync(
-                render
-                    .active_cursor_identity()
-                    .unwrap_or_else(CursorIdentity::hidden),
-                Instant::now(),
-            ),
-        );
+        let previous_motion = self.cursor_motion.get();
+        self.cursor_blink.set(previous_blink.sync(identity, now));
+        self.cursor_motion.set(previous_motion.sync(
+            identity,
+            now,
+            crate::config::cursor_animation_enabled(),
+        ));
         if current.as_ref() == Some(&render) {
-            if previous_blink != self.cursor_blink.get() {
+            if previous_blink != self.cursor_blink.get()
+                || previous_motion != self.cursor_motion.get()
+                || self.cursor_motion.get().active(now)
+            {
                 self.area.queue_draw();
             }
             return;
@@ -96,11 +113,12 @@ impl TerminalCanvas {
         let Some(render) = self.render.borrow().as_ref().cloned() else {
             return;
         };
+        let now = Instant::now();
         let next = self
             .cursor_blink
             .get()
-            .tick(render.active_cursor_visible(), Instant::now());
-        if self.cursor_blink.get() != next {
+            .tick(render.active_cursor_visible(), now);
+        if self.cursor_blink.get() != next || self.cursor_motion.get().active(now) {
             self.cursor_blink.set(next);
             self.area.queue_draw();
         }
@@ -160,6 +178,7 @@ fn draw_canvas_render(
     context: &cairo::Context,
     render: &CanvasRenderFrame,
     cursor_blink: CursorBlinkState,
+    cursor_position: Option<CursorDrawPosition>,
 ) {
     let Some(metrics) = metrics_for_widget(widget) else {
         return;
@@ -172,6 +191,7 @@ fn draw_canvas_render(
             context,
             render,
             cursor_blink.visible,
+            cursor_position.filter(|position| position.pane_id == 0),
             cell_width,
             line_height,
         ),
@@ -180,6 +200,7 @@ fn draw_canvas_render(
             context,
             render,
             cursor_blink,
+            cursor_position,
             cell_width,
             line_height,
         ),
@@ -191,6 +212,7 @@ fn draw_render_frame(
     context: &cairo::Context,
     render: &RenderFrame,
     draw_cursor: bool,
+    cursor_position: Option<CursorDrawPosition>,
     cell_width: f64,
     line_height: f64,
 ) {
@@ -218,7 +240,7 @@ fn draw_render_frame(
         if let Some(preedit) = &render.preedit {
             draw_preedit(widget, context, render, preedit, line_height, cell_width);
         } else {
-            draw_caret(context, render, line_height, cell_width);
+            draw_caret(context, render, cursor_position, line_height, cell_width);
         }
     } else if let Some(preedit) = &render.preedit {
         draw_preedit(widget, context, render, preedit, line_height, cell_width);
@@ -251,6 +273,7 @@ fn draw_workspace_render(
     context: &cairo::Context,
     render: &WorkspaceRenderFrame,
     cursor_blink: CursorBlinkState,
+    cursor_position: Option<CursorDrawPosition>,
     cell_width: f64,
     line_height: f64,
 ) {
@@ -268,6 +291,7 @@ fn draw_workspace_render(
             context,
             &pane.frame,
             pane.active && cursor_blink.visible,
+            cursor_position.filter(|position| position.pane_id == pane.pane_id),
             cell_width,
             line_height,
         );
@@ -314,6 +338,38 @@ struct CursorIdentity {
     visible: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CursorMotionState {
+    initialized: bool,
+    pane_id: u64,
+    from_line: f64,
+    from_column: f64,
+    to_line: f64,
+    to_column: f64,
+    started_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CursorDrawPosition {
+    pane_id: u64,
+    line: f64,
+    column: f64,
+}
+
+impl Default for CursorMotionState {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            pane_id: 0,
+            from_line: 0.0,
+            from_column: 0.0,
+            to_line: 0.0,
+            to_column: 0.0,
+            started_at: None,
+        }
+    }
+}
+
 impl CursorBlinkState {
     fn sync(self, identity: CursorIdentity, now: Instant) -> Self {
         if !identity.visible {
@@ -352,6 +408,75 @@ impl CursorBlinkState {
     }
 }
 
+impl CursorMotionState {
+    fn sync(self, identity: CursorIdentity, now: Instant, enabled: bool) -> Self {
+        let target = CursorDrawPosition {
+            pane_id: identity.pane_id,
+            line: f64::from(identity.line.max(0)),
+            column: f64::from(identity.column.max(0)),
+        };
+        if !enabled || !identity.visible {
+            return Self::settled(target);
+        }
+        let current = self.position(now);
+        if current == Some(target) {
+            return self;
+        }
+        let from = current.filter(|position| position.pane_id == target.pane_id);
+        let from = from.unwrap_or(target);
+        Self {
+            initialized: true,
+            pane_id: target.pane_id,
+            from_line: from.line,
+            from_column: from.column,
+            to_line: target.line,
+            to_column: target.column,
+            started_at: Some(now),
+        }
+    }
+
+    fn settled(target: CursorDrawPosition) -> Self {
+        Self {
+            initialized: true,
+            pane_id: target.pane_id,
+            from_line: target.line,
+            from_column: target.column,
+            to_line: target.line,
+            to_column: target.column,
+            started_at: None,
+        }
+    }
+
+    fn position(self, now: Instant) -> Option<CursorDrawPosition> {
+        if !self.initialized {
+            return None;
+        }
+        let Some(progress) = self.progress(now) else {
+            return Some(CursorDrawPosition {
+                pane_id: self.pane_id,
+                line: self.to_line,
+                column: self.to_column,
+            });
+        };
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        Some(CursorDrawPosition {
+            pane_id: self.pane_id,
+            line: self.from_line + ((self.to_line - self.from_line) * eased),
+            column: self.from_column + ((self.to_column - self.from_column) * eased),
+        })
+    }
+
+    fn active(self, now: Instant) -> bool {
+        self.progress(now).is_some_and(|progress| progress < 1.0)
+    }
+
+    fn progress(self, now: Instant) -> Option<f64> {
+        let started_at = self.started_at?;
+        let elapsed = now.saturating_duration_since(started_at);
+        Some((elapsed.as_secs_f64() / CURSOR_MOTION_DURATION.as_secs_f64()).clamp(0.0, 1.0))
+    }
+}
+
 impl CursorIdentity {
     fn hidden() -> Self {
         Self {
@@ -382,9 +507,21 @@ fn draw_run_background(
     }
 }
 
-fn draw_caret(context: &cairo::Context, render: &RenderFrame, line_height: f64, cell_width: f64) {
-    let x = render.cursor.column.max(0) as f64 * cell_width;
-    let y = render.cursor.line.max(0) as f64 * line_height;
+fn draw_caret(
+    context: &cairo::Context,
+    render: &RenderFrame,
+    cursor_position: Option<CursorDrawPosition>,
+    line_height: f64,
+    cell_width: f64,
+) {
+    let column = cursor_position
+        .map(|position| position.column)
+        .unwrap_or_else(|| f64::from(render.cursor.column.max(0)));
+    let line = cursor_position
+        .map(|position| position.line)
+        .unwrap_or_else(|| f64::from(render.cursor.line.max(0)));
+    let x = column * cell_width;
+    let y = line * line_height;
     context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
     context.rectangle(x.round(), y.round(), 1.25, line_height);
     let _ = context.fill();
@@ -574,6 +711,76 @@ mod tests {
                     start + CURSOR_BLINK_PERIOD + Duration::from_millis(120)
                 )
                 .visible
+        );
+    }
+
+    #[test]
+    fn cursor_motion_interpolates_between_visible_positions() {
+        let start = Instant::now();
+        let first = CursorIdentity {
+            pane_id: 0,
+            line: 1,
+            column: 2,
+            visible: true,
+        };
+        let second = CursorIdentity {
+            column: 10,
+            ..first
+        };
+
+        let state = CursorMotionState::default().sync(first, start, true);
+        assert_eq!(
+            state.position(start),
+            Some(CursorDrawPosition {
+                pane_id: 0,
+                line: 1.0,
+                column: 2.0
+            })
+        );
+
+        let moved = state.sync(second, start + Duration::from_millis(1), true);
+        let halfway = moved
+            .position(start + Duration::from_millis(1) + (CURSOR_MOTION_DURATION / 2))
+            .expect("animated cursor position");
+        assert!(halfway.column > 2.0);
+        assert!(halfway.column < 10.0);
+        assert!(moved.active(start + Duration::from_millis(1)));
+        assert!(!moved.active(start + Duration::from_millis(1) + CURSOR_MOTION_DURATION));
+        assert_eq!(
+            moved.position(start + Duration::from_millis(1) + CURSOR_MOTION_DURATION),
+            Some(CursorDrawPosition {
+                pane_id: 0,
+                line: 1.0,
+                column: 10.0
+            })
+        );
+    }
+
+    #[test]
+    fn cursor_motion_disabled_jumps_to_target() {
+        let start = Instant::now();
+        let first = CursorIdentity {
+            pane_id: 0,
+            line: 1,
+            column: 2,
+            visible: true,
+        };
+        let second = CursorIdentity {
+            column: 10,
+            ..first
+        };
+
+        let state = CursorMotionState::default().sync(first, start, true);
+        let moved = state.sync(second, start + Duration::from_millis(1), false);
+
+        assert!(!moved.active(start + Duration::from_millis(1)));
+        assert_eq!(
+            moved.position(start + Duration::from_millis(1)),
+            Some(CursorDrawPosition {
+                pane_id: 0,
+                line: 1.0,
+                column: 10.0
+            })
         );
     }
 }
