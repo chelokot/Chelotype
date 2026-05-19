@@ -12,12 +12,14 @@ use crate::interaction::{
     InteractionEffect, PointerInteraction, cursor_movement_bytes_for_content,
 };
 use crate::mouse::{MouseButton, MouseGridPosition};
-use crate::render::Renderer;
+use crate::render::{RenderFrame, RenderPreedit, Renderer};
 use crate::selection::{
     GridPoint, SelectionRange, anchor_range_to_display, line_range, line_significant_len,
     selected_text, viewport_range_for_display, word_range_at,
 };
-use crate::snapshot::{write_snapshot_with_selection, write_workspace_render_snapshot};
+use crate::snapshot::{
+    write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
+};
 use crate::terminal_font::metrics_for_widget;
 use crate::workspace::{PaneId, TabId, TerminalWorkspace};
 use crate::workspace_render::{WorkspaceRenderFrame, WorkspaceRenderLayout};
@@ -96,6 +98,8 @@ fn build_ui(app: &Application) {
         .build();
     apply_style(canvas.widget());
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
+    let render_snapshot_enabled =
+        std::env::var("CHELOTYPE_RENDER_SNAPSHOT").ok().as_deref() == Some("1");
     let last_snapshot = std::rc::Rc::new(std::cell::RefCell::new(std::time::Instant::now()));
     let ui_e2e = UiE2eScenario::from_env();
     let ui_e2e_deadline = ui_e2e
@@ -132,6 +136,7 @@ fn build_ui(app: &Application) {
     let selection_text = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
     let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
     let keyboard_selection = std::rc::Rc::new(std::cell::Cell::new(None::<DirectedSelectionRange>));
+    let preedit = std::rc::Rc::new(std::cell::RefCell::new(None::<PendingPreedit>));
     let last_content = std::rc::Rc::new(std::cell::RefCell::new(None::<RenderableContentOwned>));
     let pending_input_latency =
         std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::<
@@ -180,10 +185,15 @@ fn build_ui(app: &Application) {
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
         let keyboard_selection = keyboard_selection.clone();
+        let preedit = preedit.clone();
+        let force_snapshot = force_snapshot.clone();
         let pending_input_latency = pending_input_latency.clone();
         im_context.connect_commit(move |_context, committed| {
             if committed.is_empty() {
                 return;
+            }
+            if preedit.borrow_mut().take().is_some() {
+                force_snapshot.set(true);
             }
             mark_pending_input_latency(&pending_input_latency);
             write_key_with_selection(
@@ -195,6 +205,23 @@ fn build_ui(app: &Application) {
                 &keyboard_selection,
                 committed.as_bytes().to_vec(),
             );
+        });
+    }
+    {
+        let preedit = preedit.clone();
+        let force_snapshot = force_snapshot.clone();
+        im_context.connect_preedit_changed(move |context| {
+            let (text, _attrs, cursor) = context.preedit_string();
+            let text = text.to_string();
+            *preedit.borrow_mut() = if text.is_empty() {
+                None
+            } else {
+                Some(PendingPreedit {
+                    text,
+                    cursor: cursor.max(0) as usize,
+                })
+            };
+            force_snapshot.set(true);
         });
     }
     let focus_controller = gtk::EventControllerFocus::new();
@@ -1108,6 +1135,7 @@ fn build_ui(app: &Application) {
         }
         let force = force_snapshot.replace(false);
         let selection_changed = selection_dirty.replace(false);
+        let preedit_state = preedit.borrow().clone();
         let pane_count = workspace_rc.borrow().active_tab_panes().len();
         let layout = measured_metrics.map(|metrics| WorkspaceRenderLayout {
             cols: usize::from(metrics.size.cols),
@@ -1149,6 +1177,8 @@ fn build_ui(app: &Application) {
                 visible_selection,
                 layout,
             );
+            let mut rendered = rendered;
+            apply_preedit_to_workspace_render(&mut rendered, preedit_state.as_ref());
             crate::perf_trace::record_duration("gtk_render", render_started.elapsed());
             active_pane_origin_col.set(
                 rendered
@@ -1272,6 +1302,8 @@ fn build_ui(app: &Application) {
             let render_started = std::time::Instant::now();
             let rendered =
                 Renderer::render_frame_with_selection(content.clone(), visible_selection);
+            let mut rendered = rendered;
+            apply_preedit_to_render_frame(&mut rendered, preedit_state.as_ref());
             crate::perf_trace::record_duration("gtk_render", render_started.elapsed());
             let allocations_after = crate::allocation_trace::snapshot();
             crate::perf_trace::record_counter(
@@ -1291,7 +1323,7 @@ fn build_ui(app: &Application) {
             {
                 crate::perf_trace::record_counter("process_rss_kib", rss_kib);
             }
-            canvas.set_render(rendered);
+            canvas.set_render(rendered.clone());
             record_pending_input_latency(&pending_input_latency);
             if selection_changed {
                 copy_selection_to_primary(canvas.widget(), &selection_text);
@@ -1304,6 +1336,9 @@ fn build_ui(app: &Application) {
                     .all(|expected| text.contains(expected))
                 {
                     gtk::test_widget_wait_for_draw(canvas.widget());
+                    if render_snapshot_enabled {
+                        let _ = write_render_frame_snapshot(&rendered, "gtk_e2e_render");
+                    }
                     let _ = write_snapshot_with_selection(content, "gtk_e2e", visible_selection);
                     app_for_tick.quit();
                     return glib::ControlFlow::Break;
@@ -1316,7 +1351,8 @@ fn build_ui(app: &Application) {
         }
         if snapshot_enabled
             && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
-                || selection_changed)
+                || selection_changed
+                || force)
             && let Some(content) = last_content.borrow().clone()
         {
             *last_snapshot.borrow_mut() = std::time::Instant::now();
@@ -1331,6 +1367,13 @@ fn build_ui(app: &Application) {
             {
                 *selection_text.borrow_mut() =
                     text_for_viewport_selection(&content, visible_selection);
+            }
+            let rendered =
+                Renderer::render_frame_with_selection(content.clone(), visible_selection);
+            let mut rendered = rendered;
+            apply_preedit_to_render_frame(&mut rendered, preedit.borrow().as_ref());
+            if render_snapshot_enabled {
+                let _ = write_render_frame_snapshot(&rendered, "frame_render");
             }
             let _ = write_snapshot_with_selection(content, "frame", visible_selection);
             if selection.get().is_some() {
@@ -2688,6 +2731,24 @@ fn cancel_click_gesture(
     pointer_interaction.borrow_mut().cancel()
 }
 
+fn apply_preedit_to_workspace_render(
+    render: &mut WorkspaceRenderFrame,
+    preedit: Option<&PendingPreedit>,
+) {
+    if let Some(active) = render.panes.iter_mut().find(|pane| pane.active) {
+        apply_preedit_to_render_frame(&mut active.frame, preedit);
+    }
+}
+
+fn apply_preedit_to_render_frame(render: &mut RenderFrame, preedit: Option<&PendingPreedit>) {
+    render.preedit = preedit.map(|preedit| RenderPreedit {
+        text: preedit.text.clone(),
+        cursor: preedit.cursor,
+        line: render.cursor.line,
+        column: render.cursor.column,
+    });
+}
+
 fn apply_interaction_effects(
     effects: Vec<InteractionEffect>,
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
@@ -2755,6 +2816,12 @@ struct SplitResizeDrag {
     boundary_index: usize,
     start_x: f64,
     applied_delta_cols: i16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingPreedit {
+    text: String,
+    cursor: usize,
 }
 
 #[derive(Clone, Copy)]

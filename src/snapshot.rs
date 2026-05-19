@@ -1,5 +1,6 @@
 use crate::backend::RenderableContentOwned;
 use crate::cell_text::lines_to_text;
+use crate::render::RenderFrame;
 use crate::selection::{SelectionRange, selected_text};
 use crate::terminal_grid::{TerminalCell, TerminalLineMetadata, TerminalSemanticPrompt};
 use crate::workspace_render::WorkspaceRenderFrame;
@@ -168,6 +169,45 @@ pub fn write_workspace_render_snapshot(
     Some(base)
 }
 
+pub fn write_render_frame_snapshot(snapshot: &RenderFrame, label: &str) -> Option<PathBuf> {
+    let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
+        .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let base = Path::new(&dir).join(format!("{label}_{ts}"));
+    if let Err(err) = create_dir_all(base.parent().unwrap_or(Path::new("/"))) {
+        eprintln!("render snapshot dir error: {err}");
+        return None;
+    }
+    let _ = write_file(
+        base.with_extension("render.json"),
+        serde_json::to_vec_pretty(snapshot).unwrap_or_default(),
+    );
+    let input_html = if snapshot.input_markup.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", snapshot.input_markup)
+    };
+    let preedit_html = snapshot
+        .preedit
+        .as_ref()
+        .map(|preedit| {
+            format!(
+                "\n<span style=\"color:#e5e7eb;text-decoration:underline;\">{}</span>",
+                escape_text(&preedit.text)
+            )
+        })
+        .unwrap_or_default();
+    let html = format!(
+        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">{}{}{}</body></html>",
+        snapshot.history_markup, input_html, preedit_html
+    );
+    let _ = write_file(base.with_extension("render.html"), html.into_bytes());
+    Some(base)
+}
+
 fn snapshot_to_plain(snapshot: &SnapshotJson) -> String {
     snapshot.text.clone()
 }
@@ -250,6 +290,14 @@ fn workspace_render_to_html(snapshot: &WorkspaceRenderFrame) -> String {
     }
     out.push_str("</body></html>");
     out
+}
+
+fn escape_text(text: &str) -> String {
+    let mut escaped = String::new();
+    for ch in text.chars() {
+        escaped.push_str(&html_escape(ch));
+    }
+    escaped
 }
 
 fn html_escape(ch: char) -> String {

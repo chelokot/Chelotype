@@ -13,6 +13,14 @@ pub struct RenderCursor {
     pub color: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RenderPreedit {
+    pub text: String,
+    pub cursor: usize,
+    pub line: i32,
+    pub column: i32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum RenderRegion {
     History,
@@ -61,6 +69,7 @@ pub struct RenderFrame {
     pub history_markup: String,
     pub input_markup: String,
     pub cursor: RenderCursor,
+    pub preedit: Option<RenderPreedit>,
     pub input_text: String,
     pub lines: Vec<RenderLine>,
     pub command_blocks: Vec<CommandBlock>,
@@ -172,6 +181,7 @@ impl Renderer {
                 visible: content.cursor_visible,
                 color: "#7dd3fc".to_string(),
             },
+            preedit: None,
             input_text,
             lines,
             command_blocks: command_blocks(&content),

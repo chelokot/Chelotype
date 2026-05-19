@@ -29,8 +29,8 @@ Prompt-to-artifact checklist
   - Status: partial; soft-wrapped and semantic prompt continuation input stays in one input region, prompt-delimited command-block metadata exists, and OSC 133 command blocks are exported in render dumps, but no smooth scroll model or command-block UI yet.
 - Keyboard input
   - Evidence: `src/input.rs`.
-  - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, arrow byte e2e, `tests/gtk_e2e_tests.rs` real-window Xvfb smoke, Xvfb+xdotool keyboard input into the actual window, and Xvfb+xdotool IM compose input that commits `é` through GTK's input method path while replacing selected shell input text.
-  - Status: partial; real keyboard input and committed IM composition reach the shell through GTK and the headless clean zsh fixture, with preedit visualization and broader layout scenarios still needed.
+  - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, arrow byte e2e, `tests/gtk_e2e_tests.rs` real-window Xvfb smoke, Xvfb+xdotool keyboard input into the actual window, Xvfb+xdotool IM preedit render-state export before commit, and Xvfb+xdotool IM compose input that commits `é` through GTK's input method path while replacing selected shell input text.
+  - Status: partial; real keyboard input, transient IM preedit visualization, and committed IM composition reach the GTK path and shell-driven render state, with broader non-Latin layout scenarios still needed.
 - Mouse as first-class input
   - Evidence: `src/mouse.rs`, `src/interaction.rs`, Ghostty mouse-mode state from `src/ghostty_snapshot.rs`.
   - Coverage: local drag selection tests, drag-release stop test, SGR mouse reporting tests, headless mouse drag selection e2e, headless mouse-click cursor movement through zsh line editing, headless soft-wrapped input click-to-cursor e2e, semantic prompt continuation cursor movement unit tests, real Xvfb+xdotool GTK drag-selection e2e that verifies exported `selected_text`, real Xvfb+xdotool released-selection copy e2e, real Xvfb+xdotool click-to-cursor e2e, real Xvfb+xdotool click-to-cursor with zsh autosuggestions visible, and real Xvfb+xdotool terminal mouse-reporting e2e that verifies SGR click bytes reach the PTY.
@@ -45,12 +45,12 @@ Prompt-to-artifact checklist
   - Status: partial; truecolor, deterministic zsh prompt color, and zsh autosuggestion styling reach snapshots/render dumps, but broader user theme/plugin fidelity is not deeply asserted.
 - Cursor position/shape/visibility
   - Evidence: cursor fields in snapshots, canvas caret drawing.
-  - Coverage: backend cursor integration, HTML snapshot cursor-placement unit test, canvas blink reset unit test, real Xvfb screenshot e2e that asserts the cursor-colored pixels form a narrow vertical caret at the snapshot cursor row/column, and real Xvfb screenshot e2e that verifies cursor blink-off plus visible reset after input.
-  - Status: partial; visual cursor shape, position, and blink/reset are covered, and committed IM composition is covered; cursor behavior during live preedit composition is still missing.
+  - Coverage: backend cursor integration, HTML snapshot cursor-placement unit test, canvas blink reset unit test, real Xvfb screenshot e2e that asserts the cursor-colored pixels form a narrow vertical caret at the snapshot cursor row/column, real Xvfb screenshot e2e that verifies cursor blink-off plus visible reset after input, and real Xvfb IM preedit e2e that exports the preedit overlay at the terminal cursor before composed commit.
+  - Status: partial; visual cursor shape, position, blink/reset, and preedit-at-cursor render-state export are covered, but pixel-level preedit styling and complex composition cursor movement are still missing.
 - Unicode/graphemes
   - Evidence: Ghostty grapheme extraction, shared `src/cell_text.rs`, structured cell JSON with wide-cell flags.
-  - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata; headless emoji/ZWJ/ambiguous-width test verifies ZWJ emoji cells and single-width ambiguous characters through snapshots and render dumps; GTK e2e now drives the live app to export combining graphemes, CJK wide cells plus spacer metadata, ZWJ emoji wide state, and ambiguous-width cells through structured JSON snapshots; GTK IM compose e2e proves composed committed text enters the same shell-driven input path.
-  - Status: partial; emoji ZWJ, ambiguous-width, and committed IM composition coverage exists, but live preedit rendering scenarios are still needed.
+  - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata; headless emoji/ZWJ/ambiguous-width test verifies ZWJ emoji cells and single-width ambiguous characters through snapshots and render dumps; GTK e2e now drives the live app to export combining graphemes, CJK wide cells plus spacer metadata, ZWJ emoji wide state, and ambiguous-width cells through structured JSON snapshots; GTK IM preedit and compose e2es prove transient composition state is rendered before commit and committed composed text enters the same shell-driven input path.
+  - Status: partial; emoji ZWJ, ambiguous-width, transient preedit, and committed IM composition coverage exists, but broader non-Latin layout and composition edge cases are still needed.
 - Perf gates
   - Evidence: `benches/pipeline.rs`, `src/perf_trace.rs`, `src/process_metrics.rs`, `tests/gtk_e2e_tests.rs`, `docs/benchmarks.md`.
   - Coverage: active Ghostty app-frame render benchmark, 4 ms latency guard, explicit 60/120 Hz frame-budget gates, Criterion held-key scenario, backend dirty-snapshot regression test, canvas frame equality skip, and real Xvfb 10-second held-key e2e that records and gates `input_to_render`, `gtk_render`, and `gtk_paint` p95/p99.
@@ -76,4 +76,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are IM preedit visualization, command-block UI, smooth scrolling, richer selection/editing semantics, and memory/allocation perf gates.
+The milestone is not complete. The next highest-value gaps are richer non-Latin IM/preedit layout coverage, command-block UI, smooth scrolling, richer selection/editing semantics, and memory/allocation perf gates.

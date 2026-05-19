@@ -15,6 +15,7 @@ Headless snapshots
 Live snapshots
 - Set `CHELOTYPE_SNAPSHOT=1` while running the UI; one snapshot per second is written to the snapshot directory.
 - Use `CHELOTYPE_SNAPSHOT_DIR` to override the dump location.
+- Set `CHELOTYPE_RENDER_SNAPSHOT=1` with live snapshots to also emit `.render.json`/`.render.html` files for the active rendered frame. These include transient UI overlays such as IM preedit text at the terminal cursor, which are not part of the PTY-backed terminal grid until committed.
 
 Usage tips
 - Inspect `markup.html` for GTK markup fidelity and color mismatches.

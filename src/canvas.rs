@@ -204,7 +204,13 @@ fn draw_render_frame(
     }
 
     if render.cursor.visible && draw_cursor {
-        draw_caret(context, render, line_height, cell_width);
+        if let Some(preedit) = &render.preedit {
+            draw_preedit(widget, context, render, preedit, line_height, cell_width);
+        } else {
+            draw_caret(context, render, line_height, cell_width);
+        }
+    } else if let Some(preedit) = &render.preedit {
+        draw_preedit(widget, context, render, preedit, line_height, cell_width);
     }
 }
 
@@ -337,6 +343,58 @@ fn draw_caret(context: &cairo::Context, render: &RenderFrame, line_height: f64, 
     let _ = context.fill();
 }
 
+fn draw_preedit(
+    widget: &gtk::DrawingArea,
+    context: &cairo::Context,
+    render: &RenderFrame,
+    preedit: &crate::render::RenderPreedit,
+    line_height: f64,
+    cell_width: f64,
+) {
+    let x = preedit.column.max(0) as f64 * cell_width;
+    let y = preedit.line.max(0) as f64 * line_height;
+    let columns = preedit.text.chars().count().max(1);
+    context.set_source_rgb(37.0 / 255.0, 41.0 / 255.0, 48.0 / 255.0);
+    context.rectangle(x, y, columns as f64 * cell_width, line_height);
+    let _ = context.fill();
+
+    let style = RenderStyle {
+        fg: Some("#e5e7eb".to_string()),
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: true,
+        strikeout: false,
+        selected: false,
+    };
+    let run = RenderRun {
+        start_column: preedit.column.max(0) as usize,
+        columns,
+        text: preedit.text.clone(),
+        style,
+    };
+    let layout = layout_for(widget, &run_markup(&run));
+    gtk::render_layout(&widget.style_context(), context, x, y, &layout);
+
+    if render.cursor.visible {
+        let cursor_text = preedit
+            .text
+            .chars()
+            .take(preedit.cursor.min(preedit.text.chars().count()))
+            .collect::<String>();
+        let cursor_x = if cursor_text.is_empty() {
+            x
+        } else {
+            let cursor_layout = layout_for(widget, &markup_escape_text(&cursor_text));
+            let (width, _) = cursor_layout.pixel_size();
+            x + f64::from(width)
+        };
+        context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
+        context.rectangle(cursor_x.round(), y.round(), 1.25, line_height);
+        let _ = context.fill();
+    }
+}
+
 fn run_markup(run: &RenderRun) -> String {
     let mut span = String::from("<span");
     push_style_markup(&mut span, &run.style);
@@ -346,6 +404,14 @@ fn run_markup(run: &RenderRun) -> String {
     }
     span.push_str("</span>");
     span
+}
+
+fn markup_escape_text(text: &str) -> String {
+    let mut escaped = String::new();
+    for ch in text.chars() {
+        escaped.push_str(&markup_escape(ch));
+    }
+    escaped
 }
 
 fn push_style_markup(span: &mut String, style: &RenderStyle) {
