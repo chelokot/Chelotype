@@ -3361,6 +3361,170 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_cuts_and_pastes_input_from_right_click_context_menu_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!(
+            "skipping gtk context menu input edit e2e because xvfb-run or xdotool is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-context-menu-input-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+geometry_trace="$4"
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "abcdef"
+for _ in {1..100}; do
+    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1 || true)"
+if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
+    echo "input context setup snapshots or geometry did not appear" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.0 * cell) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (5.8 * cell) }')"
+target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+xdotool mousemove "$start_x" "$target_y"
+xdotool mousedown 1
+sleep 0.05
+xdotool mousemove "$end_x" "$target_y"
+sleep 0.05
+xdotool mouseup 1
+for _ in {1..60}; do
+    if grep -F 'primary	abcd' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -F 'primary	abcd' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "input selection was not ready before context cut" >&2
+    cat "$clipboard_trace" >&2 || true
+    cat /tmp/chelotype.log >&2 || true
+    exit 1
+fi
+menu_x="$start_x"
+menu_y="$target_y"
+xdotool mousemove "$menu_x" "$menu_y"
+xdotool click 3
+sleep 0.2
+cut_x="$(awk -v x="$menu_x" 'BEGIN { printf "%d", x + 28 }')"
+cut_y="$(awk -v y="$menu_y" 'BEGIN { printf "%d", y + 58 }')"
+xdotool mousemove "$cut_x" "$cut_y"
+xdotool click 1
+for _ in {1..100}; do
+    if grep -F 'clipboard	abcd' "$clipboard_trace" >/dev/null 2>&1 && grep -R '❯ ef' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -F 'clipboard	abcd' "$clipboard_trace" >/dev/null 2>&1 || ! grep -R '❯ ef' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "context menu Cut did not remove selected input text" >&2
+    echo "menu=$menu_x,$menu_y cut=$cut_x,$cut_y" >&2
+    cat "$clipboard_trace" >&2 || true
+    grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
+    cat /tmp/chelotype.log >&2 || true
+    exit 1
+fi
+xdotool mousemove "$menu_x" "$target_y"
+xdotool click 3
+sleep 0.2
+paste_x="$(awk -v x="$menu_x" 'BEGIN { printf "%d", x + 36 }')"
+paste_y="$(awk -v y="$menu_y" 'BEGIN { printf "%d", y + 92 }')"
+xdotool mousemove "$paste_x" "$paste_y"
+xdotool click 1
+for _ in {1..100}; do
+    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "context menu Paste did not restore cut input text" >&2
+echo "menu=$menu_x,$menu_y paste=$paste_x,$paste_y" >&2
+cat "$clipboard_trace" >&2 || true
+grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
+cat /tmp/chelotype.log >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-context-menu-input-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk context menu input e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk context menu input e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(
+        trace.lines().any(|line| line == "clipboard\tabcd"),
+        "context menu Cut did not trace clipboard export: {trace}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_zooms_terminal_with_keyboard_and_ctrl_wheel_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk zoom e2e because xvfb-run or xdotool is not installed");
