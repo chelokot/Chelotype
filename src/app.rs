@@ -352,11 +352,15 @@ fn build_ui(app: &Application) {
                     }
                     KeyAction::UndoInput => {
                         mark_pending_input_latency(&pending_input_latency);
-                        let _ = workspace.borrow_mut().write_active(b"\x1f");
+                        let _ = workspace
+                            .borrow_mut()
+                            .write_active(crate::shell::INPUT_UNDO_SEQUENCE);
                     }
                     KeyAction::RedoInput => {
                         mark_pending_input_latency(&pending_input_latency);
-                        let _ = workspace.borrow_mut().write_active(b"\x1bxredo\r");
+                        let _ = workspace
+                            .borrow_mut()
+                            .write_active(crate::shell::INPUT_REDO_SEQUENCE);
                     }
                     KeyAction::ZoomIn => {
                         mark_pending_input_latency(&pending_input_latency);
@@ -2391,7 +2395,7 @@ fn write_key_with_selection(
     data: Vec<u8>,
 ) {
     let Some(selection_range) = selection.get() else {
-        let _ = workspace.borrow_mut().write_active(&data);
+        let _ = write_active_input_edit(workspace, &data);
         return;
     };
     let Some(content) = content.borrow().clone() else {
@@ -2401,7 +2405,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = workspace.borrow_mut().write_active(&data);
+        let _ = write_active_input_edit(workspace, &data);
         return;
     };
     selection.set(Some(selection_range));
@@ -2415,7 +2419,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = workspace.borrow_mut().write_active(&data);
+        let _ = write_active_input_edit(workspace, &data);
         return;
     };
     let Some(selected) = text_for_viewport_selection(&content, viewport_selection) else {
@@ -2425,7 +2429,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = workspace.borrow_mut().write_active(&data);
+        let _ = write_active_input_edit(workspace, &data);
         return;
     };
     let target = MouseGridPosition {
@@ -2454,7 +2458,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = workspace.borrow_mut().write_active(&data);
+        let _ = write_active_input_edit(workspace, &data);
         return;
     };
 
@@ -2471,7 +2475,27 @@ fn write_key_with_selection(
         selection_dirty,
         keyboard_selection,
     );
-    let _ = workspace.borrow_mut().write_active(&replacement);
+    let _ = write_active_input_edit(workspace, &replacement);
+}
+
+fn write_active_input_edit(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    data: &[u8],
+) -> std::io::Result<()> {
+    if crate::shell::default_shell_has_input_edit_bridge() && terminal_bytes_edit_input(data) {
+        let mut combined = crate::shell::INPUT_UNDO_CAPTURE_SEQUENCE.to_vec();
+        combined.extend_from_slice(data);
+        workspace.borrow_mut().write_active(&combined)
+    } else {
+        workspace.borrow_mut().write_active(data)
+    }
+}
+
+fn terminal_bytes_edit_input(data: &[u8]) -> bool {
+    if data.is_empty() || data == b"\n" || data == b"\r" || data == [0x03] {
+        return false;
+    }
+    true
 }
 
 fn current_mouse_mode(

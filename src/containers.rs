@@ -32,6 +32,7 @@ impl LaunchTarget {
                 command.arg("enter");
                 command.arg("--container");
                 command.arg(name);
+                command.args(crate::shell::default_shell_argv());
                 command
             }
             Self::Podman { name } => {
@@ -40,7 +41,7 @@ impl LaunchTarget {
                 command.arg(format!(
                     "podman start {name} >/dev/null 2>&1 || true; exec podman exec -it {name} {shell}",
                     name = shell_quote(name),
-                    shell = shell_quote(&crate::shell::default_shell_path())
+                    shell = crate::shell::default_shell_command_line()
                 ));
                 command
             }
@@ -187,6 +188,50 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     fn shell_quotes_container_names() {
         assert_eq!(shell_quote("fedora-toolbox"), "'fedora-toolbox'");
         assert_eq!(shell_quote("bad'name"), "'bad'\\''name'");
+    }
+
+    #[test]
+    fn toolbox_launch_runs_configured_shell_inside_container() {
+        let command = LaunchTarget::Toolbox {
+            name: "fedora-toolbox-latest".to_string(),
+        }
+        .command();
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(argv.starts_with(&[
+            "toolbox".to_string(),
+            "enter".to_string(),
+            "--container".to_string(),
+            "fedora-toolbox-latest".to_string(),
+        ]));
+        assert!(
+            argv.iter().any(|argument| argument == "--init-command")
+                || !argv.iter().any(|argument| argument.ends_with("fish"))
+        );
+    }
+
+    #[test]
+    fn podman_launch_runs_configured_shell_inside_container() {
+        let command = LaunchTarget::Podman {
+            name: "fedora-toolbox".to_string(),
+        }
+        .command();
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(argv[0], "/bin/sh");
+        assert_eq!(argv[1], "-lc");
+        assert!(argv[2].contains("podman exec -it 'fedora-toolbox'"));
+        if argv[2].contains("fish") {
+            assert!(argv[2].contains("'--init-command'"));
+        }
     }
 
     #[test]

@@ -1,9 +1,67 @@
 use portable_pty::CommandBuilder;
 
 const FISH_CANDIDATES: [&str; 2] = ["/usr/bin/fish", "/bin/fish"];
+pub const INPUT_UNDO_CAPTURE_SEQUENCE: &[u8] = b"\x1b[57344u";
+pub const INPUT_UNDO_SEQUENCE: &[u8] = b"\x1b[57345u";
+pub const INPUT_REDO_SEQUENCE: &[u8] = b"\x1b[57346u";
+
+const FISH_CHELOTYPE_INIT: &str = "\
+function __chelotype_capture_undo
+    set -g __chelotype_undo_lines $__chelotype_undo_lines x(string escape --style=var -- (commandline))
+    set -g __chelotype_undo_cursors $__chelotype_undo_cursors (commandline -C)
+    set -e __chelotype_redo_lines
+    set -e __chelotype_redo_cursors
+end
+function __chelotype_decode_line
+    string sub -s 2 -- $argv[1] | string unescape --style=var
+end
+function __chelotype_undo
+    set -l count (count $__chelotype_undo_lines)
+    test $count -gt 0; or return
+    set -g __chelotype_redo_lines $__chelotype_redo_lines x(string escape --style=var -- (commandline))
+    set -g __chelotype_redo_cursors $__chelotype_redo_cursors (commandline -C)
+    commandline --replace (__chelotype_decode_line $__chelotype_undo_lines[$count])
+    commandline -C $__chelotype_undo_cursors[$count]
+    set -e __chelotype_undo_lines[$count]
+    set -e __chelotype_undo_cursors[$count]
+    commandline -f repaint
+end
+function __chelotype_redo
+    set -l count (count $__chelotype_redo_lines)
+    test $count -gt 0; or return
+    set -g __chelotype_undo_lines $__chelotype_undo_lines x(string escape --style=var -- (commandline))
+    set -g __chelotype_undo_cursors $__chelotype_undo_cursors (commandline -C)
+    commandline --replace (__chelotype_decode_line $__chelotype_redo_lines[$count])
+    commandline -C $__chelotype_redo_cursors[$count]
+    set -e __chelotype_redo_lines[$count]
+    set -e __chelotype_redo_cursors[$count]
+    commandline -f repaint
+end
+bind \\e\\[57344u __chelotype_capture_undo
+bind -M insert \\e\\[57344u __chelotype_capture_undo
+bind \\e\\[57345u __chelotype_undo
+bind -M insert \\e\\[57345u __chelotype_undo
+bind \\e\\[57346u __chelotype_redo
+bind -M insert \\e\\[57346u __chelotype_redo";
 
 pub fn default_shell_command() -> CommandBuilder {
-    CommandBuilder::new(default_shell_path())
+    shell_command_for_path(&default_shell_path())
+}
+
+pub fn default_shell_argv() -> Vec<String> {
+    shell_argv_for_path(&default_shell_path())
+}
+
+pub fn default_shell_command_line() -> String {
+    default_shell_argv()
+        .iter()
+        .map(|argument| shell_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn default_shell_has_input_edit_bridge() -> bool {
+    is_fish_path(&default_shell_path())
 }
 
 pub fn default_shell_path() -> String {
@@ -31,9 +89,38 @@ fn resolve_default_shell(
         .to_string()
 }
 
+fn shell_command_for_path(path: &str) -> CommandBuilder {
+    let argv = shell_argv_for_path(path);
+    let mut command = CommandBuilder::new(&argv[0]);
+    command.args(&argv[1..]);
+    command
+}
+
+fn shell_argv_for_path(path: &str) -> Vec<String> {
+    if is_fish_path(path) {
+        return vec![
+            path.to_string(),
+            "--init-command".to_string(),
+            FISH_CHELOTYPE_INIT.to_string(),
+        ];
+    }
+    vec![path.to_string()]
+}
+
+fn is_fish_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .file_name()
+        .is_some_and(|name| name == "fish")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     #[test]
     fn configured_shell_overrides_product_default() {
@@ -62,5 +149,48 @@ mod tests {
     #[test]
     fn bash_is_last_resort() {
         assert_eq!(resolve_default_shell(None, None, |_| false), "/bin/bash");
+    }
+
+    #[test]
+    fn fish_command_installs_chelotype_undo_redo_bindings() {
+        let command = shell_command_for_path("/usr/bin/fish");
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.as_os_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            argv,
+            vec![
+                OsStr::new("/usr/bin/fish"),
+                OsStr::new("--init-command"),
+                OsStr::new(FISH_CHELOTYPE_INIT),
+            ]
+        );
+    }
+
+    #[test]
+    fn non_fish_command_is_not_modified() {
+        let command = shell_command_for_path("/bin/bash");
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.as_os_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(argv, vec![OsStr::new("/bin/bash")]);
+    }
+
+    #[test]
+    fn shell_command_line_quotes_fish_init_for_container_exec() {
+        let line = shell_argv_for_path("/usr/bin/fish")
+            .iter()
+            .map(|argument| shell_quote(argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(line.starts_with("'/usr/bin/fish' '--init-command' 'function __chelotype"));
+        assert!(line.contains("__chelotype_redo"));
     }
 }

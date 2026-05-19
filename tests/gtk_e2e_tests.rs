@@ -5136,20 +5136,17 @@ fn gtk_e2e_supports_input_undo_and_redo_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
-    let zdot = dir.join("zsh");
-    std::fs::create_dir_all(&zdot).expect("zsh fixture dir");
-    std::fs::write(
-        zdot.join(".zshrc"),
-        "PS1='❯ '\nbindkey $'\\C-z' undo\nbindkey $'\\exredo\\r' redo\n",
-    )
-    .expect("zshrc fixture");
-
+    let fish_edit_trace = dir.join("fish-edit.tsv");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-zdot="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+fish_edit_trace="$3"
+config_dir="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_FISH_EDIT_TRACE="$fish_edit_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -5169,6 +5166,9 @@ sleep 0.2
 latest_txt() {
     ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
 }
+snapshot_count() {
+    find "$snapshot_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l
+}
 wait_latest_text() {
     local text="$1"
     for _ in {1..100}; do
@@ -5183,6 +5183,24 @@ wait_latest_text() {
     [ -n "$latest" ] && cat "$latest" >&2
     return 1
 }
+wait_latest_text_after() {
+    local before="$1"
+    local text="$2"
+    for _ in {1..100}; do
+        local count
+        count="$(snapshot_count)"
+        latest="$(latest_txt || true)"
+        if [ "$count" -gt "$before" ] && [ -n "$latest" ] && grep -F "$text" "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text after snapshot $before did not become: $text" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    cat "$fish_edit_trace" >&2 || true
+    return 1
+}
 wait_prompt_without_input() {
     for _ in {1..100}; do
         latest="$(latest_txt || true)"
@@ -5194,31 +5212,89 @@ wait_prompt_without_input() {
     echo "prompt did not return to empty input" >&2
     latest="$(latest_txt || true)"
     [ -n "$latest" ] && cat "$latest" >&2
+    cat "$fish_edit_trace" >&2 || true
     return 1
 }
+wait_prompt_without_input_after() {
+    local before="$1"
+    for _ in {1..100}; do
+        local count
+        count="$(snapshot_count)"
+        latest="$(latest_txt || true)"
+        if [ "$count" -gt "$before" ] && [ -n "$latest" ] && grep -E '^❯[[:space:]]*$' "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "prompt after snapshot $before did not return to empty input" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    cat "$fish_edit_trace" >&2 || true
+    return 1
+}
+before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "a"
-wait_latest_text '❯ a'
+wait_latest_text_after "$before" '❯ a'
+before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "b"
-wait_latest_text '❯ ab'
+wait_latest_text_after "$before" '❯ ab'
+before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "c"
-wait_latest_text '❯ abc'
+wait_latest_text_after "$before" '❯ abc'
+before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
-wait_latest_text '❯ ab'
+wait_latest_text_after "$before" '❯ ab'
+before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
-wait_latest_text '❯ a'
+wait_latest_text_after "$before" '❯ a'
+before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
-wait_prompt_without_input
+wait_prompt_without_input_after "$before"
+before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+shift+z
-wait_latest_text '❯ a'
+wait_latest_text_after "$before" '❯ a'
+before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+shift+z
-wait_latest_text '❯ ab'
+wait_latest_text_after "$before" '❯ ab'
+before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
-wait_latest_text '❯ a'
+wait_latest_text_after "$before" '❯ a'
+before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "X"
-wait_latest_text '❯ aX'
+wait_latest_text_after "$before" '❯ aX'
+before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+shift+z
-sleep 0.2
-wait_latest_text '❯ aX'
+wait_latest_text_after "$before" '❯ aX'
+
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+a
+xdotool key --window "$window_id" BackSpace
+wait_prompt_without_input_after "$before"
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text_after "$before" '❯ aX'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+a
+xdotool type --window "$window_id" --delay 2 "Z"
+wait_latest_text_after "$before" '❯ Z'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text_after "$before" '❯ aX'
+xdotool key --window "$window_id" ctrl+a
+xdotool key --window "$window_id" ctrl+c
+sleep 0.3
+before="$(snapshot_count)"
+xdotool key --window "$window_id" BackSpace
+wait_prompt_without_input_after "$before"
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+v
+wait_latest_text_after "$before" '❯ aX'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+z
+wait_prompt_without_input_after "$before"
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text_after "$before" '❯ aX'
 "#;
 
     let output = Command::new("xvfb-run")
@@ -5232,7 +5308,8 @@ wait_latest_text '❯ aX'
             "chelotype-gtk-input-undo-redo-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
-            zdot.to_str().expect("zsh fixture dir utf8"),
+            fish_edit_trace.to_str().expect("fish edit trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk input undo/redo e2e under xvfb");
