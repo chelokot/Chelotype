@@ -1498,6 +1498,146 @@ wait_latest_contains_only 'TAB_ONE_AFTER_CLOSE' 'TAB_TWO_ACTIVE'
 
 #[test]
 #[serial]
+fn gtk_e2e_closes_terminal_tab_with_middle_click_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!(
+            "skipping gtk middle-click tab close e2e because xvfb-run or xdotool is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-middle-click-tabs-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let tab_trace = dir.join("tabs.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+tab_trace="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_TAB_TRACE="$tab_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ] && [ -f "$tab_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ] || [ ! -f "$tab_trace" ]; then
+    echo "chelotype window or tab trace did not appear" >&2
+    exit 1
+fi
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+wait_latest_contains_only() {
+    needle="$1"
+    forbidden="$2"
+    for _ in {1..120}; do
+        latest="$(latest_txt || true)"
+        if [ -n "$latest" ] && grep -F "$needle" "$latest" >/dev/null 2>&1 && ! grep -F "$forbidden" "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest snapshot did not contain only $needle" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && sed -n '1,12p' "$latest" >&2
+    cat "$tab_trace" >&2 || true
+    return 1
+}
+wait_tab_trace() {
+    expected_count="$1"
+    expected_selected="$2"
+    for _ in {1..100}; do
+        count="$(sed -n 's/^tab_count=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+        selected="$(sed -n 's/^selected_index=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+        width="$(sed -n 's/^tab_bar_width=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+        height="$(sed -n 's/^tab_bar_height=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+        if [ "$count" = "$expected_count" ] && [ "$selected" = "$expected_selected" ] && [ "${width:-0}" -gt 20 ] && [ "${height:-0}" -gt 10 ]; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "tab trace did not reach count=$expected_count selected=$expected_selected" >&2
+    cat "$tab_trace" >&2 || true
+    return 1
+}
+middle_click_tab() {
+    index="$1"
+    eval "$(xdotool getwindowgeometry --shell "$window_id")"
+    tab_bar_x="$(sed -n 's/^tab_bar_x=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+    tab_bar_y="$(sed -n 's/^tab_bar_y=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+    tab_bar_width="$(sed -n 's/^tab_bar_width=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+    tab_bar_height="$(sed -n 's/^tab_bar_height=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+    tab_count="$(sed -n 's/^tab_count=\([0-9][0-9]*\)$/\1/p' "$tab_trace")"
+    target_x="$(awk -v left="$X" -v bar_x="$tab_bar_x" -v width="$tab_bar_width" -v count="$tab_count" -v tab_index="$index" 'BEGIN { printf "%d", left + bar_x + (((tab_index + 0.5) * width) / count) }')"
+    target_y="$(awk -v top="$Y" -v bar_y="$tab_bar_y" -v height="$tab_bar_height" 'BEGIN { printf "%d", top + bar_y + (height / 2) }')"
+    xdotool mousemove "$target_x" "$target_y"
+    xdotool click 2
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "printf 'MIDDLE_TAB_ONE\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    if grep -R 'MIDDLE_TAB_ONE' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+xdotool key --window "$window_id" ctrl+shift+t
+wait_tab_trace 2 1
+xdotool type --window "$window_id" --delay 2 "printf 'MIDDLE_TAB_TWO\n'"
+xdotool key --window "$window_id" Return
+wait_latest_contains_only 'MIDDLE_TAB_TWO' 'MIDDLE_TAB_ONE'
+middle_click_tab 1
+wait_tab_trace 1 0
+wait_latest_contains_only 'MIDDLE_TAB_ONE' 'MIDDLE_TAB_TWO'
+xdotool type --window "$window_id" --delay 2 "printf 'MIDDLE_TAB_ONE_AFTER_CLOSE\n'"
+xdotool key --window "$window_id" Return
+wait_latest_contains_only 'MIDDLE_TAB_ONE_AFTER_CLOSE' 'MIDDLE_TAB_TWO'
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-middle-click-tabs-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            tab_trace.to_str().expect("tab trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk middle-click tab close e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk middle-click tab close e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_keeps_live_input_isolated_between_tabs_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk live tab input e2e because xvfb-run or xdotool is not installed");
@@ -2121,15 +2261,18 @@ canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
-start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v origin="$left_origin" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((origin + 0.5) * cell) }')"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v origin="$left_origin" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((origin + 0.8) * cell) }')"
 start_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
 end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v origin="$right_origin" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((origin + 2.5) * cell) }')"
+mid_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v origin="$left_origin" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((origin + 12.0) * cell) }')"
 echo "split selection drag window=$window_id X=$X Y=$Y left_origin=$left_origin right_origin=$right_origin row=$marker_row start=$start_x,$start_y end=$end_x,$start_y" >&2
 xdotool mousemove "$start_x" "$start_y"
 xdotool mousedown 1
-sleep 0.05
+sleep 0.12
+xdotool mousemove "$mid_x" "$start_y"
+sleep 0.12
 xdotool mousemove "$end_x" "$start_y"
-sleep 0.05
+sleep 0.12
 xdotool mouseup 1
 for _ in {1..120}; do
     if grep -R '"selected_text": "LEFT_SPLIT_SELECTION' "$snapshot_dir" >/dev/null 2>&1 && grep -F 'primary	LEFT_SPLIT_SELECTION' "$clipboard_trace" >/dev/null 2>&1; then
@@ -2493,6 +2636,173 @@ exit 1
         trace.lines().any(|line| line == "primary\tMOUSE_SELECT_OK"),
         "primary selection was not exported exactly: {trace}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_manual_like_mouse_drag_selects_output_and_input_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!(
+            "skipping gtk manual-like mouse drag e2e because xvfb-run or xdotool is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-manual-mouse-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+geometry_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+wait_latest_text() {
+    local text="$1"
+    for _ in {1..100}; do
+        latest="$(latest_txt || true)"
+        if [ -n "$latest" ] && grep -F "$text" "$latest" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text did not become: $text" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    return 1
+}
+drag_row_cols() {
+    local row="$1"
+    local start_col="$2"
+    local end_col="$3"
+    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    eval "$(xdotool getwindowgeometry --shell "$window_id")"
+    start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$start_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (col * cell) }')"
+    end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$end_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (col * cell) }')"
+    mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
+    target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+    xdotool mousemove "$start_x" "$target_y"
+    xdotool mousedown 1
+    sleep 0.15
+    xdotool mousemove "$mid_x" "$target_y"
+    sleep 0.15
+    xdotool mousemove "$end_x" "$target_y"
+    sleep 0.15
+    xdotool mouseup 1
+}
+wait_primary() {
+    local text="$1"
+    for _ in {1..100}; do
+        if grep -F "primary	$text" "$clipboard_trace" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "primary selection did not become: $text" >&2
+    cat "$clipboard_trace" >&2 || true
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.25
+xdotool type --window "$window_id" --delay 2 "printf 'MANUAL_MOUSE_OUTPUT\n'"
+xdotool key --window "$window_id" Return
+wait_latest_text 'MANUAL_MOUSE_OUTPUT'
+latest="$(latest_txt)"
+output_row="$(grep -n '^MANUAL_MOUSE_OUTPUT' "$latest" | tail -n 1 | cut -d: -f1)"
+output_row="$((output_row - 1))"
+drag_row_cols "$output_row" "0.6" "19.8"
+wait_primary "MANUAL_MOUSE_OUTPUT"
+xdotool key --window "$window_id" ctrl+shift+c
+for _ in {1..80}; do
+    if grep -F 'clipboard	MANUAL_MOUSE_OUTPUT' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -F 'clipboard	MANUAL_MOUSE_OUTPUT' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "manual-like output drag did not copy selected text" >&2
+    cat "$clipboard_trace" >&2 || true
+    exit 1
+fi
+xdotool type --window "$window_id" --delay 2 "manualinput"
+wait_latest_text '❯ manualinput'
+latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1)"
+input_row="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+drag_row_cols "$input_row" "2.7" "8.2"
+wait_primary "manual"
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ Xinput'
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-manual-mouse-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk manual-like mouse e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk manual-like mouse e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(
+        trace
+            .lines()
+            .any(|line| line == "primary\tMANUAL_MOUSE_OUTPUT")
+    );
+    assert!(
+        trace
+            .lines()
+            .any(|line| line == "clipboard\tMANUAL_MOUSE_OUTPUT")
+    );
+    assert!(trace.lines().any(|line| line == "primary\tmanual"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2957,12 +3267,15 @@ line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
 start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.0 * cell) }')"
 end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (5.8 * cell) }')"
+mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
 target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
 xdotool mousemove "$start_x" "$target_y"
 xdotool mousedown 1
-sleep 0.05
+sleep 0.12
+xdotool mousemove "$mid_x" "$target_y"
+sleep 0.12
 xdotool mousemove "$end_x" "$target_y"
-sleep 0.05
+sleep 0.12
 xdotool mouseup 1
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "X"
@@ -2991,7 +3304,7 @@ for _ in {1..100}; do
 done
 word_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (9.5 * cell) }')"
 xdotool mousemove "$word_x" "$target_y"
-xdotool click --repeat 2 --delay 40 1
+xdotool click --repeat 2 --delay 90 1
 sleep 0.1
 xdotool type --window "$window_id" --delay 2 "X"
 for _ in {1..100}; do
@@ -3018,7 +3331,7 @@ for _ in {1..100}; do
 done
 line_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (4.5 * cell) }')"
 xdotool mousemove "$line_x" "$target_y"
-xdotool click --repeat 3 --delay 40 1
+xdotool click --repeat 3 --delay 90 1
 sleep 0.1
 xdotool type --window "$window_id" --delay 2 "Z"
 for _ in {1..100}; do
@@ -3131,12 +3444,15 @@ line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
 start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.0 * cell) }')"
 end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (5.8 * cell) }')"
+mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
 target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
 xdotool mousemove "$start_x" "$target_y"
 xdotool mousedown 1
-sleep 0.05
+sleep 0.12
+xdotool mousemove "$mid_x" "$target_y"
+sleep 0.12
 xdotool mousemove "$end_x" "$target_y"
-sleep 0.05
+sleep 0.12
 xdotool mouseup 1
 for _ in {1..60}; do
     if grep -F 'primary	abcd' "$clipboard_trace" >/dev/null 2>&1; then
@@ -4597,7 +4913,7 @@ canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
-target_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.4 * cell) }')"
+target_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.25 * cell) }')"
 target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
 xdotool mousemove "$target_x" "$target_y"
 xdotool click 1

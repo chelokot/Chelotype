@@ -108,6 +108,9 @@ fn build_ui(app: &Application) {
     let geometry_trace = std::env::var("CHELOTYPE_GEOMETRY_TRACE")
         .ok()
         .map(std::path::PathBuf::from);
+    let tab_trace = std::env::var("CHELOTYPE_TAB_TRACE")
+        .ok()
+        .map(std::path::PathBuf::from);
     let mouse_mode = std::rc::Rc::new(std::cell::Cell::new(crate::backend::MouseMode::default()));
     let pointer_interaction =
         std::rc::Rc::new(std::cell::RefCell::new(PointerInteraction::default()));
@@ -888,6 +891,7 @@ fn build_ui(app: &Application) {
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
         let split_resize_drag = split_resize_drag.clone();
+        let drag_gesture_moved = drag_gesture_moved.clone();
         motion_controller.connect_motion(move |controller, x, y| {
             crate::logging::debug_log(&format!("mouse motion x={x:.1} y={y:.1}"));
             if split_resize_drag.get().is_some()
@@ -900,6 +904,41 @@ fn build_ui(app: &Application) {
                 widget.set_cursor_from_name(Some("text"));
             }
             let current_mode = current_mouse_mode(&content, mode.get());
+            if !current_mode.sends_press_release()
+                && controller
+                    .current_event_state()
+                    .contains(gtk::gdk::ModifierType::BUTTON1_MASK)
+            {
+                if let Some(target) = pointer_grid_position_for_capture_or_panes(
+                    metrics.get(),
+                    pointer_pane_capture.get(),
+                    &pane_hits.borrow(),
+                    x,
+                    y,
+                ) {
+                    let effects = pointer_interaction
+                        .borrow_mut()
+                        .motion(MouseMode::default(), target.position);
+                    if effects.iter().any(|effect| {
+                        matches!(effect, InteractionEffect::SelectionChanged(Some(_)))
+                    }) {
+                        drag_gesture_moved.set(true);
+                    }
+                    crate::logging::debug_log(&format!(
+                        "mouse selection motion effects={effects:?}"
+                    ));
+                    apply_interaction_effects(
+                        effects,
+                        &workspace,
+                        &selection,
+                        &selection_text,
+                        &selection_dirty,
+                        &keyboard_selection,
+                        &content,
+                    );
+                }
+                return;
+            }
             if !current_mode.sends_drag() {
                 return;
             }
@@ -982,11 +1021,14 @@ fn build_ui(app: &Application) {
     }
 
     let app_for_tick = app.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(8), move || {
+    glib::timeout_add_local(std::time::Duration::from_millis(4), move || {
         let measured_metrics = terminal_metrics_for_widget(canvas.widget());
         cell_metrics.set(measured_metrics.map(|metrics| metrics.cell));
         if let (Some(path), Some(metrics)) = (&geometry_trace, measured_metrics) {
             trace_geometry(path, canvas.widget(), metrics);
+        }
+        if let Some(path) = &tab_trace {
+            trace_tabs(path, &tab_bar, &workspace_rc.borrow());
         }
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
             && last_size.get() != Some(size)
@@ -1333,6 +1375,19 @@ impl TabPages {
         self.entries.retain(|entry| entry.page != *page);
     }
 
+    fn reorder_page(&mut self, page: &adw::TabPage, position: usize) {
+        let Some(index) = self.entries.iter().position(|entry| entry.page == *page) else {
+            return;
+        };
+        let position = position.min(self.entries.len().saturating_sub(1));
+        let entry = self.entries.remove(index);
+        self.entries.insert(position, entry);
+    }
+
+    fn id_at_position(&self, position: usize) -> Option<TabId> {
+        self.entries.get(position).map(|entry| entry.id)
+    }
+
     fn sync_title(&self, workspace: &TerminalWorkspace, id: TabId) {
         let Some(page) = self.page_for_id(id) else {
             return;
@@ -1546,6 +1601,32 @@ fn install_tab_actions(
         });
     }
     tab_bar.add_controller(double_click);
+
+    let middle_click = gtk::GestureClick::new();
+    middle_click.set_button(2);
+    {
+        let tabs = tabs.clone();
+        middle_click.connect_pressed(move |gesture, _press_count, x, _y| {
+            let Some(widget) = gesture.widget() else {
+                return;
+            };
+            let count = tabs.tab_pages.borrow().entries.len();
+            if count <= 1 {
+                return;
+            }
+            let width = widget.allocated_width().max(1) as f64;
+            let position = ((x / width) * count as f64).floor() as usize;
+            let Some(id) = tabs
+                .tab_pages
+                .borrow()
+                .id_at_position(position.min(count - 1))
+            else {
+                return;
+            };
+            close_tab(&tabs, id);
+        });
+    }
+    tab_bar.add_controller(middle_click);
 }
 
 fn connect_native_tabs(
@@ -1575,6 +1656,9 @@ fn connect_native_tabs(
             tabs.workspace
                 .borrow_mut()
                 .reorder(id, position.max(0) as usize);
+            tabs.tab_pages
+                .borrow_mut()
+                .reorder_page(page, position.max(0) as usize);
         });
     }
     {
@@ -2478,12 +2562,7 @@ fn apply_style(canvas: &gtk::DrawingArea) {
 }
 
 fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: TerminalMetrics) {
-    use std::io::Write;
-    let Ok(mut file) = std::fs::File::create(path) else {
-        return;
-    };
-    let _ = writeln!(
-        file,
+    let content = format!(
         "canvas_x={}\ncanvas_y={}\ncanvas_width={}\ncanvas_height={}\ncell_width={:.6}\nline_height={:.6}\ncols={}\nrows={}",
         widget.allocation().x(),
         widget.allocation().y(),
@@ -2494,6 +2573,34 @@ fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: Te
         metrics.size.cols,
         metrics.size.rows,
     );
+    write_trace_file(path, &content);
+}
+
+fn trace_tabs(path: &std::path::Path, tab_bar: &adw::TabBar, workspace: &TerminalWorkspace) {
+    let tabs = workspace.tabs();
+    let selected_index = tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let content = format!(
+        "tab_bar_x={}\ntab_bar_y={}\ntab_bar_width={}\ntab_bar_height={}\ntab_count={}\nselected_index={}",
+        tab_bar.allocation().x(),
+        tab_bar.allocation().y(),
+        tab_bar.allocated_width(),
+        tab_bar.allocated_height(),
+        tabs.len(),
+        selected_index,
+    );
+    write_trace_file(path, &content);
+}
+
+fn write_trace_file(path: &std::path::Path, content: &str) {
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("trace")
+    ));
+    if std::fs::write(&tmp, content).is_ok() {
+        let _ = std::fs::rename(tmp, path);
+    }
 }
 
 fn apply_interaction_effects(
