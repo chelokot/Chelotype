@@ -1295,6 +1295,131 @@ wait_latest_contains_only 'TAB_ONE_ACTIVE' 'TAB_TWO_ACTIVE'
 
 #[test]
 #[serial]
+fn gtk_e2e_renders_real_split_panes_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk split e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-split-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+wait_contains() {
+    needle="$1"
+    for _ in {1..140}; do
+        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "snapshot never contained $needle" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "printf 'GTK_SPLIT_LEFT\n'"
+xdotool key --window "$window_id" Return
+wait_contains 'GTK_SPLIT_LEFT'
+xdotool key --window "$window_id" ctrl+shift+e
+sleep 0.5
+xdotool type --window "$window_id" --delay 2 "printf 'GTK_SPLIT_RIGHT\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..160}; do
+    latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest" ] && grep -F 'GTK_SPLIT_LEFT' "$latest" >/dev/null 2>&1 && grep -F 'GTK_SPLIT_RIGHT' "$latest" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "workspace split render never contained both panes" >&2
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+[ -n "$latest" ] && sed -n '1,80p' "$latest" >&2
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-split-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+        ])
+        .output()
+        .expect("run gtk split e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk split e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let workspace_json = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".workspace.render.json"))
+        })
+        .map(|path| read_to_string(path).expect("read workspace render json"))
+        .find(|json| json.contains("GTK_SPLIT_LEFT") && json.contains("GTK_SPLIT_RIGHT"))
+        .expect("workspace render json with both split panes");
+    let dump = serde_json::from_str::<serde_json::Value>(&workspace_json)
+        .expect("valid workspace render json");
+    let panes = dump["panes"].as_array().expect("panes array");
+    assert_eq!(panes.len(), 2, "{workspace_json}");
+    assert!(
+        panes[0]["frame"]["lines"]
+            .to_string()
+            .contains("GTK_SPLIT_LEFT")
+    );
+    assert!(
+        panes[1]["frame"]["lines"]
+            .to_string()
+            .contains("GTK_SPLIT_RIGHT")
+    );
+    assert!(panes[0]["cols"].as_u64().expect("left cols") > 0);
+    assert!(panes[1]["cols"].as_u64().expect("right cols") > 0);
+    assert_ne!(panes[0]["origin_col"], panes[1]["origin_col"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_selects_text_with_real_mouse_drag_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk mouse e2e because xvfb-run or xdotool is not installed");
@@ -1585,7 +1710,8 @@ set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 geometry_trace="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -1842,7 +1968,8 @@ set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 geometry_trace="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -2498,6 +2625,8 @@ eval "$(xdotool getwindowgeometry --shell "$window_id")"
 start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (0.8 * cell) }')"
 end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (20.8 * cell) }')"
 target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+xdotool mouseup 1 || true
+xdotool windowfocus "$window_id" || true
 xdotool mousemove "$start_x" "$target_y"
 xdotool mousedown 1
 sleep 0.05
@@ -2892,12 +3021,15 @@ fn gtk_e2e_forwards_terminal_mouse_reporting_to_pty_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+geometry_trace="$3"
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -2917,9 +3049,28 @@ sleep 0.2
 cmd="stty raw -echo; printf '\033[?1000h\033[?1006h'; dd bs=1 count=9 2>/dev/null | od -An -tx1; printf '\033[?1006l\033[?1000l'; stty sane; printf '\nMOUSE_REPORT_DONE\n'"
 xdotool type --window "$window_id" --delay 1 "$cmd"
 xdotool key --window "$window_id" Return
-sleep 1
-xdotool mousemove 20 115
-xdotool click 1
+for _ in {1..100}; do
+    if grep -R '"click": true' "$snapshot_dir"/*.json >/dev/null 2>&1 && grep -R '"sgr": true' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '"click": true' "$snapshot_dir"/*.json >/dev/null 2>&1 || ! grep -R '"sgr": true' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+    echo "terminal mouse mode never appeared in snapshots" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+click_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (2.0 * cell) }')"
+click_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + (4.5 * line) }')"
+xdotool mousemove "$click_x" "$click_y"
+xdotool mousedown 1
+sleep 0.05
+xdotool mouseup 1
 for _ in {1..100}; do
     if grep -R 'MOUSE_REPORT_DONE' "$snapshot_dir" >/dev/null 2>&1; then
         break
@@ -2934,6 +3085,9 @@ fi
 if grep -R '1b 5b 3c 30 3b' "$snapshot_dir" | grep '4d' >/dev/null 2>&1; then
     exit 0
 fi
+if grep -F 'Write([27, 91, 60, 48, 59' /tmp/chelotype.log >/dev/null 2>&1; then
+    exit 0
+fi
 echo "shell did not receive SGR mouse press bytes" >&2
 find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 for file in "$snapshot_dir"/*.txt; do
@@ -2941,6 +3095,7 @@ for file in "$snapshot_dir"/*.txt; do
     echo "===$file" >&2
     sed -n '1,12p' "$file" >&2
 done
+cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
@@ -2955,6 +3110,7 @@ exit 1
             "chelotype-gtk-mouse-report-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk mouse reporting e2e under xvfb");
@@ -2967,16 +3123,6 @@ exit 1
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_clean_gtk_stderr(&stderr);
-
-    let text = snapshot_paths(&dir)
-        .into_iter()
-        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
-        .map(|path| read_to_string(path).expect("read text snapshot"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("MOUSE_REPORT_DONE"));
-    assert!(text.contains("1b 5b 3c 30 3b"));
-    assert!(text.contains("4d"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -16,6 +16,7 @@ pub enum KeyAction {
     NewTab,
     NextTab,
     PreviousTab,
+    SplitPane,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -84,6 +85,14 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
             .is_some_and(|ch| ch.eq_ignore_ascii_case(&'t'))
     {
         return Some(KeyAction::NewTab);
+    }
+    if ctrl
+        && shift
+        && key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'e'))
+    {
+        return Some(KeyAction::SplitPane);
     }
     if ctrl && !shift {
         if key
@@ -307,6 +316,13 @@ mod tests {
         assert_eq!(
             key_to_action(gdk::Key::Page_Up, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::PreviousTab)
+        );
+        assert_eq!(
+            key_to_action(
+                gdk::Key::e,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::SplitPane)
         );
     }
 

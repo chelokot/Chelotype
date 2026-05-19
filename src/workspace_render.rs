@@ -68,6 +68,20 @@ impl WorkspaceRenderFrame {
                 .collect(),
         }
     }
+
+    pub fn active_content_text(&self) -> String {
+        self.panes
+            .iter()
+            .find(|pane| pane.active)
+            .map(|pane| {
+                pane.frame
+                    .lines
+                    .iter()
+                    .map(|line| line.text.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy)]

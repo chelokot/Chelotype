@@ -8,7 +8,7 @@ use crate::interaction::{
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderLine, Renderer};
 use crate::selection::{GridPoint, SelectionRange, selected_text};
-use crate::snapshot::write_snapshot;
+use crate::snapshot::{write_snapshot, write_workspace_render_snapshot};
 use crate::workspace::TerminalWorkspace;
 use crate::workspace_render::WorkspaceRenderFrame;
 use gtk::gdk;
@@ -140,7 +140,12 @@ impl HeadlessAction {
             Self::Split | Self::PaneNext | Self::PanePrevious => true,
             Self::Key(key) => matches!(
                 key_to_action(key.key, key.modifiers),
-                Some(KeyAction::NewTab | KeyAction::NextTab | KeyAction::PreviousTab)
+                Some(
+                    KeyAction::NewTab
+                        | KeyAction::NextTab
+                        | KeyAction::PreviousTab
+                        | KeyAction::SplitPane
+                )
             ),
             _ => false,
         }
@@ -189,6 +194,10 @@ impl WorkspaceHeadlessRuntime {
                         }
                         KeyAction::PreviousTab => {
                             workspace.activate_previous();
+                            Ok(())
+                        }
+                        KeyAction::SplitPane => {
+                            workspace.split_active_with(headless_shell_command())?;
                             Ok(())
                         }
                         KeyAction::CopySelection
@@ -288,6 +297,7 @@ impl HeadlessRuntime {
                         | KeyAction::NewTab
                         | KeyAction::NextTab
                         | KeyAction::PreviousTab
+                        | KeyAction::SplitPane
                         | KeyAction::ZoomIn
                         | KeyAction::ZoomOut
                         | KeyAction::ZoomReset => Ok(()),
@@ -585,43 +595,8 @@ fn wait_for_workspace_content(
 }
 
 fn write_workspace_render_dump(rendered: WorkspaceRenderFrame) -> std::io::Result<PathBuf> {
-    let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
-        .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let base = std::path::Path::new(&dir).join(format!("headless_workspace_{ts}"));
-    if let Some(parent) = base.parent() {
-        create_dir_all(parent)?;
-    }
-    let json = serde_json::to_vec_pretty(&rendered)?;
-    let mut json_file = File::create(base.with_extension("workspace.render.json"))?;
-    json_file.write_all(&json)?;
-    let html = workspace_render_to_html(&rendered);
-    let mut html_file = File::create(base.with_extension("workspace.markup.html"))?;
-    html_file.write_all(html.as_bytes())?;
-    Ok(base)
-}
-
-fn workspace_render_to_html(rendered: &WorkspaceRenderFrame) -> String {
-    let mut html = String::from(
-        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">",
-    );
-    for pane in &rendered.panes {
-        html.push_str(&format!(
-            "<section data-pane-id=\"{}\" data-active=\"{}\">",
-            pane.pane_id, pane.active
-        ));
-        html.push_str(&pane.frame.history_markup);
-        if !pane.frame.input_markup.is_empty() {
-            html.push('\n');
-            html.push_str(&pane.frame.input_markup);
-        }
-        html.push_str("</section>");
-    }
-    html.push_str("</body></html>");
-    html
+    write_workspace_render_snapshot(&rendered, "headless_workspace")
+        .ok_or_else(|| std::io::Error::other("workspace render snapshot write failed"))
 }
 
 fn write_render_dump(

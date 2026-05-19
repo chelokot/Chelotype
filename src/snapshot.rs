@@ -2,6 +2,7 @@ use crate::backend::RenderableContentOwned;
 use crate::cell_text::lines_to_text;
 use crate::selection::{SelectionRange, selected_text};
 use crate::terminal_grid::{TerminalCell, TerminalLineMetadata, TerminalSemanticPrompt};
+use crate::workspace_render::WorkspaceRenderFrame;
 use serde::Serialize;
 use std::fs::{File, create_dir_all};
 use std::io::Write;
@@ -141,6 +142,32 @@ pub fn write_snapshot_with_selection(
     Some(base)
 }
 
+pub fn write_workspace_render_snapshot(
+    snapshot: &WorkspaceRenderFrame,
+    label: &str,
+) -> Option<PathBuf> {
+    let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
+        .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let base = Path::new(&dir).join(format!("{label}_{ts}"));
+    if let Err(err) = create_dir_all(base.parent().unwrap_or(Path::new("/"))) {
+        eprintln!("snapshot dir error: {err}");
+        return None;
+    }
+    let _ = write_file(
+        base.with_extension("workspace.render.json"),
+        serde_json::to_vec_pretty(snapshot).unwrap_or_default(),
+    );
+    let _ = write_file(
+        base.with_extension("workspace.markup.html"),
+        workspace_render_to_html(snapshot).into_bytes(),
+    );
+    Some(base)
+}
+
 fn snapshot_to_plain(snapshot: &SnapshotJson) -> String {
     snapshot.text.clone()
 }
@@ -200,6 +227,26 @@ fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
         if line_idx + 1 != snapshot.lines.len() {
             out.push('\n');
         }
+    }
+    out.push_str("</body></html>");
+    out
+}
+
+fn workspace_render_to_html(snapshot: &WorkspaceRenderFrame) -> String {
+    let mut out = String::from(
+        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">",
+    );
+    for pane in &snapshot.panes {
+        out.push_str(&format!(
+            "<section data-pane-id=\"{}\" data-active=\"{}\">",
+            pane.pane_id, pane.active
+        ));
+        out.push_str(&pane.frame.history_markup);
+        if !pane.frame.input_markup.is_empty() {
+            out.push('\n');
+            out.push_str(&pane.frame.input_markup);
+        }
+        out.push_str("</section>");
     }
     out.push_str("</body></html>");
     out

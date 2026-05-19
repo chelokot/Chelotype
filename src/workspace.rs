@@ -13,8 +13,7 @@ impl PaneId {
         self.0
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_raw(raw: u64) -> Self {
+    pub fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 }
@@ -133,6 +132,11 @@ impl TerminalWorkspace {
         });
         tab.active_pane = id;
         Ok(id)
+    }
+
+    pub fn split_shell_active(&mut self) -> io::Result<PaneId> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        self.split_active_with(CommandBuilder::new(shell))
     }
 
     pub fn add_shell_tab(&mut self) -> io::Result<TabId> {
@@ -289,6 +293,19 @@ impl TerminalWorkspace {
 
     pub fn resize_active(&mut self, size: ScreenSize) -> io::Result<()> {
         self.active_pane_mut().resize(size)
+    }
+
+    pub fn resize_active_tab(&mut self, size: ScreenSize) -> io::Result<()> {
+        let tab = self.active_tab_mut();
+        let pane_count = tab.panes.len().max(1);
+        let base_cols = size.cols / pane_count as u16;
+        let remainder = size.cols % pane_count as u16;
+        for (index, pane) in tab.panes.iter_mut().enumerate() {
+            let cols = base_cols + u16::from((index as u16) < remainder);
+            pane.backend
+                .resize(ScreenSize::new(cols.max(1), size.rows)?)?;
+        }
+        Ok(())
     }
 
     pub fn scroll_active(&mut self, lines: i32) -> io::Result<()> {
@@ -619,6 +636,35 @@ mod tests {
 
         let _ = workspace.write_active(b"exit\n");
         assert!(workspace.activate_pane(second_pane));
+        let _ = workspace.write_active(b"exit\n");
+    }
+
+    #[test]
+    fn workspace_resizes_active_tab_panes_evenly() {
+        let mut workspace = TerminalWorkspace::spawn_with(shell_command()).expect("spawn tab");
+        let first_pane = workspace.active_pane_id();
+        let second_pane = workspace
+            .split_active_with(shell_command())
+            .expect("spawn split pane");
+
+        workspace
+            .resize_active_tab(ScreenSize::new(81, 12).expect("valid size"))
+            .expect("resize panes");
+        assert!(workspace.activate_pane(first_pane));
+        let first = workspace
+            .snapshot_active_renderable()
+            .expect("first snapshot");
+        assert_eq!(first.lines.len(), 12);
+        assert_eq!(first.lines[0].len(), 41);
+        assert!(workspace.activate_pane(second_pane));
+        let second = workspace
+            .snapshot_active_renderable()
+            .expect("second snapshot");
+        assert_eq!(second.lines.len(), 12);
+        assert_eq!(second.lines[0].len(), 40);
+
+        let _ = workspace.write_active(b"exit\n");
+        assert!(workspace.activate_pane(first_pane));
         let _ = workspace.write_active(b"exit\n");
     }
 }

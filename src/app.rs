@@ -12,9 +12,10 @@ use crate::selection::{
     GridPoint, SelectionRange, anchor_range_to_display, line_range, line_significant_len,
     selected_text, viewport_range_for_display, word_range_at,
 };
-use crate::snapshot::write_snapshot_with_selection;
+use crate::snapshot::{write_snapshot_with_selection, write_workspace_render_snapshot};
 use crate::terminal_font::metrics_for_widget;
 use crate::workspace::{TabId, TerminalWorkspace};
+use crate::workspace_render::{WorkspaceRenderFrame, WorkspaceRenderLayout};
 use adw::Application;
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -98,6 +99,7 @@ fn build_ui(app: &Application) {
         .map(|scenario| std::time::Instant::now() + scenario.timeout);
     let last_size = std::rc::Rc::new(std::cell::Cell::new(None::<ScreenSize>));
     let cell_metrics = std::rc::Rc::new(std::cell::Cell::new(None::<CellMetrics>));
+    let active_pane_origin_col = std::rc::Rc::new(std::cell::Cell::new(0usize));
     let geometry_trace = std::env::var("CHELOTYPE_GEOMETRY_TRACE")
         .ok()
         .map(std::path::PathBuf::from);
@@ -272,6 +274,18 @@ fn build_ui(app: &Application) {
                             },
                         );
                     }
+                    KeyAction::SplitPane => {
+                        if workspace.borrow_mut().split_shell_active().is_ok() {
+                            force_active_workspace_snapshot(
+                                &force_snapshot,
+                                &selection,
+                                &selection_text,
+                                &selection_dirty,
+                                last_size.get(),
+                                &workspace,
+                            );
+                        }
+                    }
                     KeyAction::NextTab => {
                         workspace.borrow_mut().activate_next();
                         let active = workspace.borrow().active_tab_id();
@@ -312,6 +326,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -324,12 +339,16 @@ fn build_ui(app: &Application) {
             canvas_widget.grab_focus();
             drag_gesture_moved.set(false);
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
-            if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
+            if let Some(position) =
+                pointer_grid_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+            {
                 crate::logging::debug_log(&format!(
                     "mouse press grid col={} row={}",
                     position.column, position.row
                 ));
-                if !mode.get().sends_press_release()
+                let current_mode = current_mouse_mode(&content, mode.get());
+                crate::logging::debug_log(&format!("mouse press mode={current_mode:?}"));
+                if !current_mode.sends_press_release()
                     && select_mouse_click_range(
                         &content,
                         &selection,
@@ -344,9 +363,10 @@ fn build_ui(app: &Application) {
                     return;
                 }
                 let button = mouse_button_from_gesture(gesture).unwrap_or(MouseButton::Left);
-                let effects = pointer_interaction
-                    .borrow_mut()
-                    .press(mode.get(), button, position);
+                let effects =
+                    pointer_interaction
+                        .borrow_mut()
+                        .press(current_mode, button, position);
                 crate::logging::debug_log(&format!("mouse press effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
@@ -362,6 +382,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -371,7 +392,8 @@ fn build_ui(app: &Application) {
         let drag_gesture_moved = drag_gesture_moved.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
-            if drag_gesture_moved.get() && !mode.get().sends_press_release() {
+            let current_mode = current_mouse_mode(&content, mode.get());
+            if drag_gesture_moved.get() && !current_mode.sends_press_release() {
                 let effects = pointer_interaction.borrow_mut().cancel();
                 crate::logging::debug_log(&format!(
                     "mouse release after drag gesture effects={effects:?}"
@@ -386,11 +408,14 @@ fn build_ui(app: &Application) {
                 );
                 return;
             }
-            if let Some(cell_position) = pointer_grid_position(metrics.get(), x, y) {
-                let position = if mode.get().sends_press_release() {
+            if let Some(cell_position) =
+                pointer_grid_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+            {
+                let position = if current_mode.sends_press_release() {
                     cell_position
                 } else {
-                    pointer_cursor_position(metrics.get(), x, y).unwrap_or(cell_position)
+                    pointer_cursor_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+                        .unwrap_or(cell_position)
                 };
                 crate::logging::debug_log(&format!(
                     "mouse release grid col={} row={}",
@@ -398,7 +423,7 @@ fn build_ui(app: &Application) {
                 ));
                 let effects = pointer_interaction
                     .borrow_mut()
-                    .release(mode.get(), position);
+                    .release(current_mode, position);
                 crate::logging::debug_log(&format!("mouse release effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
@@ -449,6 +474,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -458,12 +484,14 @@ fn build_ui(app: &Application) {
         let drag_gesture_moved = drag_gesture_moved.clone();
         let canvas_widget = canvas.widget().clone();
         drag_controller.connect_drag_begin(move |_gesture, x, y| {
-            if mode.get().sends_press_release() {
+            if current_mouse_mode(&content, mode.get()).sends_press_release() {
                 return;
             }
             canvas_widget.grab_focus();
             drag_gesture_moved.set(false);
-            if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
+            if let Some(position) =
+                pointer_grid_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+            {
                 let effects = pointer_interaction.borrow_mut().press(
                     MouseMode::default(),
                     MouseButton::Left,
@@ -484,6 +512,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -492,15 +521,18 @@ fn build_ui(app: &Application) {
         let pointer_interaction = pointer_interaction.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         drag_controller.connect_drag_update(move |gesture, offset_x, offset_y| {
-            if mode.get().sends_press_release() {
+            if current_mouse_mode(&content, mode.get()).sends_press_release() {
                 return;
             }
             let Some((start_x, start_y)) = gesture.start_point() else {
                 return;
             };
-            if let Some(position) =
-                pointer_grid_position(metrics.get(), start_x + offset_x, start_y + offset_y)
-            {
+            if let Some(position) = pointer_grid_position_in_active_pane(
+                metrics.get(),
+                active_origin.get(),
+                start_x + offset_x,
+                start_y + offset_y,
+            ) {
                 let effects = pointer_interaction
                     .borrow_mut()
                     .motion(MouseMode::default(), position);
@@ -525,6 +557,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -533,15 +566,18 @@ fn build_ui(app: &Application) {
         let pointer_interaction = pointer_interaction.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         drag_controller.connect_drag_end(move |gesture, offset_x, offset_y| {
-            if mode.get().sends_press_release() {
+            if current_mouse_mode(&content, mode.get()).sends_press_release() {
                 return;
             }
             let Some((start_x, start_y)) = gesture.start_point() else {
                 return;
             };
-            let effects = if let Some(position) =
-                pointer_grid_position(metrics.get(), start_x + offset_x, start_y + offset_y)
-            {
+            let effects = if let Some(position) = pointer_grid_position_in_active_pane(
+                metrics.get(),
+                active_origin.get(),
+                start_x + offset_x,
+                start_y + offset_y,
+            ) {
                 pointer_interaction
                     .borrow_mut()
                     .release(MouseMode::default(), position)
@@ -595,6 +631,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -603,17 +640,20 @@ fn build_ui(app: &Application) {
         let pointer_interaction = pointer_interaction.clone();
         motion_controller.connect_motion(move |_controller, x, y| {
             crate::logging::debug_log(&format!("mouse motion x={x:.1} y={y:.1}"));
-            if !mode.get().sends_drag() {
+            let current_mode = current_mouse_mode(&content, mode.get());
+            if !current_mode.sends_drag() {
                 return;
             }
-            if let Some(position) = pointer_grid_position(metrics.get(), x, y) {
+            if let Some(position) =
+                pointer_grid_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+            {
                 crate::logging::debug_log(&format!(
                     "mouse motion grid col={} row={}",
                     position.column, position.row
                 ));
                 let effects = pointer_interaction
                     .borrow_mut()
-                    .motion(mode.get(), position);
+                    .motion(current_mode, position);
                 crate::logging::debug_log(&format!("mouse motion effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
@@ -686,11 +726,127 @@ fn build_ui(app: &Application) {
         }
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
             && last_size.get() != Some(size)
-            && workspace_rc.borrow_mut().resize_active(size).is_ok()
+            && workspace_rc.borrow_mut().resize_active_tab(size).is_ok()
         {
             last_size.set(Some(size));
         }
-        let terminal_content = if force_snapshot.replace(false) {
+        let force = force_snapshot.replace(false);
+        let selection_changed = selection_dirty.replace(false);
+        let pane_count = workspace_rc.borrow().active_tab_panes().len();
+        let layout = measured_metrics.map(|metrics| WorkspaceRenderLayout {
+            cols: usize::from(metrics.size.cols),
+            rows: usize::from(metrics.size.rows),
+        });
+
+        if pane_count > 1 {
+            let panes = workspace_rc.borrow_mut().snapshot_active_tab_renderables();
+            let Some(active_content) = panes
+                .iter()
+                .find(|pane| pane.active)
+                .map(|pane| pane.content.clone())
+            else {
+                return glib::ControlFlow::Continue;
+            };
+            mouse_mode.set(active_content.mouse);
+            *last_content.borrow_mut() = Some(active_content.clone());
+            let visible_selection = visible_selection_matching_text(
+                &active_content,
+                selection.get(),
+                selection_text.borrow().as_deref(),
+            );
+            if selection_text.borrow().is_none()
+                && let Some(visible_selection) = visible_selection
+            {
+                *selection_text.borrow_mut() =
+                    text_for_viewport_selection(&active_content, visible_selection);
+            }
+            let allocations_before = crate::allocation_trace::snapshot();
+            let render_started = std::time::Instant::now();
+            let rendered = WorkspaceRenderFrame::from_active_tab_panes_with_layout(
+                panes,
+                visible_selection,
+                layout,
+            );
+            crate::perf_trace::record_duration("gtk_render", render_started.elapsed());
+            active_pane_origin_col.set(
+                rendered
+                    .panes
+                    .iter()
+                    .find(|pane| pane.active)
+                    .map(|pane| pane.origin_col)
+                    .unwrap_or(0),
+            );
+            let allocations_after = crate::allocation_trace::snapshot();
+            crate::perf_trace::record_counter(
+                "gtk_render_allocs",
+                allocations_after
+                    .allocations
+                    .saturating_sub(allocations_before.allocations),
+            );
+            crate::perf_trace::record_counter(
+                "gtk_render_alloc_bytes",
+                allocations_after
+                    .bytes
+                    .saturating_sub(allocations_before.bytes),
+            );
+            if crate::perf_trace::enabled()
+                && let Some(rss_kib) = crate::process_metrics::resident_set_kib()
+            {
+                crate::perf_trace::record_counter("process_rss_kib", rss_kib);
+            }
+            canvas.set_workspace_render(rendered.clone());
+            record_pending_input_latency(&pending_input_latency);
+            if selection_changed {
+                copy_selection_to_primary(canvas.widget(), &selection_text);
+            }
+            if let Some(scenario) = &ui_e2e {
+                let text = rendered
+                    .panes
+                    .iter()
+                    .flat_map(|pane| pane.frame.lines.iter())
+                    .map(|line| line.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if scenario
+                    .expected
+                    .iter()
+                    .all(|expected| text.contains(expected))
+                {
+                    gtk::test_widget_wait_for_draw(canvas.widget());
+                    let _ =
+                        write_snapshot_with_selection(active_content, "gtk_e2e", visible_selection);
+                    let _ = write_workspace_render_snapshot(&rendered, "gtk_e2e_workspace");
+                    app_for_tick.quit();
+                    return glib::ControlFlow::Break;
+                }
+                if ui_e2e_deadline.is_some_and(|deadline| std::time::Instant::now() > deadline) {
+                    eprintln!("gtk e2e expected content did not appear: {text}");
+                    std::process::exit(1);
+                }
+            }
+            if snapshot_enabled
+                && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+                    || selection_changed
+                    || force)
+            {
+                *last_snapshot.borrow_mut() = std::time::Instant::now();
+                let _ = write_workspace_render_snapshot(&rendered, "workspace_frame");
+                if selection_text.borrow().is_none()
+                    && let Some(visible_selection) = visible_selection
+                {
+                    *selection_text.borrow_mut() =
+                        text_for_viewport_selection(&active_content, visible_selection);
+                }
+                let _ = write_snapshot_with_selection(active_content, "frame", visible_selection);
+                if selection.get().is_some() {
+                    copy_selection_to_primary(canvas.widget(), &selection_text);
+                }
+            }
+            return glib::ControlFlow::Continue;
+        }
+
+        active_pane_origin_col.set(0);
+        let terminal_content = if force {
             workspace_rc.borrow_mut().snapshot_active_renderable()
         } else {
             workspace_rc
@@ -778,7 +934,16 @@ fn build_ui(app: &Application) {
                 selection.get(),
                 selection_text.borrow().as_deref(),
             );
+            if selection_text.borrow().is_none()
+                && let Some(visible_selection) = visible_selection
+            {
+                *selection_text.borrow_mut() =
+                    text_for_viewport_selection(&content, visible_selection);
+            }
             let _ = write_snapshot_with_selection(content, "frame", visible_selection);
+            if selection.get().is_some() {
+                copy_selection_to_primary(canvas.widget(), &selection_text);
+            }
         }
         glib::ControlFlow::Continue
     });
@@ -1306,7 +1471,7 @@ fn force_active_workspace_snapshot(
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
 ) {
     if let Some(size) = size {
-        let _ = workspace.borrow_mut().resize_active(size);
+        let _ = workspace.borrow_mut().resize_active_tab(size);
     }
     clear_selection(selection, selection_text, selection_dirty);
     force_snapshot.set(true);
@@ -1584,6 +1749,17 @@ fn write_key_with_selection(
     }
     clear_selection(selection, selection_text, selection_dirty);
     let _ = workspace.borrow_mut().write_active(&replacement);
+}
+
+fn current_mouse_mode(
+    content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+    fallback: MouseMode,
+) -> MouseMode {
+    content
+        .borrow()
+        .as_ref()
+        .map(|content| content.mouse)
+        .unwrap_or(fallback)
 }
 
 #[derive(Clone, Copy)]
@@ -2024,6 +2200,16 @@ fn pointer_grid_position(
     })
 }
 
+fn pointer_grid_position_in_active_pane(
+    metrics: Option<CellMetrics>,
+    origin_col: usize,
+    x: f64,
+    y: f64,
+) -> Option<MouseGridPosition> {
+    let metrics = metrics?;
+    pointer_grid_position(Some(metrics), x - origin_col as f64 * metrics.width, y)
+}
+
 fn pointer_cursor_position(
     metrics: Option<CellMetrics>,
     x: f64,
@@ -2037,6 +2223,16 @@ fn pointer_cursor_position(
         column: ((x / metrics.width).round() as i32).clamp(0, u16::MAX as i32) as u16,
         row: ((y / metrics.height).floor() as i32).clamp(0, u16::MAX as i32) as u16,
     })
+}
+
+fn pointer_cursor_position_in_active_pane(
+    metrics: Option<CellMetrics>,
+    origin_col: usize,
+    x: f64,
+    y: f64,
+) -> Option<MouseGridPosition> {
+    let metrics = metrics?;
+    pointer_cursor_position(Some(metrics), x - origin_col as f64 * metrics.width, y)
 }
 
 fn mouse_button_from_gesture(gesture: &gtk::GestureClick) -> Option<MouseButton> {
