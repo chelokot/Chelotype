@@ -19,6 +19,7 @@ pub mod snapshot;
 pub mod terminal_font;
 pub mod terminal_grid;
 pub mod workspace;
+pub mod workspace_render;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: allocation_trace::CountingAllocator = allocation_trace::CountingAllocator;

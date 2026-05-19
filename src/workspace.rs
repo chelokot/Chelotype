@@ -8,6 +8,12 @@ pub struct TabId(u64);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaneId(u64);
 
+impl PaneId {
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TabInfo {
     pub id: TabId,

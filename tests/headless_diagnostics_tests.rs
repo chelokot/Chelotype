@@ -228,6 +228,76 @@ fn headless_mode_exports_osc133_command_blocks() {
 
 #[test]
 #[serial]
+fn headless_mode_exports_workspace_split_render_dump() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-workspace-split-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "raw:printf 'LEFT_SPLIT_STATE\\n'\\n|wait:LEFT_SPLIT_STATE|split|raw:printf 'RIGHT_SPLIT_STATE\\n'\\n",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "LEFT_SPLIT_STATE|RIGHT_SPLIT_STATE")
+        .output()
+        .expect("run workspace split headless binary");
+    assert!(
+        output.status.success(),
+        "workspace split headless failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let render_dump = snapshot_file_ending_with(&paths, ".workspace.render.json");
+    let json = read_to_string(render_dump).expect("read workspace render dump");
+    let dump = serde_json::from_str::<serde_json::Value>(&json).expect("valid render dump");
+    let panes = dump["panes"].as_array().expect("workspace panes array");
+    assert_eq!(panes.len(), 2, "expected two split panes: {json}");
+    assert!(
+        panes[0]["frame"]["lines"]
+            .to_string()
+            .contains("LEFT_SPLIT_STATE")
+    );
+    assert!(
+        !panes[0]["frame"]["lines"]
+            .to_string()
+            .contains("RIGHT_SPLIT_STATE")
+    );
+    assert!(
+        panes[1]["frame"]["lines"]
+            .to_string()
+            .contains("RIGHT_SPLIT_STATE")
+    );
+    assert!(
+        !panes[1]["frame"]["lines"]
+            .to_string()
+            .contains("LEFT_SPLIT_STATE")
+    );
+    assert_eq!(panes[0]["active"], false);
+    assert_eq!(panes[1]["active"], true);
+
+    let html = read_to_string(snapshot_file_ending_with(&paths, ".workspace.markup.html"))
+        .expect("read workspace markup");
+    assert!(html.contains("data-pane-id=\"1\""));
+    assert!(html.contains("data-pane-id=\"2\""));
+    assert!(html.contains("data-active=\"true\""));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_replays_scripted_interaction_actions() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-scripted-{}",

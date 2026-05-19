@@ -1,4 +1,4 @@
-use crate::backend::{ScreenSize, TerminalBackend};
+use crate::backend::{ScreenSize, TerminalBackend, headless_shell_command};
 use crate::cell_text::lines_to_text;
 use crate::command_blocks::CommandBlock;
 use crate::input::{KeyAction, key_to_action};
@@ -9,6 +9,8 @@ use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderLine, Renderer};
 use crate::selection::{GridPoint, SelectionRange, selected_text};
 use crate::snapshot::write_snapshot;
+use crate::workspace::TerminalWorkspace;
+use crate::workspace_render::WorkspaceRenderFrame;
 use gtk::gdk;
 use gtk::glib;
 use serde::Serialize;
@@ -30,8 +32,11 @@ pub fn run_headless() -> glib::ExitCode {
 }
 
 pub fn run_headless_scenario() -> std::io::Result<PathBuf> {
-    let mut backend = TerminalBackend::spawn_headless_shell()?;
     let scenario = HeadlessScenario::from_env();
+    if scenario.needs_workspace() {
+        return run_headless_workspace_scenario(scenario);
+    }
+    let mut backend = TerminalBackend::spawn_headless_shell()?;
     let mut runtime = HeadlessRuntime::default();
     for action in &scenario.actions {
         runtime.apply(&mut backend, action)?;
@@ -52,6 +57,19 @@ pub fn run_headless_scenario() -> std::io::Result<PathBuf> {
         selection,
     )?;
     Ok(path)
+}
+
+fn run_headless_workspace_scenario(scenario: HeadlessScenario) -> std::io::Result<PathBuf> {
+    let mut workspace = TerminalWorkspace::spawn_with(headless_shell_command())?;
+    let mut runtime = WorkspaceHeadlessRuntime::default();
+    for action in &scenario.actions {
+        runtime.apply(&mut workspace, action)?;
+        sleep(Duration::from_millis(scenario.step_delay_ms));
+    }
+    let panes = wait_for_workspace_content(&mut workspace, &scenario.expected)?;
+    let selection = scenario.selection.or(runtime.selection);
+    let rendered = WorkspaceRenderFrame::from_active_tab_panes(panes, selection);
+    write_workspace_render_dump(rendered)
 }
 
 struct HeadlessScenario {
@@ -95,6 +113,10 @@ impl HeadlessScenario {
             selection,
         }
     }
+
+    fn needs_workspace(&self) -> bool {
+        self.actions.iter().any(HeadlessAction::needs_workspace)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,9 +126,25 @@ enum HeadlessAction {
     Resize(ScreenSize),
     Scroll(i32),
     Wait(String),
+    Split,
+    PaneNext,
+    PanePrevious,
     MousePress(MouseButton, MouseGridPosition),
     MouseDrag(MouseGridPosition),
     MouseRelease(MouseGridPosition),
+}
+
+impl HeadlessAction {
+    fn needs_workspace(&self) -> bool {
+        match self {
+            Self::Split | Self::PaneNext | Self::PanePrevious => true,
+            Self::Key(key) => matches!(
+                key_to_action(key.key, key.modifiers),
+                Some(KeyAction::NewTab | KeyAction::NextTab | KeyAction::PreviousTab)
+            ),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,6 +157,115 @@ struct HeadlessKey {
 struct HeadlessRuntime {
     pointer: PointerInteraction,
     selection: Option<SelectionRange>,
+}
+
+#[derive(Default)]
+struct WorkspaceHeadlessRuntime {
+    pointer: PointerInteraction,
+    selection: Option<SelectionRange>,
+}
+
+impl WorkspaceHeadlessRuntime {
+    fn apply(
+        &mut self,
+        workspace: &mut TerminalWorkspace,
+        action: &HeadlessAction,
+    ) -> std::io::Result<()> {
+        match action {
+            HeadlessAction::Write(text) => workspace.write_active(text.as_bytes()),
+            HeadlessAction::Key(key) => {
+                if let Some(action) = key_to_action(key.key, key.modifiers) {
+                    match action {
+                        KeyAction::Write(bytes) => workspace.write_active(&bytes),
+                        KeyAction::CursorMove { .. } | KeyAction::SelectInput => Ok(()),
+                        KeyAction::ScrollDisplay(lines) => workspace.scroll_active(lines),
+                        KeyAction::NewTab => {
+                            workspace.add_tab_with(headless_shell_command())?;
+                            Ok(())
+                        }
+                        KeyAction::NextTab => {
+                            workspace.activate_next();
+                            Ok(())
+                        }
+                        KeyAction::PreviousTab => {
+                            workspace.activate_previous();
+                            Ok(())
+                        }
+                        KeyAction::CopySelection
+                        | KeyAction::CutSelection
+                        | KeyAction::PasteClipboard
+                        | KeyAction::ZoomIn
+                        | KeyAction::ZoomOut
+                        | KeyAction::ZoomReset => Ok(()),
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            HeadlessAction::Resize(size) => workspace.resize_active(*size),
+            HeadlessAction::Scroll(lines) => workspace.scroll_active(*lines),
+            HeadlessAction::Wait(expected) => {
+                wait_for_workspace_content(workspace, std::slice::from_ref(expected)).map(|_| ())
+            }
+            HeadlessAction::Split => {
+                workspace.split_active_with(headless_shell_command())?;
+                Ok(())
+            }
+            HeadlessAction::PaneNext => {
+                workspace.activate_next_pane();
+                Ok(())
+            }
+            HeadlessAction::PanePrevious => {
+                workspace.activate_previous_pane();
+                Ok(())
+            }
+            HeadlessAction::MousePress(button, position) => {
+                let mouse_mode = workspace
+                    .snapshot_active_renderable()
+                    .map(|snapshot| snapshot.mouse)
+                    .unwrap_or_default();
+                let effects = self.pointer.press(mouse_mode, *button, *position);
+                self.apply_interaction_effects(workspace, effects)
+            }
+            HeadlessAction::MouseDrag(position) => {
+                let mouse_mode = workspace
+                    .snapshot_active_renderable()
+                    .map(|snapshot| snapshot.mouse)
+                    .unwrap_or_default();
+                let effects = self.pointer.motion(mouse_mode, *position);
+                self.apply_interaction_effects(workspace, effects)
+            }
+            HeadlessAction::MouseRelease(position) => {
+                let mouse_mode = workspace
+                    .snapshot_active_renderable()
+                    .map(|snapshot| snapshot.mouse)
+                    .unwrap_or_default();
+                let effects = self.pointer.release(mouse_mode, *position);
+                self.apply_interaction_effects(workspace, effects)
+            }
+        }
+    }
+
+    fn apply_interaction_effects(
+        &mut self,
+        workspace: &mut TerminalWorkspace,
+        effects: Vec<InteractionEffect>,
+    ) -> std::io::Result<()> {
+        for effect in effects {
+            match effect {
+                InteractionEffect::Write(bytes) => workspace.write_active(&bytes)?,
+                InteractionEffect::SelectionChanged(selection) => self.selection = selection,
+                InteractionEffect::MoveCursorTo(position) => {
+                    if let Some(snapshot) = workspace.snapshot_active_renderable()
+                        && let Some(bytes) = cursor_movement_bytes_for_content(&snapshot, position)
+                    {
+                        workspace.write_active(&bytes)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl HeadlessRuntime {
@@ -153,6 +300,9 @@ impl HeadlessRuntime {
             HeadlessAction::Scroll(lines) => backend.scroll_display(*lines),
             HeadlessAction::Wait(expected) => {
                 wait_for_headless_content(backend, std::slice::from_ref(expected)).map(|_| ())
+            }
+            HeadlessAction::Split | HeadlessAction::PaneNext | HeadlessAction::PanePrevious => {
+                Ok(())
             }
             HeadlessAction::MousePress(button, position) => {
                 let mouse_mode = backend
@@ -249,6 +399,15 @@ fn parse_headless_action(input: &str) -> HeadlessAction {
     }
     if let Some(expected) = input.strip_prefix("wait:") {
         return HeadlessAction::Wait(decode_action(expected));
+    }
+    if input == "split" {
+        return HeadlessAction::Split;
+    }
+    if input == "pane:next" {
+        return HeadlessAction::PaneNext;
+    }
+    if input == "pane:previous" {
+        return HeadlessAction::PanePrevious;
     }
     if let Some(mouse) = input.strip_prefix("mouse:")
         && let Some(action) = parse_mouse_action(mouse)
@@ -402,6 +561,69 @@ fn wait_for_headless_content(
     ))
 }
 
+fn wait_for_workspace_content(
+    workspace: &mut TerminalWorkspace,
+    expected: &[String],
+) -> std::io::Result<Vec<crate::workspace::PaneRenderable>> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let panes = workspace.snapshot_active_tab_renderables();
+        let text = panes
+            .iter()
+            .map(|pane| lines_to_text(&pane.content.lines))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if expected.iter().all(|needle| text.contains(needle)) {
+            return Ok(panes);
+        }
+        sleep(Duration::from_millis(20));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "workspace headless content did not appear",
+    ))
+}
+
+fn write_workspace_render_dump(rendered: WorkspaceRenderFrame) -> std::io::Result<PathBuf> {
+    let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
+        .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let base = std::path::Path::new(&dir).join(format!("headless_workspace_{ts}"));
+    if let Some(parent) = base.parent() {
+        create_dir_all(parent)?;
+    }
+    let json = serde_json::to_vec_pretty(&rendered)?;
+    let mut json_file = File::create(base.with_extension("workspace.render.json"))?;
+    json_file.write_all(&json)?;
+    let html = workspace_render_to_html(&rendered);
+    let mut html_file = File::create(base.with_extension("workspace.markup.html"))?;
+    html_file.write_all(html.as_bytes())?;
+    Ok(base)
+}
+
+fn workspace_render_to_html(rendered: &WorkspaceRenderFrame) -> String {
+    let mut html = String::from(
+        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">",
+    );
+    for pane in &rendered.panes {
+        html.push_str(&format!(
+            "<section data-pane-id=\"{}\" data-active=\"{}\">",
+            pane.pane_id, pane.active
+        ));
+        html.push_str(&pane.frame.history_markup);
+        if !pane.frame.input_markup.is_empty() {
+            html.push('\n');
+            html.push_str(&pane.frame.input_markup);
+        }
+        html.push_str("</section>");
+    }
+    html.push_str("</body></html>");
+    html
+}
+
 fn write_render_dump(
     base: PathBuf,
     history: &str,
@@ -492,6 +714,16 @@ mod tests {
                 key: gdk::Key::d,
                 modifiers: gdk::ModifierType::CONTROL_MASK,
             })
+        );
+    }
+
+    #[test]
+    fn parses_headless_workspace_events() {
+        assert_eq!(parse_headless_action("split"), HeadlessAction::Split);
+        assert_eq!(parse_headless_action("pane:next"), HeadlessAction::PaneNext);
+        assert_eq!(
+            parse_headless_action("pane:previous"),
+            HeadlessAction::PanePrevious
         );
     }
 
