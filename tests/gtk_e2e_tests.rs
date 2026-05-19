@@ -1572,6 +1572,152 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_click_moves_shell_cursor_inside_split_pane_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") || !has_command("python3") {
+        eprintln!(
+            "skipping gtk split cursor e2e because xvfb-run, xdotool, or python3 is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-split-cursor-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+geometry_trace="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool key --window "$window_id" ctrl+shift+e
+sleep 0.5
+xdotool type --window "$window_id" --delay 2 "abcdef"
+latest_json=""
+for _ in {1..120}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ] && grep -F 'abcdef' "$latest_json" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
+    echo "split cursor setup snapshots or geometry did not appear" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+read -r origin_col cursor_line cursor_col < <(python3 - "$latest_json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    frame = json.load(handle)
+active = next(pane for pane in frame["panes"] if pane["active"])
+cursor = active["frame"]["cursor"]
+print(active["origin_col"], cursor["line"], cursor["column"])
+PY
+)
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+target_col="$((cursor_col - 6))"
+target_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v origin="$origin_col" -v col="$target_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((origin + col + 1.5) * cell) }')"
+target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+echo "split cursor click target window=$window_id X=$X Y=$Y pane_origin=$origin_col cursor=$cursor_line,$cursor_col canvas=$canvas_x,$canvas_y cell=$cell_width line=$line_height target=$target_x,$target_y" >&2
+xdotool mousemove "$target_x" "$target_y"
+xdotool click 1
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "Z"
+for _ in {1..120}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ] && grep -F 'aZbcdef' "$latest_json" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "click did not move shell cursor inside split pane before typing Z" >&2
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+[ -n "$latest_json" ] && sed -n '1,120p' "$latest_json" >&2
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-split-cursor-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk split cursor e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk split cursor e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let workspace_json = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".workspace.render.json"))
+        })
+        .map(|path| read_to_string(path).expect("read workspace render json"))
+        .rev()
+        .find(|json| json.contains("aZbcdef"))
+        .expect("workspace render json with split cursor edit marker");
+    let dump = serde_json::from_str::<serde_json::Value>(&workspace_json)
+        .expect("valid workspace render json");
+    let panes = dump["panes"].as_array().expect("panes array");
+    assert_eq!(panes.len(), 2, "{workspace_json}");
+    let active = panes
+        .iter()
+        .find(|pane| pane["active"].as_bool() == Some(true))
+        .expect("active split pane");
+    assert!(
+        active["frame"]["lines"].to_string().contains("aZbcdef"),
+        "{workspace_json}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_selects_text_with_real_mouse_drag_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk mouse e2e because xvfb-run or xdotool is not installed");
