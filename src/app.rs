@@ -2093,7 +2093,13 @@ fn show_canvas_context_menu(
     y: f64,
     context: CanvasContextMenuContext,
 ) {
-    let popover = gtk::Popover::new();
+    let menu_model = gtk::gio::Menu::new();
+    menu_model.append(Some("Copy"), Some("terminal-menu.copy"));
+    menu_model.append(Some("Cut"), Some("terminal-menu.cut"));
+    menu_model.append(Some("Paste"), Some("terminal-menu.paste"));
+    menu_model.append(Some("Select Input"), Some("terminal-menu.select-input"));
+
+    let popover = gtk::PopoverMenu::from_model(Some(&menu_model));
     popover.set_parent(widget);
     popover.set_has_arrow(false);
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -2102,26 +2108,24 @@ fn show_canvas_context_menu(
         1,
         1,
     )));
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    menu.add_css_class("terminal-context-menu");
 
-    let copy = gtk::Button::with_label("Copy");
-    copy.add_css_class("flat");
-    copy.set_sensitive(context.selection_text.borrow().is_some());
+    let actions = gtk::gio::SimpleActionGroup::new();
+
+    let copy = gtk::gio::SimpleAction::new("copy", None);
+    copy.set_enabled(context.selection_text.borrow().is_some());
     {
         let widget = widget.clone();
         let selection_text = context.selection_text.clone();
         let popover = popover.clone();
-        copy.connect_clicked(move |_| {
+        copy.connect_activate(move |_, _| {
             copy_selection_to_clipboard(&widget, &selection_text);
             popover.popdown();
         });
     }
-    menu.append(&copy);
+    actions.add_action(&copy);
 
-    let cut = gtk::Button::with_label("Cut");
-    cut.add_css_class("flat");
-    cut.set_sensitive(context.selection_text.borrow().is_some());
+    let cut = gtk::gio::SimpleAction::new("cut", None);
+    cut.set_enabled(context.selection_text.borrow().is_some());
     {
         let widget = widget.clone();
         let workspace = context.workspace.clone();
@@ -2132,7 +2136,7 @@ fn show_canvas_context_menu(
         let keyboard_selection = context.keyboard_selection.clone();
         let pending_input_latency = context.pending_input_latency.clone();
         let popover = popover.clone();
-        cut.connect_clicked(move |_| {
+        cut.connect_activate(move |_, _| {
             if copy_selection_to_clipboard(&widget, &selection_text) {
                 mark_pending_input_latency(&pending_input_latency);
                 write_key_with_selection(
@@ -2148,10 +2152,9 @@ fn show_canvas_context_menu(
             popover.popdown();
         });
     }
-    menu.append(&cut);
+    actions.add_action(&cut);
 
-    let paste = gtk::Button::with_label("Paste");
-    paste.add_css_class("flat");
+    let paste = gtk::gio::SimpleAction::new("paste", None);
     {
         let widget = widget.clone();
         let context = PasteClipboardContext {
@@ -2164,15 +2167,14 @@ fn show_canvas_context_menu(
             pending_input_latency: context.pending_input_latency.clone(),
         };
         let popover = popover.clone();
-        paste.connect_clicked(move |_| {
+        paste.connect_activate(move |_, _| {
             paste_clipboard_text(&widget, context.clone());
             popover.popdown();
         });
     }
-    menu.append(&paste);
+    actions.add_action(&paste);
 
-    let select_all = gtk::Button::with_label("Select Input");
-    select_all.add_css_class("flat");
+    let select_input = gtk::gio::SimpleAction::new("select-input", None);
     {
         let content = context.content.clone();
         let selection = context.selection.clone();
@@ -2180,7 +2182,7 @@ fn show_canvas_context_menu(
         let selection_dirty = context.selection_dirty.clone();
         let keyboard_selection = context.keyboard_selection.clone();
         let popover = popover.clone();
-        select_all.connect_clicked(move |_| {
+        select_input.connect_activate(move |_, _| {
             select_active_input(
                 &content,
                 &selection,
@@ -2191,9 +2193,9 @@ fn show_canvas_context_menu(
             popover.popdown();
         });
     }
-    menu.append(&select_all);
+    actions.add_action(&select_input);
 
-    popover.set_child(Some(&menu));
+    widget.insert_action_group("terminal-menu", Some(&actions));
     popover.popup();
 }
 
@@ -2766,20 +2768,6 @@ fn apply_style(canvas: &gtk::DrawingArea) {
         .terminal-rename-entry {
             min-width: 13rem;
             margin: 0.5rem;
-        }
-        .terminal-context-menu {
-            background: #2f2f33;
-            border-radius: 0.5rem;
-            padding: 0.375rem;
-        }
-        .terminal-context-menu button {
-            background: transparent;
-            border-radius: 0.375rem;
-            padding: 0.375rem 0.75rem;
-            min-height: 1.75rem;
-        }
-        .terminal-context-menu button:hover {
-            background: #3a3a3e;
         }
     ";
     let provider = gtk::CssProvider::new();
