@@ -906,18 +906,20 @@ fn rebuild_launch_list(
             list.append(&row);
             appended_containers_header = true;
         }
-        let row = gtk::Button::builder().halign(gtk::Align::Fill).build();
-        row.add_css_class("flat");
+        let row = gtk::ListBoxRow::new();
         row.add_css_class("terminal-launch-row");
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        content.add_css_class("terminal-launch-row-content");
         let label = gtk::Label::builder()
             .label(target.title())
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build();
-        row.set_child(Some(&label));
+        content.append(&label);
+        row.set_child(Some(&content));
         let target = target.clone();
         let context = context.clone();
-        row.connect_clicked(move |_| {
+        row.connect_activate(move |_| {
             add_launch_target_pane(target.clone(), &context);
             context.popover.popdown();
         });
@@ -1779,7 +1781,7 @@ fn apply_style(canvas: &gtk::DrawingArea) {
         .terminal-launcher button {
             min-width: 1.5rem;
             min-height: 1.25rem;
-            padding: 0;
+            padding: 0.375rem;
             margin-top: 0;
             margin-bottom: 0;
             border-radius: 0.375rem;
@@ -1788,10 +1790,10 @@ fn apply_style(canvas: &gtk::DrawingArea) {
         .terminal-launch-menu-button button {
             min-width: 1rem;
             min-height: 1.25rem;
-            padding-left: 0;
-            padding-right: 0;
-            padding-top: 0;
-            padding-bottom: 0;
+            padding-left: 0.375rem;
+            padding-right: 0.375rem;
+            padding-top: 0.375rem;
+            padding-bottom: 0.375rem;
         }
         .term-tab-bar {
             background: transparent;
@@ -1810,20 +1812,26 @@ fn apply_style(canvas: &gtk::DrawingArea) {
         }
         .terminal-launch-popover {
             min-width: 20rem;
+            border-radius: 0.625rem;
             padding: 0.5rem;
+            background: #2f2f33;
+        }
+        .terminal-launch-popover contents,
+        .terminal-launch-popover box,
+        .terminal-launch-popover scrolledwindow,
+        .terminal-launch-popover viewport {
             background: #2f2f33;
         }
         .terminal-launch-popover list,
         .terminal-launch-popover row,
-        .terminal-launch-popover button,
         .terminal-launch-popover searchentry,
         .terminal-launch-popover entry {
             background: #2f2f33;
         }
-        .terminal-launch-popover row:hover,
-        .terminal-launch-popover row:selected,
-        .terminal-launch-popover button:hover {
-            background: #38383c;
+        .terminal-launch-list {
+            padding: 0;
+            border-radius: 0.5rem;
+            background: #2f2f33;
         }
         .terminal-launch-popover .terminal-launch-section-row,
         .terminal-launch-popover .terminal-launch-section-row:hover,
@@ -1840,12 +1848,24 @@ fn apply_style(canvas: &gtk::DrawingArea) {
         }
         .terminal-launch-row {
             min-height: 2.125rem;
-            padding: 0.25rem 0.625rem;
+            padding: 0;
             margin: 0.0625rem 0;
-            border-radius: 0.375rem;
+            border-radius: 0.5rem;
+            background: #2f2f33;
+        }
+        .terminal-launch-row:hover,
+        .terminal-launch-row:selected,
+        .terminal-launch-row:hover .terminal-launch-row-content,
+        .terminal-launch-row:selected .terminal-launch-row-content {
+            background: #3a3a3e;
+        }
+        .terminal-launch-row-content {
+            padding: 0.375rem 1rem;
+            border-radius: 0.5rem;
+            background: #2f2f33;
         }
         .terminal-launch-row label {
-            font-weight: 500;
+            font-weight: 400;
         }
         .terminal-rename-entry {
             min-width: 13rem;
