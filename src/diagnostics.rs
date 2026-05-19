@@ -1,5 +1,6 @@
 use crate::backend::{ScreenSize, TerminalBackend};
 use crate::cell_text::lines_to_text;
+use crate::command_blocks::CommandBlock;
 use crate::input::{KeyAction, key_to_action};
 use crate::interaction::{
     InteractionEffect, PointerInteraction, cursor_movement_bytes_for_content,
@@ -46,6 +47,7 @@ pub fn run_headless_scenario() -> std::io::Result<PathBuf> {
         &rendered.history_markup,
         &rendered.input_markup,
         &rendered.lines,
+        &rendered.command_blocks,
         selection.map(|selection| selected_text(&content.lines, selection)),
         selection,
     )?;
@@ -405,6 +407,7 @@ fn write_render_dump(
     history: &str,
     input: &str,
     lines: &[RenderLine],
+    command_blocks: &[CommandBlock],
     selected_text: Option<String>,
     selection: Option<SelectionRange>,
 ) -> std::io::Result<()> {
@@ -412,6 +415,7 @@ fn write_render_dump(
         history_markup: history,
         input_markup: input,
         lines,
+        command_blocks,
         selected_text: selected_text.as_deref(),
         selection,
     };
@@ -438,6 +442,7 @@ struct RenderDump<'a> {
     history_markup: &'a str,
     input_markup: &'a str,
     lines: &'a [RenderLine],
+    command_blocks: &'a [CommandBlock],
     selected_text: Option<&'a str>,
     selection: Option<SelectionRange>,
 }

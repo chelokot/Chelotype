@@ -25,8 +25,8 @@ Prompt-to-artifact checklist
   - Status: partial; canvas paints individual terminal cells at fixed grid columns and has nonblank screenshot, pixel-level truecolor e2e, and pixel-level cursor position assertions, but does not yet have incremental dirty-row paint.
 - History, scrollback, current input
   - Evidence: `RenderRegion::{History, Input}`, `RenderFrame.lines`, `TerminalBackend::scroll_display`, `display_offset` snapshots, Ghostty row metadata (`wrapped`, `wrap_continuation`, semantic prompt) exported through `TerminalContent`, and semantic prompt rows converted to `RenderFrame.command_blocks`.
-  - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`, `render::tests::renderer_marks_semantic_prompt_continuations_as_input_region`, and `renderer_exports_prompt_delimited_command_blocks`.
-  - Status: partial; soft-wrapped and semantic prompt continuation input stays in one input region and prompt-delimited command-block metadata exists, but no smooth scroll model or command-block UI yet.
+  - Coverage: `backend_exposes_scrollback_display_offset`, `headless_mode_replays_scroll_event`, `ghostty_snapshot::tests::snapshot_exports_soft_wrap_metadata`, `render::tests::renderer_marks_soft_wrapped_cursor_line_as_single_input_region`, `render::tests::renderer_marks_semantic_prompt_continuations_as_input_region`, `renderer_exports_prompt_delimited_command_blocks`, and `headless_mode_exports_osc133_command_blocks`.
+  - Status: partial; soft-wrapped and semantic prompt continuation input stays in one input region, prompt-delimited command-block metadata exists, and OSC 133 command blocks are exported in render dumps, but no smooth scroll model or command-block UI yet.
 - Keyboard input
   - Evidence: `src/input.rs`.
   - Coverage: unit tests plus headless keyboard, Backspace, Enter, Ctrl-D, arrow byte e2e, `tests/gtk_e2e_tests.rs` real-window Xvfb smoke, and Xvfb+xdotool keyboard input into the actual window.
@@ -59,8 +59,8 @@ Prompt-to-artifact checklist
   - Evidence: `scripts/with-zig.sh`, binary-level headless mode, clean `zsh -f` diagnostics fixture, README setup/run commands, and Xvfb-based GTK e2e test.
   - Status: partial; no CI container image yet.
 - Workspaces, tabs/splits, command blocks, smooth scrolling
-  - Evidence: `src/workspace.rs` provides active-pane routing and multi-pane ownership; `src/app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active workspace pane; the header exposes tab buttons and a new-tab button; `src/command_blocks.rs` builds semantic-prompt command blocks.
-  - Coverage: workspace unit tests prove pane identity switching and isolated terminal state across two PTYs; input unit tests cover tab shortcuts; GTK e2e creates a second terminal tab, verifies active pane isolation, and switches back; command-block unit tests and renderer tests prove prompt/continuation/output row boundaries.
+  - Evidence: `src/workspace.rs` provides active-pane routing and multi-pane ownership; `src/app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active workspace pane; the header exposes tab buttons and a new-tab button; `src/command_blocks.rs` builds semantic-prompt command blocks; `src/diagnostics.rs` exports command-block metadata in structured render dumps.
+  - Coverage: workspace unit tests prove pane identity switching and isolated terminal state across two PTYs; input unit tests cover tab shortcuts; GTK e2e creates a second terminal tab, verifies active pane isolation, and switches back; command-block unit tests, renderer tests, and OSC 133 headless e2e prove prompt/continuation/output row boundaries.
   - Status: partial; visible tabs exist, but split panes, smooth scroll model, and command-block UI are not implemented yet.
 
 Current green commands

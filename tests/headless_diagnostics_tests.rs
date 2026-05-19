@@ -159,6 +159,7 @@ fn headless_mode_exports_selection_render_dump() {
     assert!(json.contains("\"start_column\""));
     assert!(json.contains("\"selected\": true"));
     assert!(json.contains("\"region\""));
+    assert!(json.contains("\"command_blocks\""));
     assert!(json.contains("\"end\""));
 
     let markup_dump = paths
@@ -170,6 +171,57 @@ fn headless_mode_exports_selection_render_dump() {
         .expect("markup dump");
     let markup = read_to_string(markup_dump).expect("read markup dump");
     assert!(markup.contains("background=\"#264f78\""));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn headless_mode_exports_osc133_command_blocks() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-command-blocks-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "raw:printf '\\033]133;A\\007PROMPT\\n\\033]133;B\\007CONT\\nOUTPUT\\n\\033]133;A\\007NEXT\\n'\\n",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "OUTPUT|NEXT")
+        .output()
+        .expect("run command-block headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let render_dump = snapshot_file_ending_with(&paths, ".render.json");
+    let json = read_to_string(render_dump).expect("read render dump");
+    let dump = serde_json::from_str::<serde_json::Value>(&json).expect("valid render dump");
+    let blocks = dump["command_blocks"]
+        .as_array()
+        .expect("command block array");
+    assert!(
+        blocks.len() >= 2,
+        "expected OSC 133 prompt metadata to produce command blocks: {json}"
+    );
+    assert!(blocks.iter().any(|block| {
+        block["prompt_start_row"].as_u64().is_some()
+            && block["prompt_end_row"].as_u64().is_some()
+            && block["end_row"].as_u64().is_some()
+    }));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
