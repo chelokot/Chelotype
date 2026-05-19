@@ -65,9 +65,7 @@ const COMFORTABLE_MIN_PANE_COLS: usize = 8;
 
 impl TerminalWorkspace {
     pub fn spawn_shell() -> io::Result<Self> {
-        Self::spawn_with(CommandBuilder::new(
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
-        ))
+        Self::spawn_with(crate::shell::default_shell_command())
     }
 
     pub fn spawn_with(command: CommandBuilder) -> io::Result<Self> {
@@ -142,13 +140,11 @@ impl TerminalWorkspace {
     }
 
     pub fn split_shell_active(&mut self) -> io::Result<PaneId> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        self.split_active_with(CommandBuilder::new(shell))
+        self.split_active_with(crate::shell::default_shell_command())
     }
 
     pub fn add_shell_tab(&mut self) -> io::Result<TabId> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        self.add_tab_with(CommandBuilder::new(shell))
+        self.add_tab_with(crate::shell::default_shell_command())
     }
 
     pub fn close(&mut self, id: TabId) -> bool {

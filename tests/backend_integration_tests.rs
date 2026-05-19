@@ -22,6 +22,13 @@ fn color_output_command() -> CommandBuilder {
     command
 }
 
+fn fish_command() -> Option<CommandBuilder> {
+    ["/usr/bin/fish", "/bin/fish"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .map(CommandBuilder::new)
+}
+
 fn snapshot_contains(snapshot: &RenderableContentOwned, needle: &str) -> bool {
     snapshot_text(snapshot).contains(needle)
 }
@@ -66,6 +73,29 @@ fn visible_nonblank_lines(snapshot: &RenderableContentOwned) -> Vec<String> {
         })
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+#[test]
+#[serial]
+fn backend_starts_fish_and_handles_startup_terminal_queries() {
+    let Some(command) = fish_command() else {
+        eprintln!("skipping fish backend test because fish is not installed");
+        return;
+    };
+
+    let mut backend = TerminalBackend::spawn(command).expect("spawn fish");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_contains(snapshot, "Welcome to fish") || snapshot.cursor_visible
+    });
+    backend
+        .write(b"printf 'FISH_DEFAULT_OK\\n'\n")
+        .expect("write fish command");
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_contains(snapshot, "FISH_DEFAULT_OK")
+    });
+
+    assert!(snapshot_contains(&snapshot, "FISH_DEFAULT_OK"));
+    let _ = backend.write(b"exit\n");
 }
 
 #[test]

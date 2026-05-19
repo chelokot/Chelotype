@@ -47,7 +47,7 @@ impl ScreenSize {
 }
 
 pub struct TerminalBackend {
-    terminal: Terminal<'static, 'static>,
+    terminal: Box<Terminal<'static, 'static>>,
     snapshotter: GhosttySnapshotter,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -60,8 +60,7 @@ pub struct TerminalBackend {
 
 impl TerminalBackend {
     pub fn spawn_shell() -> std::io::Result<Self> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        Self::spawn(CommandBuilder::new(shell))
+        Self::spawn(crate::shell::default_shell_command())
     }
 
     pub fn spawn_headless_shell() -> std::io::Result<Self> {
@@ -105,12 +104,14 @@ impl TerminalBackend {
         });
 
         let pty_responses = Rc::new(RefCell::new(Vec::<Vec<u8>>::new()));
-        let mut terminal = Terminal::new(TerminalOptions {
-            cols: size.cols,
-            rows: size.rows,
-            max_scrollback: 10000,
-        })
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let mut terminal = Box::new(
+            Terminal::new(TerminalOptions {
+                cols: size.cols,
+                rows: size.rows,
+                max_scrollback: 10000,
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        );
         terminal
             .on_pty_write({
                 let pty_responses = pty_responses.clone();

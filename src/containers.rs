@@ -32,9 +32,7 @@ impl LaunchTarget {
                 command.arg(format!(
                     "podman start {name} >/dev/null 2>&1 || true; exec podman exec -it {name} {shell}",
                     name = shell_quote(name),
-                    shell = shell_quote(
-                        &std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-                    )
+                    shell = shell_quote(&crate::shell::default_shell_path())
                 ));
                 command
             }
@@ -66,7 +64,7 @@ pub fn available_launch_targets() -> Vec<LaunchTarget> {
 }
 
 fn shell_command() -> CommandBuilder {
-    CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()))
+    crate::shell::default_shell_command()
 }
 
 fn toolbox_containers() -> Vec<String> {

@@ -14,8 +14,8 @@ use crate::interaction::{
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderFrame, RenderPreedit, Renderer};
 use crate::selection::{
-    GridPoint, SelectionRange, anchor_range_to_display, line_range, line_significant_len,
-    selected_text, viewport_range_for_display, word_range_at,
+    GridPoint, SelectionRange, anchor_range_to_display, find_text_range, line_range,
+    line_significant_len, selected_text, viewport_range_for_display, word_range_at,
 };
 use crate::snapshot::{
     write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
@@ -1189,10 +1189,11 @@ fn build_ui(app: &Application) {
             };
             mouse_mode.set(active_content.mouse);
             *last_content.borrow_mut() = Some(active_content.clone());
-            let visible_selection = visible_selection_matching_text(
+            let expected_selection_text = selection_text.borrow().clone();
+            let visible_selection = visible_or_reanchored_selection(
                 &active_content,
-                selection.get(),
-                selection_text.borrow().as_deref(),
+                &selection,
+                expected_selection_text.as_deref(),
             );
             if selection_text.borrow().is_none()
                 && let Some(visible_selection) = visible_selection
@@ -1316,10 +1317,11 @@ fn build_ui(app: &Application) {
             None
         };
         if let Some(content) = render_content {
-            let visible_selection = visible_selection_matching_text(
+            let expected_selection_text = selection_text.borrow().clone();
+            let visible_selection = visible_or_reanchored_selection(
                 &content,
-                selection.get(),
-                selection_text.borrow().as_deref(),
+                &selection,
+                expected_selection_text.as_deref(),
             );
             if selection_text.borrow().is_none()
                 && let Some(visible_selection) = visible_selection
@@ -1386,10 +1388,11 @@ fn build_ui(app: &Application) {
         {
             *last_snapshot.borrow_mut() = std::time::Instant::now();
             crate::logging::debug_log(&format!("snapshot selection {:?}", selection.get()));
-            let visible_selection = visible_selection_matching_text(
+            let expected_selection_text = selection_text.borrow().clone();
+            let visible_selection = visible_or_reanchored_selection(
                 &content,
-                selection.get(),
-                selection_text.borrow().as_deref(),
+                &selection,
+                expected_selection_text.as_deref(),
             );
             if selection_text.borrow().is_none()
                 && let Some(visible_selection) = visible_selection
@@ -2238,6 +2241,25 @@ fn visible_selection_matching_text(
     }
 }
 
+fn visible_or_reanchored_selection(
+    content: &RenderableContentOwned,
+    selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+    expected_text: Option<&str>,
+) -> Option<SelectionRange> {
+    if let Some(visible) = visible_selection_matching_text(content, selection.get(), expected_text)
+    {
+        return Some(visible);
+    }
+    visible_selection_for_content(content, selection.get())?;
+    let expected_text = expected_text?;
+    let reanchored = find_text_range(&content.lines, expected_text)?;
+    selection.set(Some(anchor_range_to_display(
+        reanchored,
+        content.display_offset,
+    )));
+    Some(reanchored)
+}
+
 fn select_active_input(
     content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
@@ -2360,11 +2382,11 @@ fn write_key_with_selection(
         let _ = workspace.borrow_mut().write_active(&data);
         return;
     };
-    let Some(viewport_selection) = visible_selection_matching_text(
-        &content,
-        Some(selection_range),
-        selection_text.borrow().as_deref(),
-    ) else {
+    selection.set(Some(selection_range));
+    let expected_selection_text = selection_text.borrow().clone();
+    let Some(viewport_selection) =
+        visible_or_reanchored_selection(&content, selection, expected_selection_text.as_deref())
+    else {
         clear_selection(
             selection,
             selection_text,

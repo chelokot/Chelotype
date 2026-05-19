@@ -16,6 +16,7 @@ pub mod perf_trace;
 pub mod process_metrics;
 pub mod render;
 pub mod selection;
+pub mod shell;
 pub mod smooth_scroll;
 pub mod snapshot;
 pub mod terminal_font;

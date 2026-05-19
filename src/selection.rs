@@ -131,6 +131,22 @@ pub fn word_range_at(
     ))
 }
 
+pub fn find_text_range(lines: &[Vec<TerminalCell>], text: &str) -> Option<SelectionRange> {
+    if text.is_empty() || text.contains('\n') {
+        return None;
+    }
+    lines
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| find_text_in_line(line, text).map(|(start, end)| (row, start, end)))
+        .map(|(row, start, end)| {
+            SelectionRange::new(
+                GridPoint { row, column: start },
+                GridPoint { row, column: end },
+            )
+        })
+}
+
 pub fn line_significant_len(line: &[TerminalCell]) -> usize {
     significant_len(line)
 }
@@ -208,6 +224,28 @@ fn significant_len(line: &[TerminalCell]) -> usize {
         })
         .map(|idx| idx + 1)
         .unwrap_or(0)
+}
+
+fn find_text_in_line(line: &[TerminalCell], needle: &str) -> Option<(usize, usize)> {
+    let mut haystack = String::new();
+    let mut spans = Vec::new();
+    for (column, cell) in line.iter().take(significant_len(line)).enumerate() {
+        let start_byte = haystack.len();
+        push_cell_text(&mut haystack, cell);
+        let end_byte = haystack.len();
+        if start_byte != end_byte {
+            spans.push((start_byte, end_byte, column, column + 1));
+        }
+    }
+    let start_byte = haystack.find(needle)?;
+    let end_byte = start_byte + needle.len();
+    let start_column = spans
+        .iter()
+        .find_map(|(start, _, column, _)| (*start == start_byte).then_some(*column))?;
+    let end_column = spans
+        .iter()
+        .find_map(|(_, end, _, next_column)| (*end == end_byte).then_some(*next_column))?;
+    Some((start_column, end_column))
 }
 
 fn is_word_cell(cell: &TerminalCell) -> bool {
@@ -382,5 +420,41 @@ mod tests {
                 GridPoint { row: 0, column: 14 },
             ))
         );
+    }
+
+    #[test]
+    fn finds_text_range_on_cell_boundaries() {
+        let lines = [line("prefix KEEP_TOKEN suffix")];
+
+        assert_eq!(
+            find_text_range(&lines, "KEEP_TOKEN"),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 7 },
+                GridPoint { row: 0, column: 17 },
+            ))
+        );
+    }
+
+    #[test]
+    fn finds_text_range_after_wrapped_reflow_changes_row_and_column() {
+        let lines = [line(
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxKEEP_TOKEN",
+        )];
+
+        assert_eq!(
+            find_text_range(&lines, "KEEP_TOKEN"),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 50 },
+                GridPoint { row: 0, column: 60 },
+            ))
+        );
+    }
+
+    #[test]
+    fn text_range_search_ignores_empty_and_multiline_needles() {
+        let lines = [line("first"), line("second")];
+
+        assert_eq!(find_text_range(&lines, ""), None);
+        assert_eq!(find_text_range(&lines, "first\nsecond"), None);
     }
 }

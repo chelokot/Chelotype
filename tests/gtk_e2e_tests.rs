@@ -910,7 +910,7 @@ if [ -z "$window_id" ]; then
 fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
-xdotool type --window "$window_id" --delay 1 "for n in \$(seq 1 60); do echo SMOOTH_SCROLL_\$n; done"
+xdotool type --window "$window_id" --delay 1 "python3 -c \"for n in range(1, 61): print(f'SMOOTH_SCROLL_{n}')\""
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
     if grep -R '^SMOOTH_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
@@ -1570,7 +1570,7 @@ bin="$1"
 snapshot_dir="$2"
 perf_trace="$3"
 zdot="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_PERF_TRACE="$perf_trace" CHELOTYPE_ALLOC_TRACE=1 SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_PERF_TRACE="$perf_trace" CHELOTYPE_ALLOC_TRACE=1 CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -3655,7 +3655,7 @@ if [ -z "$window_id" ]; then
 fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
-xdotool type --window "$window_id" --delay 1 "for i in \$(seq 1 40); do printf 'VISUAL_FILL_%02d\n' \$i; done; printf 'VISUAL_SCROLL_TARGET\n'"
+xdotool type --window "$window_id" --delay 1 "python3 -c \"for i in range(1, 41): print(f'VISUAL_FILL_{i:02d}'); print('VISUAL_SCROLL_TARGET')\""
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
     if grep -R '^VISUAL_SCROLL_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
@@ -5149,7 +5149,7 @@ set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 zdot="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -5571,7 +5571,7 @@ if [ -z "$window_id" ]; then
 fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
-xdotool type --window "$window_id" --delay 2 "printf 'SCROLL_STABLE_TARGET\n'; (sleep 5.0; for i in {1..80}; do echo filler_\$i; done)&"
+xdotool type --window "$window_id" --delay 2 "python3 -u -c \"import time; print('SCROLL_STABLE_TARGET', flush=True); time.sleep(5.0); [print(f'filler_{i}', flush=True) for i in range(1, 81)]\""
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
     if grep -R '^SCROLL_STABLE_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
@@ -5853,7 +5853,7 @@ snapshot_dir="$2"
 geometry_trace="$3"
 zdot="$4"
 autosuggest_snapshot="$5"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -6334,6 +6334,171 @@ exit 1
         text.lines()
             .any(|line| { line.trim_end() == format!("GTK_REFLOW_{}", "x".repeat(90)) })
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_preserves_selection_highlight_after_reflow_resize_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk reflow selection e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-reflow-selection-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+geometry_trace="$4"
+target="KEEP_TOKEN"
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+xdotool windowsize "$window_id" 420 360
+for _ in {1..100}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ]; then
+        cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+        if [ -n "$cols" ] && [ "$cols" -lt 50 ]; then
+            break
+        fi
+    fi
+    sleep 0.1
+done
+xdotool type --window "$window_id" --delay 1 "python3 -c 'print(\"x\" * 50 + \"KEEP_TOKEN\" + \"y\" * 30)'"
+xdotool key --window "$window_id" Return
+for _ in {1..120}; do
+    if grep -R 'KEEP_TOKEN' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'KEEP_TOKEN' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "reflow selection target never appeared while narrow" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
+marker_row="$(grep -n 'KEEP_TOKEN' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+marker_line="$(sed -n "$((marker_row + 1))p" "$latest_txt")"
+marker_col="$(awk -v line="$marker_line" -v target="$target" 'BEGIN { print index(line, target) - 1 }')"
+if [ -z "$marker_col" ]; then
+    echo "could not locate KEEP_TOKEN column" >&2
+    cat "$latest_txt" >&2
+    exit 1
+fi
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$marker_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((col + 1.2) * cell) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$marker_col" -v cell="$cell_width" -v len="${#target}" 'BEGIN { printf "%d", left + canvas_x + ((col + len - 0.3) * cell) }')"
+target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+xdotool mousemove "$start_x" "$target_y"
+xdotool mousedown 1
+sleep 0.1
+xdotool mousemove "$end_x" "$target_y"
+sleep 0.1
+xdotool mouseup 1
+for _ in {1..100}; do
+    if grep -F 'primary	KEEP_TOKEN' "$clipboard_trace" >/dev/null 2>&1 && grep -R '"selected_text": "KEEP_TOKEN' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -F 'primary	KEEP_TOKEN' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "initial KEEP_TOKEN selection did not export" >&2
+    cat "$clipboard_trace" >&2 || true
+    cat /tmp/chelotype.log >&2 || true
+    exit 1
+fi
+xdotool windowsize "$window_id" 1100 500
+for _ in {1..120}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1 || true)"
+    latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ] && [ -n "$latest_txt" ]; then
+        cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+        if [ -n "$cols" ] && [ "$cols" -ge 80 ] && grep -F '"selected_text": "KEEP_TOKEN"' "$latest_json" >/dev/null 2>&1 && grep -F 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxKEEP_TOKEN' "$latest_txt" >/dev/null 2>&1; then
+            exit 0
+        fi
+    fi
+    sleep 0.1
+done
+echo "selection highlight did not survive resize reflow" >&2
+grep -R '"cols"' "$snapshot_dir" >&2 || true
+grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+cat /tmp/chelotype.log >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-reflow-selection-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk reflow selection e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk reflow selection e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(trace.lines().any(|line| line == "primary\tKEEP_TOKEN"));
+
+    let json = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| read_to_string(path).expect("read json snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(json.contains("\"selected_text\": \"KEEP_TOKEN\""));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
