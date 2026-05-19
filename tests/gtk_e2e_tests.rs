@@ -1498,6 +1498,111 @@ wait_latest_contains_only 'TAB_ONE_AFTER_CLOSE' 'TAB_TWO_ACTIVE'
 
 #[test]
 #[serial]
+fn gtk_e2e_keeps_live_input_isolated_between_tabs_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk live tab input e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-live-tabs-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+wait_latest_contains_only() {
+    needle="$1"
+    forbidden="$2"
+    for _ in {1..120}; do
+        latest="$(latest_txt || true)"
+        if [ -n "$latest" ] && grep -F "$needle" "$latest" >/dev/null 2>&1 && ! grep -F "$forbidden" "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest snapshot did not isolate live tab input: wanted=$needle forbidden=$forbidden" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && sed -n '1,12p' "$latest" >&2
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "tab_one_live_input"
+wait_latest_contains_only '❯ tab_one_live_input' 'tab_two_live_input'
+xdotool key --window "$window_id" ctrl+shift+t
+sleep 0.4
+xdotool type --window "$window_id" --delay 2 "tab_two_live_input"
+wait_latest_contains_only '❯ tab_two_live_input' 'tab_one_live_input'
+xdotool key --window "$window_id" ctrl+Page_Up
+wait_latest_contains_only '❯ tab_one_live_input' 'tab_two_live_input'
+xdotool key --window "$window_id" ctrl+Page_Down
+wait_latest_contains_only '❯ tab_two_live_input' 'tab_one_live_input'
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-live-tabs-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+        ])
+        .output()
+        .expect("run gtk live tab input e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk live tab input e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let text = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .map(|path| read_to_string(path).expect("read text snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("tab_one_live_input"));
+    assert!(text.contains("tab_two_live_input"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_renders_real_split_panes_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk split e2e because xvfb-run or xdotool is not installed");
