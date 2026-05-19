@@ -109,6 +109,10 @@ fn build_ui(app: &Application) {
     let selection_text = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
     let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
     let last_content = std::rc::Rc::new(std::cell::RefCell::new(None::<RenderableContentOwned>));
+    let pending_input_latency =
+        std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::<
+            std::time::Instant,
+        >::new()));
     add_existing_workspace_pages(&tab_view, &tab_pages, &workspace_rc.borrow());
     let tab_context = TabContext {
         workspace: workspace_rc.clone(),
@@ -151,6 +155,7 @@ fn build_ui(app: &Application) {
         let tab_view = tab_view.clone();
         let tab_pages = tab_pages.clone();
         let last_size = last_size.clone();
+        let pending_input_latency = pending_input_latency.clone();
         key_controller.connect_key_pressed(move |_ctrl, key, _code, state| {
             if let Some(action) = key_to_action(key, state) {
                 match action {
@@ -158,6 +163,7 @@ fn build_ui(app: &Application) {
                         if data.as_slice() == [0x03] && selection_text.borrow().is_some() {
                             copy_selection_to_clipboard(&canvas_widget, &selection_text);
                         } else {
+                            mark_pending_input_latency(&pending_input_latency);
                             write_key_with_selection(
                                 &workspace,
                                 &content,
@@ -173,6 +179,7 @@ fn build_ui(app: &Application) {
                         unit,
                         selecting,
                     } => {
+                        mark_pending_input_latency(&pending_input_latency);
                         move_cursor_from_keyboard(
                             &workspace,
                             &content,
@@ -187,6 +194,7 @@ fn build_ui(app: &Application) {
                         );
                     }
                     KeyAction::SelectInput => {
+                        mark_pending_input_latency(&pending_input_latency);
                         select_active_input(
                             &content,
                             &selection,
@@ -195,6 +203,7 @@ fn build_ui(app: &Application) {
                         );
                     }
                     KeyAction::ScrollDisplay(lines) => {
+                        mark_pending_input_latency(&pending_input_latency);
                         let _ = workspace.borrow_mut().scroll_active(lines);
                     }
                     KeyAction::CopySelection => {
@@ -202,6 +211,7 @@ fn build_ui(app: &Application) {
                     }
                     KeyAction::CutSelection => {
                         if copy_selection_to_clipboard(&canvas_widget, &selection_text) {
+                            mark_pending_input_latency(&pending_input_latency);
                             write_key_with_selection(
                                 &workspace,
                                 &content,
@@ -220,21 +230,25 @@ fn build_ui(app: &Application) {
                             selection.clone(),
                             selection_text.clone(),
                             selection_dirty.clone(),
+                            pending_input_latency.clone(),
                         );
                     }
                     KeyAction::ZoomIn => {
+                        mark_pending_input_latency(&pending_input_latency);
                         crate::terminal_font::zoom_in();
                         last_size.set(None);
                         force_snapshot.set(true);
                         canvas_widget.queue_draw();
                     }
                     KeyAction::ZoomOut => {
+                        mark_pending_input_latency(&pending_input_latency);
                         crate::terminal_font::zoom_out();
                         last_size.set(None);
                         force_snapshot.set(true);
                         canvas_widget.queue_draw();
                     }
                     KeyAction::ZoomReset => {
+                        mark_pending_input_latency(&pending_input_latency);
                         crate::terminal_font::zoom_reset();
                         last_size.set(None);
                         force_snapshot.set(true);
@@ -664,7 +678,7 @@ fn build_ui(app: &Application) {
     }
 
     let app_for_tick = app.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+    glib::timeout_add_local(std::time::Duration::from_millis(8), move || {
         let measured_metrics = terminal_metrics_for_widget(canvas.widget());
         cell_metrics.set(measured_metrics.map(|metrics| metrics.cell));
         if let (Some(path), Some(metrics)) = (&geometry_trace, measured_metrics) {
@@ -725,6 +739,7 @@ fn build_ui(app: &Application) {
                     .saturating_sub(allocations_before.bytes),
             );
             canvas.set_render(rendered);
+            record_pending_input_latency(&pending_input_latency);
             if selection_changed {
                 copy_selection_to_primary(canvas.widget(), &selection_text);
             }
@@ -1355,6 +1370,7 @@ fn paste_clipboard_text(
     selection: std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_input_latency: PendingInputLatency,
 ) {
     widget
         .clipboard()
@@ -1362,6 +1378,7 @@ fn paste_clipboard_text(
             let Ok(Some(text)) = result else {
                 return;
             };
+            mark_pending_input_latency(&pending_input_latency);
             write_key_with_selection(
                 &workspace,
                 &content,
@@ -1371,6 +1388,25 @@ fn paste_clipboard_text(
                 text.as_bytes().to_vec(),
             );
         });
+}
+
+type PendingInputLatency =
+    std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<std::time::Instant>>>;
+
+fn mark_pending_input_latency(pending_input_latency: &PendingInputLatency) {
+    pending_input_latency
+        .borrow_mut()
+        .push_back(std::time::Instant::now());
+}
+
+fn record_pending_input_latency(pending_input_latency: &PendingInputLatency) {
+    let finished = std::time::Instant::now();
+    for started in pending_input_latency.borrow_mut().drain(..) {
+        crate::perf_trace::record_duration(
+            "input_to_render",
+            finished.saturating_duration_since(started),
+        );
+    }
 }
 
 fn text_for_viewport_selection(

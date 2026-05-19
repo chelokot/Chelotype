@@ -1087,6 +1087,7 @@ fi
 
     let render = perf_samples(&perf_trace, "gtk_render");
     let paint = perf_samples(&perf_trace, "gtk_paint");
+    let input_to_render = perf_samples(&perf_trace, "input_to_render");
     let render_allocs = perf_counters(&perf_trace, "gtk_render_allocs");
     let render_alloc_bytes = perf_counters(&perf_trace, "gtk_render_alloc_bytes");
     assert!(
@@ -1100,6 +1101,11 @@ fi
         paint.len()
     );
     assert!(
+        input_to_render.len() >= 80,
+        "held-key produced too few input-to-render samples: {}",
+        input_to_render.len()
+    );
+    assert!(
         render_allocs.len() >= 80,
         "held-key produced too few allocation samples: {}",
         render_allocs.len()
@@ -1108,6 +1114,8 @@ fi
     let render_p99 = percentile_duration(render, 99);
     let paint_p95 = percentile_duration(paint.clone(), 95);
     let paint_p99 = percentile_duration(paint, 99);
+    let input_to_render_p95 = percentile_duration(input_to_render.clone(), 95);
+    let input_to_render_p99 = percentile_duration(input_to_render, 99);
     let render_allocs_p95 = percentile_counter(render_allocs.clone(), 95);
     let render_allocs_p99 = percentile_counter(render_allocs, 99);
     let render_alloc_bytes_p95 = percentile_counter(render_alloc_bytes.clone(), 95);
@@ -1127,6 +1135,14 @@ fi
     assert!(
         paint_p99 <= Duration::from_millis(33),
         "held-key gtk_paint p99 exceeded two-frame budget: {paint_p99:?}"
+    );
+    assert!(
+        input_to_render_p95 <= Duration::from_millis(16),
+        "held-key input_to_render p95 exceeded 60 Hz budget: {input_to_render_p95:?}"
+    );
+    assert!(
+        input_to_render_p99 <= Duration::from_millis(33),
+        "held-key input_to_render p99 exceeded two-frame budget: {input_to_render_p99:?}"
     );
     assert!(
         render_allocs_p95 <= 15_000,

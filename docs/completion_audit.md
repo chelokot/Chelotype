@@ -53,8 +53,8 @@ Prompt-to-artifact checklist
   - Status: partial; emoji ZWJ and ambiguous-width coverage exists, but IME/composition scenarios are still needed.
 - Perf gates
   - Evidence: `benches/pipeline.rs`, `src/perf_trace.rs`, `tests/gtk_e2e_tests.rs`, `docs/benchmarks.md`.
-  - Coverage: active Ghostty app-frame render benchmark, 4 ms latency guard, explicit 60/120 Hz frame-budget gates, Criterion held-key scenario, backend dirty-snapshot regression test, canvas frame equality skip, and real Xvfb 10-second held-key e2e that records and gates `gtk_render` and `gtk_paint` p95/p99.
-  - Status: partial; active frame construction and GTK paint are gated, but there is no memory/allocation gate.
+  - Coverage: active Ghostty app-frame render benchmark, 4 ms latency guard, explicit 60/120 Hz frame-budget gates, Criterion held-key scenario, backend dirty-snapshot regression test, canvas frame equality skip, and real Xvfb 10-second held-key e2e that records and gates `input_to_render`, `gtk_render`, and `gtk_paint` p95/p99.
+  - Status: partial; active frame construction, GTK input-to-render latency, GTK render, GTK paint, and per-render allocations are gated, but deeper whole-process memory pressure coverage is still missing.
 - Container-friendly runtime assumptions
   - Evidence: `scripts/with-zig.sh`, binary-level headless mode, clean `zsh -f` diagnostics fixture, README setup/run commands, and Xvfb-based GTK e2e test.
   - Status: partial; no CI container image yet.
