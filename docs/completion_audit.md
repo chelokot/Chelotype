@@ -49,7 +49,7 @@ Prompt-to-artifact checklist
   - Status: partial; visual cursor shape, position, and blink/reset are covered; cursor behavior under IME/composition is still missing.
 - Unicode/graphemes
   - Evidence: Ghostty grapheme extraction, shared `src/cell_text.rs`, structured cell JSON with wide-cell flags.
-  - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata; headless emoji/ZWJ/ambiguous-width test verifies ZWJ emoji cells and single-width ambiguous characters through snapshots and render dumps.
+  - Coverage: render/snapshot/selection unit tests preserve combining marks and skip wide-cell spacers; headless Unicode/style JSON test checks combining marks and wide-cell metadata; headless emoji/ZWJ/ambiguous-width test verifies ZWJ emoji cells and single-width ambiguous characters through snapshots and render dumps; GTK e2e now drives the live app to export combining graphemes, CJK wide cells plus spacer metadata, ZWJ emoji wide state, and ambiguous-width cells through structured JSON snapshots.
   - Status: partial; emoji ZWJ and ambiguous-width coverage exists, but IME/composition scenarios are still needed.
 - Perf gates
   - Evidence: `benches/pipeline.rs`, `src/perf_trace.rs`, `src/process_metrics.rs`, `tests/gtk_e2e_tests.rs`, `docs/benchmarks.md`.

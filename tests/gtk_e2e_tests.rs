@@ -337,6 +337,113 @@ fn gtk_e2e_exports_colored_cells_under_xvfb() {
 
 #[test]
 #[serial]
+fn gtk_e2e_exports_unicode_grapheme_and_width_cells_under_xvfb() {
+    if !has_command("xvfb-run") {
+        eprintln!("skipping gtk unicode e2e because xvfb-run is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-unicode-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let combining = "e\u{0301}";
+    let wide = "\u{4e2d}";
+    let zwj_emoji = "\u{1f469}\u{200d}\u{1f4bb}";
+    let middle_dot = "\u{00b7}";
+    let omega = "\u{03a9}";
+    let expected =
+        format!("GTK_UNICODE {combining} WIDE {wide} EMOJI {zwj_emoji} AMBIG {middle_dot} {omega}");
+    let input = format!("printf '{expected}\\n'\n");
+
+    let output = Command::new("xvfb-run")
+        .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
+        .env("GDK_BACKEND", "x11")
+        .env("GSETTINGS_BACKEND", "memory")
+        .env("NO_AT_BRIDGE", "1")
+        .env("CHELOTYPE_UI_E2E", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env("CHELOTYPE_UI_E2E_INPUT", input)
+        .env(
+            "CHELOTYPE_UI_E2E_EXPECT",
+            format!("{combining}|{wide}|{zwj_emoji}|{middle_dot}|{omega}"),
+        )
+        .env("CHELOTYPE_UI_E2E_TIMEOUT_MS", "6000")
+        .output()
+        .expect("run gtk unicode e2e binary under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk unicode e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let snapshots = json_snapshots(&dir);
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| {
+            snapshot["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(&expected))
+        })
+        .unwrap_or_else(|| {
+            panic!("gtk unicode snapshot did not contain {expected}: {snapshots:?}")
+        });
+    let cells = snapshot["lines"]
+        .as_array()
+        .expect("snapshot lines")
+        .iter()
+        .flat_map(|line| line["cells"].as_array().expect("line cells"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        cells
+            .iter()
+            .any(|cell| cell["text"].as_str() == Some(combining)
+                && cell["wide"].as_bool() == Some(false)
+                && cell["wide_spacer"].as_bool() == Some(false)),
+        "combining grapheme was not preserved as one normal cell: {snapshot}"
+    );
+    assert!(
+        cells.iter().any(|cell| cell["text"].as_str() == Some(wide)
+            && cell["wide"].as_bool() == Some(true)),
+        "CJK wide character was not exported as wide: {snapshot}"
+    );
+    assert!(
+        cells
+            .iter()
+            .any(|cell| cell["wide_spacer"].as_bool() == Some(true)),
+        "wide spacer metadata was not exported: {snapshot}"
+    );
+    assert!(
+        cells.iter().any(|cell| cell["text"]
+            .as_str()
+            .is_some_and(|text| text.contains('\u{200d}'))
+            && cell["wide"].as_bool() == Some(true)),
+        "ZWJ emoji was not preserved as wide grapheme state: {snapshot}"
+    );
+    for text in [middle_dot, omega] {
+        assert!(
+            cells.iter().any(|cell| cell["text"].as_str() == Some(text)
+                && cell["wide"].as_bool() == Some(false)
+                && cell["wide_spacer"].as_bool() == Some(false)),
+            "ambiguous-width {text} was not exported as one normal cell: {snapshot}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_captures_nonblank_window_screenshot_under_xvfb() {
     if !has_command("xvfb-run")
         || !has_command("xdotool")
