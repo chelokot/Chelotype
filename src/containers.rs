@@ -16,6 +16,14 @@ impl LaunchTarget {
         }
     }
 
+    pub fn id(&self) -> String {
+        match self {
+            Self::Host => "host".to_string(),
+            Self::Toolbox { name } => format!("toolbox:{name}"),
+            Self::Podman { name } => format!("podman:{name}"),
+        }
+    }
+
     pub fn command(&self) -> CommandBuilder {
         match self {
             Self::Host => shell_command(),
@@ -40,6 +48,15 @@ impl LaunchTarget {
     }
 }
 
+pub fn startup_launch_target() -> LaunchTarget {
+    let targets = available_launch_targets();
+    select_startup_launch_target(&targets, crate::config::read_value("startup_launch_target"))
+}
+
+pub fn remember_startup_launch_target(target: &LaunchTarget) {
+    crate::config::write_value("startup_launch_target", &target.id());
+}
+
 pub fn available_launch_targets() -> Vec<LaunchTarget> {
     let mut targets = vec![LaunchTarget::Host];
     targets.extend(
@@ -61,6 +78,23 @@ pub fn available_launch_targets() -> Vec<LaunchTarget> {
             .map(|name| LaunchTarget::Podman { name }),
     );
     targets
+}
+
+fn select_startup_launch_target(
+    targets: &[LaunchTarget],
+    remembered_id: Option<String>,
+) -> LaunchTarget {
+    if let Some(remembered) = remembered_id
+        .as_deref()
+        .and_then(|id| targets.iter().find(|target| target.id() == id))
+    {
+        return remembered.clone();
+    }
+    targets
+        .iter()
+        .find(|target| !matches!(target, LaunchTarget::Host))
+        .cloned()
+        .unwrap_or(LaunchTarget::Host)
 }
 
 fn shell_command() -> CommandBuilder {
@@ -153,5 +187,75 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     fn shell_quotes_container_names() {
         assert_eq!(shell_quote("fedora-toolbox"), "'fedora-toolbox'");
         assert_eq!(shell_quote("bad'name"), "'bad'\\''name'");
+    }
+
+    #[test]
+    fn launch_target_ids_are_stable() {
+        assert_eq!(LaunchTarget::Host.id(), "host");
+        assert_eq!(
+            LaunchTarget::Toolbox {
+                name: "fedora-toolbox-latest".to_string()
+            }
+            .id(),
+            "toolbox:fedora-toolbox-latest"
+        );
+        assert_eq!(
+            LaunchTarget::Podman {
+                name: "postgres".to_string()
+            }
+            .id(),
+            "podman:postgres"
+        );
+    }
+
+    #[test]
+    fn startup_target_prefers_existing_remembered_container() {
+        let targets = vec![
+            LaunchTarget::Host,
+            LaunchTarget::Toolbox {
+                name: "fedora-toolbox-latest".to_string(),
+            },
+            LaunchTarget::Podman {
+                name: "postgres".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            select_startup_launch_target(&targets, Some("podman:postgres".to_string())),
+            LaunchTarget::Podman {
+                name: "postgres".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn startup_target_falls_back_to_first_container_before_host() {
+        let targets = vec![
+            LaunchTarget::Host,
+            LaunchTarget::Toolbox {
+                name: "fedora-toolbox-latest".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            select_startup_launch_target(&targets, None),
+            LaunchTarget::Toolbox {
+                name: "fedora-toolbox-latest".to_string()
+            }
+        );
+        assert_eq!(
+            select_startup_launch_target(&targets, Some("podman:missing".to_string())),
+            LaunchTarget::Toolbox {
+                name: "fedora-toolbox-latest".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn startup_target_uses_host_when_no_container_exists() {
+        assert_eq!(
+            select_startup_launch_target(&[LaunchTarget::Host], None),
+            LaunchTarget::Host
+        );
     }
 }

@@ -10,6 +10,7 @@ bash scripts/with-zig.sh cargo run
 
 The first run downloads Zig 0.15.2 into `.tools/` because `libghostty-vt` builds its vendored native core with Zig. `.tools/` is ignored by git.
 Chelotype opens `fish` by default when it is installed. Use `CHELOTYPE_SHELL=/path/to/shell` to force another shell for a run.
+When no previous container is remembered, Chelotype prefers the first available toolbox/podman container over the host. Closing a single-container window stores that container as the next startup target.
 
 ## Check
 

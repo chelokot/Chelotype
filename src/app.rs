@@ -178,6 +178,13 @@ fn build_ui(app: &Application) {
             );
         });
     }
+    {
+        let tabs = tab_context.clone();
+        window.connect_close_request(move |_| {
+            remember_single_tab_launch_target(&tabs);
+            glib::Propagation::Proceed
+        });
+    }
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1599,7 +1606,7 @@ fn add_launch_target_tab(target: LaunchTarget, context: &LaunchMenuContext) {
         .tabs
         .workspace
         .borrow_mut()
-        .add_titled_tab_with(&title, target.command())
+        .add_launch_target_tab(target.clone())
     else {
         return;
     };
@@ -1607,6 +1614,21 @@ fn add_launch_target_tab(target: LaunchTarget, context: &LaunchMenuContext) {
     context.tabs.tab_pages.borrow_mut().push(id, page.clone());
     context.tabs.tab_view.set_selected_page(&page);
     activate_workspace_tab(&context.tabs, id, context.last_size.get());
+}
+
+fn remember_single_tab_launch_target(tabs: &TabContext) {
+    let workspace = tabs.workspace.borrow();
+    if let Some(target) = single_tab_launch_target_to_remember(&workspace) {
+        crate::containers::remember_startup_launch_target(&target);
+    }
+}
+
+fn single_tab_launch_target_to_remember(workspace: &TerminalWorkspace) -> Option<LaunchTarget> {
+    if workspace.tab_count() != 1 {
+        return None;
+    }
+    let target = workspace.tab_launch_target(workspace.active_tab_id())?;
+    (!matches!(target, LaunchTarget::Host)).then_some(target)
 }
 
 fn add_existing_workspace_pages(
@@ -3213,5 +3235,32 @@ mod tests {
         assert!(effects.is_empty());
         assert!(left_down.get());
         assert!(capture.get().is_some());
+    }
+
+    #[test]
+    fn remembers_only_single_container_tab_on_close() {
+        let container = LaunchTarget::Toolbox {
+            name: "fedora-toolbox-latest".to_string(),
+        };
+        let mut workspace = TerminalWorkspace::spawn_titled_with_target(
+            "fedora-toolbox-latest",
+            portable_pty::CommandBuilder::new("/bin/sh"),
+            container.clone(),
+        )
+        .expect("spawn workspace");
+
+        assert_eq!(
+            single_tab_launch_target_to_remember(&workspace),
+            Some(container.clone())
+        );
+
+        let host = workspace
+            .add_titled_tab_with("Host", portable_pty::CommandBuilder::new("/bin/sh"))
+            .expect("spawn host tab");
+        assert_eq!(single_tab_launch_target_to_remember(&workspace), None);
+
+        let _ = workspace.write_active(b"exit\n");
+        let _ = workspace.activate(host);
+        let _ = workspace.write_active(b"exit\n");
     }
 }

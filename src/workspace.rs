@@ -1,4 +1,5 @@
 use crate::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
+use crate::containers::LaunchTarget;
 use portable_pty::CommandBuilder;
 use std::io;
 
@@ -50,6 +51,7 @@ pub struct TerminalWorkspace {
 struct TerminalTab {
     id: TabId,
     title: String,
+    launch_target: LaunchTarget,
     panes: Vec<TerminalPane>,
     active_pane: PaneId,
 }
@@ -65,16 +67,31 @@ const COMFORTABLE_MIN_PANE_COLS: usize = 8;
 
 impl TerminalWorkspace {
     pub fn spawn_shell() -> io::Result<Self> {
-        Self::spawn_with(crate::shell::default_shell_command())
+        Self::spawn_launch_target(crate::containers::startup_launch_target())
+    }
+
+    pub fn spawn_launch_target(target: LaunchTarget) -> io::Result<Self> {
+        let title = target.title();
+        let command = target.command();
+        Self::spawn_titled_with_target(title, command, target)
     }
 
     pub fn spawn_with(command: CommandBuilder) -> io::Result<Self> {
+        Self::spawn_titled_with_target("Chelotype", command, LaunchTarget::Host)
+    }
+
+    pub(crate) fn spawn_titled_with_target(
+        title: impl Into<String>,
+        command: CommandBuilder,
+        launch_target: LaunchTarget,
+    ) -> io::Result<Self> {
         let first_tab_id = TabId(1);
         let first_pane_id = PaneId(1);
         Ok(Self {
             tabs: vec![TerminalTab {
                 id: first_tab_id,
-                title: "Chelotype".to_string(),
+                title: title.into(),
+                launch_target,
                 panes: vec![TerminalPane {
                     id: first_pane_id,
                     backend: TerminalBackend::spawn(command)?,
@@ -109,6 +126,21 @@ impl TerminalWorkspace {
         title: impl Into<String>,
         command: CommandBuilder,
     ) -> io::Result<TabId> {
+        self.add_titled_tab_with_target(title, command, LaunchTarget::Host)
+    }
+
+    pub fn add_launch_target_tab(&mut self, target: LaunchTarget) -> io::Result<TabId> {
+        let title = target.title();
+        let command = target.command();
+        self.add_titled_tab_with_target(title, command, target)
+    }
+
+    pub fn add_titled_tab_with_target(
+        &mut self,
+        title: impl Into<String>,
+        command: CommandBuilder,
+        launch_target: LaunchTarget,
+    ) -> io::Result<TabId> {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
         let pane_id = PaneId(self.next_pane_id);
@@ -116,6 +148,7 @@ impl TerminalWorkspace {
         self.tabs.push(TerminalTab {
             id,
             title: title.into(),
+            launch_target,
             panes: vec![TerminalPane {
                 id: pane_id,
                 backend: TerminalBackend::spawn(command)?,
@@ -284,6 +317,13 @@ impl TerminalWorkspace {
             .iter()
             .find(|tab| tab.id == id)
             .map(|tab| tab.title.clone())
+    }
+
+    pub fn tab_launch_target(&self, id: TabId) -> Option<LaunchTarget> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .map(|tab| tab.launch_target.clone())
     }
 
     pub fn tab_index(&self, id: TabId) -> Option<usize> {
@@ -645,6 +685,38 @@ mod tests {
         assert_eq!(workspace.tab_count(), 1);
         assert_eq!(workspace.active_tab_id(), third);
         assert!(!workspace.close(third));
+    }
+
+    #[test]
+    fn workspace_tracks_launch_target_for_tabs() {
+        let target = LaunchTarget::Toolbox {
+            name: "fedora-toolbox-latest".to_string(),
+        };
+        let mut workspace = TerminalWorkspace::spawn_titled_with_target(
+            "fedora-toolbox-latest",
+            shell_command(),
+            target.clone(),
+        )
+        .expect("spawn tab");
+        let first = workspace.active_tab_id();
+        assert_eq!(
+            workspace.tab_title(first).as_deref(),
+            Some("fedora-toolbox-latest")
+        );
+        assert_eq!(workspace.tab_launch_target(first), Some(target));
+
+        let second_target = LaunchTarget::Podman {
+            name: "postgres".to_string(),
+        };
+        let second = workspace
+            .add_titled_tab_with_target("postgres", shell_command(), second_target.clone())
+            .expect("spawn second tab");
+        assert_eq!(workspace.tab_title(second).as_deref(), Some("postgres"));
+        assert_eq!(workspace.tab_launch_target(second), Some(second_target));
+
+        let _ = workspace.write_active(b"exit\n");
+        assert!(workspace.activate(first));
+        let _ = workspace.write_active(b"exit\n");
     }
 
     #[test]

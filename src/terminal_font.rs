@@ -39,16 +39,8 @@ pub fn zoom_reset() {
 }
 
 pub fn load_configured_size() {
-    let Some(path) = config_path() else {
-        return;
-    };
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Some(value) = content
-        .lines()
-        .find_map(|line| line.strip_prefix("font_size_tenths="))
-        .and_then(|value| value.trim().parse::<u32>().ok())
+    let Some(value) =
+        crate::config::read_value("font_size_tenths").and_then(|value| value.parse::<u32>().ok())
     else {
         return;
     };
@@ -67,26 +59,8 @@ fn clamp_size(value: u32) -> u32 {
 }
 
 fn save_configured_size() {
-    let Some(path) = config_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let value = FONT_SIZE_TENTHS.load(Ordering::Relaxed);
-    let _ = std::fs::write(path, format!("font_size_tenths={value}\n"));
-}
-
-fn config_path() -> Option<std::path::PathBuf> {
-    if let Ok(path) = std::env::var("CHELOTYPE_CONFIG_DIR") {
-        return Some(std::path::PathBuf::from(path).join("config"));
-    }
-    if let Ok(path) = std::env::var("XDG_CONFIG_HOME") {
-        return Some(std::path::PathBuf::from(path).join("chelotype/config"));
-    }
-    std::env::var("HOME")
-        .ok()
-        .map(|home| std::path::PathBuf::from(home).join(".config/chelotype/config"))
+    crate::config::write_value("font_size_tenths", &value.to_string());
 }
 
 pub fn layout_for(widget: &gtk::DrawingArea, markup: &str) -> pango::Layout {
