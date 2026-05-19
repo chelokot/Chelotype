@@ -228,7 +228,8 @@ impl WorkspaceHeadlessRuntime {
                         | KeyAction::RedoInput
                         | KeyAction::ZoomIn
                         | KeyAction::ZoomOut
-                        | KeyAction::ZoomReset => Ok(()),
+                        | KeyAction::ZoomReset
+                        | KeyAction::OpenSettings => Ok(()),
                     }
                 } else {
                     Ok(())
@@ -362,7 +363,8 @@ impl HeadlessRuntime {
                         | KeyAction::SplitPane
                         | KeyAction::ZoomIn
                         | KeyAction::ZoomOut
-                        | KeyAction::ZoomReset => Ok(()),
+                        | KeyAction::ZoomReset
+                        | KeyAction::OpenSettings => Ok(()),
                     }
                 } else {
                     Ok(())

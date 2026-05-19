@@ -76,6 +76,13 @@ fn build_ui(app: &Application) {
     header_content.add_css_class("terminal-header");
     header_content.append(&launcher);
     header_content.append(&tab_bar);
+    let settings_button = gtk::Button::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text("Settings")
+        .build();
+    settings_button.set_valign(gtk::Align::Center);
+    settings_button.add_css_class("image-button");
+    header_content.append(&settings_button);
     header_content.append(&gtk::WindowControls::new(gtk::PackType::End));
 
     let header = gtk::WindowHandle::new();
@@ -96,6 +103,13 @@ fn build_ui(app: &Application) {
         .default_height(760)
         .content(&content)
         .build();
+    {
+        let window = window.clone();
+        let canvas = canvas.clone();
+        settings_button.connect_clicked(move |_| {
+            show_preferences_dialog(&window, &canvas);
+        });
+    }
     apply_style(canvas.widget());
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
     let render_snapshot_enabled =
@@ -266,6 +280,8 @@ fn build_ui(app: &Application) {
         let last_size = last_size.clone();
         let keyboard_selection = keyboard_selection.clone();
         let pending_input_latency = pending_input_latency.clone();
+        let window = window.clone();
+        let canvas = canvas.clone();
         key_controller.connect_key_pressed(move |_ctrl, key, _code, state| {
             if let Some(action) = key_to_action(key, state) {
                 match action {
@@ -438,6 +454,9 @@ fn build_ui(app: &Application) {
                             last_size.get(),
                             &workspace,
                         );
+                    }
+                    KeyAction::OpenSettings => {
+                        show_preferences_dialog(&window, &canvas);
                     }
                 }
                 glib::Propagation::Stop
@@ -2197,6 +2216,44 @@ fn show_canvas_context_menu(
 
     widget.insert_action_group("terminal-menu", Some(&actions));
     popover.popup();
+}
+
+fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCanvas) {
+    let window = adw::PreferencesWindow::builder()
+        .title("Settings")
+        .default_width(420)
+        .default_height(280)
+        .transient_for(parent)
+        .modal(true)
+        .build();
+    let page = adw::PreferencesPage::builder().title("General").build();
+    let group = adw::PreferencesGroup::builder().title("Cursor").build();
+
+    let cursor_animation = gtk::Switch::builder()
+        .active(crate::config::cursor_animation_enabled())
+        .valign(gtk::Align::Center)
+        .build();
+    let cursor_row = adw::ActionRow::builder()
+        .title("Animated cursor")
+        .subtitle("Smooth cursor movement while editing")
+        .build();
+    cursor_row.add_suffix(&cursor_animation);
+    cursor_row.set_activatable_widget(Some(&cursor_animation));
+    {
+        let canvas = canvas.clone();
+        cursor_animation.connect_active_notify(move |switch| {
+            crate::config::write_value(
+                "cursor_animation",
+                if switch.is_active() { "on" } else { "off" },
+            );
+            canvas.widget().queue_draw();
+        });
+    }
+
+    group.add(&cursor_row);
+    page.add(&group);
+    window.add(&page);
+    window.present();
 }
 
 type PendingInputLatency =

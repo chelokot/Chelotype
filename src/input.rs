@@ -23,6 +23,7 @@ pub enum KeyAction {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    OpenSettings,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +71,7 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
             gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add => return Some(KeyAction::ZoomIn),
             gdk::Key::minus | gdk::Key::KP_Subtract => return Some(KeyAction::ZoomOut),
             gdk::Key::_0 | gdk::Key::KP_0 => return Some(KeyAction::ZoomReset),
+            gdk::Key::comma => return Some(KeyAction::OpenSettings),
             _ => {}
         }
     }
@@ -398,6 +400,14 @@ mod tests {
         assert_eq!(
             key_to_action(gdk::Key::minus, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::ZoomOut)
+        );
+    }
+
+    #[test]
+    fn maps_settings_shortcut() {
+        assert_eq!(
+            key_to_action(gdk::Key::comma, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::OpenSettings)
         );
     }
 }

@@ -4726,6 +4726,86 @@ fi
 
 #[test]
 #[serial]
+fn gtk_e2e_opens_settings_with_keyboard_shortcut_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk settings e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-settings-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("settings e2e dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+config_dir="$2"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool key --window "$window_id" ctrl+comma
+for _ in {1..60}; do
+    settings_id="$(xdotool search --name 'Settings' | head -n 1 || true)"
+    if [ -n "$settings_id" ]; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "settings window did not open from Ctrl+comma" >&2
+xdotool search --name '.*' getwindowname %@ >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-settings-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            config_dir.to_str().expect("config dir utf8"),
+        ])
+        .output()
+        .expect("run gtk settings e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk settings e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_supports_keyboard_selection_and_word_navigation_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!(
