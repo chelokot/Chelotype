@@ -60,16 +60,20 @@ Prompt-to-artifact checklist
   - Status: partial; no CI container image yet.
 - Workspaces, tabs/splits, command blocks, smooth scrolling
   - Evidence: `src/workspace.rs` provides active-tab routing, multi-tab ownership, active-pane routing inside each tab, active-tab multi-pane render snapshots, and active-tab pane resizing; `src/workspace_render.rs` builds one structured render frame per pane with deterministic pane geometry; `src/app.rs` routes keyboard, mouse, scroll, resize, scripted input, visible GTK split-pane rendering, and snapshots through the active workspace pane/tab; the header exposes tab buttons and a new-tab button; `src/command_blocks.rs` builds semantic-prompt command blocks; `src/diagnostics.rs` exports command-block metadata and headless split-pane workspace render dumps.
-  - Coverage: workspace unit tests prove tab identity switching, isolated terminal state across two top-level tabs, isolated terminal state across two real panes inside one tab, simultaneous snapshot extraction for all panes in the active tab, and even pane resizing; workspace render unit tests prove deterministic column layout for split panes; input unit tests cover tab and split shortcuts; GTK e2e creates a second terminal tab, verifies active tab isolation, switches back, creates a real split pane, types into it, and verifies a workspace render dump with both panes; `headless_mode_exports_workspace_split_render_dump` proves split-pane render-state export from two real PTYs; command-block unit tests, renderer tests, and OSC 133 headless e2e prove prompt/continuation/output row boundaries.
-  - Status: partial; visible tabs, split-pane workspace ownership, headless render dumps, and basic GTK split-pane rendering exist, but rich split interaction, smooth scroll model, and command-block UI are not implemented yet.
+  - Coverage: workspace unit tests prove tab identity switching, isolated terminal state across two top-level tabs, isolated terminal state across two real panes inside one tab, simultaneous snapshot extraction for all panes in the active tab, and even pane resizing; workspace render unit tests prove deterministic column layout for split panes; input unit tests cover tab and split shortcuts; GTK e2e creates a second terminal tab, verifies active tab isolation, switches back, creates a real split pane, types into it, verifies a workspace render dump with both panes, then clicks back into the left split pane and proves subsequent input is routed there; `headless_mode_exports_workspace_split_render_dump` proves split-pane render-state export from two real PTYs; command-block unit tests, renderer tests, and OSC 133 headless e2e prove prompt/continuation/output row boundaries.
+  - Status: partial; visible tabs, split-pane workspace ownership, headless render dumps, basic GTK split-pane rendering, and click-to-activate split routing exist, but split-local selection polish, smooth scroll model, and command-block UI are not implemented yet.
 
 Current green commands
 
 - `bash scripts/with-zig.sh cargo fmt -- --check`
 - `bash scripts/with-zig.sh cargo check`
-- `bash scripts/with-zig.sh cargo test`
+- `bash scripts/with-zig.sh cargo clippy --all-targets -- -D warnings`
+- `bash scripts/with-zig.sh cargo test --lib --bins`
+- `bash scripts/with-zig.sh cargo test --test backend_integration_tests -- --nocapture --test-threads=1`
+- `bash scripts/with-zig.sh cargo test --test headless_diagnostics_tests -- --nocapture --test-threads=1`
+- `bash scripts/with-zig.sh cargo test --test gtk_e2e_tests -- --nocapture --test-threads=1`
 - `bash scripts/with-zig.sh cargo bench --bench pipeline -- --sample-size 10`
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are advanced grapheme/IME tests, split-pane UI, command-block UI, smooth scrolling, and memory/allocation perf gates.
+The milestone is not complete. The next highest-value gaps are advanced grapheme/IME tests, split-local selection polish, split resize UI, command-block UI, smooth scrolling, and memory/allocation perf gates.

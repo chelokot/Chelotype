@@ -14,7 +14,7 @@ use crate::selection::{
 };
 use crate::snapshot::{write_snapshot_with_selection, write_workspace_render_snapshot};
 use crate::terminal_font::metrics_for_widget;
-use crate::workspace::{TabId, TerminalWorkspace};
+use crate::workspace::{PaneId, TabId, TerminalWorkspace};
 use crate::workspace_render::{WorkspaceRenderFrame, WorkspaceRenderLayout};
 use adw::Application;
 use adw::prelude::*;
@@ -100,6 +100,7 @@ fn build_ui(app: &Application) {
     let last_size = std::rc::Rc::new(std::cell::Cell::new(None::<ScreenSize>));
     let cell_metrics = std::rc::Rc::new(std::cell::Cell::new(None::<CellMetrics>));
     let active_pane_origin_col = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let pane_hits = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PaneHit>::new()));
     let geometry_trace = std::env::var("CHELOTYPE_GEOMETRY_TRACE")
         .ok()
         .map(std::path::PathBuf::from);
@@ -326,6 +327,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let pane_hits = pane_hits.clone();
         let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
@@ -339,12 +341,24 @@ fn build_ui(app: &Application) {
             canvas_widget.grab_focus();
             drag_gesture_moved.set(false);
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
-            if let Some(position) =
-                pointer_grid_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+            if let Some(target) =
+                pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
             {
+                activate_pointer_pane(
+                    target,
+                    PointerPaneActivation {
+                        workspace: &workspace,
+                        content: &content,
+                        mouse_mode: &mode,
+                        active_origin: &active_origin,
+                        selection: &selection,
+                        selection_text: &selection_text,
+                        selection_dirty: &selection_dirty,
+                    },
+                );
                 crate::logging::debug_log(&format!(
                     "mouse press grid col={} row={}",
-                    position.column, position.row
+                    target.position.column, target.position.row
                 ));
                 let current_mode = current_mouse_mode(&content, mode.get());
                 crate::logging::debug_log(&format!("mouse press mode={current_mode:?}"));
@@ -354,7 +368,7 @@ fn build_ui(app: &Application) {
                         &selection,
                         &selection_text,
                         &selection_dirty,
-                        position,
+                        target.position,
                         press_count,
                     )
                 {
@@ -366,7 +380,7 @@ fn build_ui(app: &Application) {
                 let effects =
                     pointer_interaction
                         .borrow_mut()
-                        .press(current_mode, button, position);
+                        .press(current_mode, button, target.position);
                 crate::logging::debug_log(&format!("mouse press effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
@@ -382,6 +396,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let pane_hits = pane_hits.clone();
         let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
@@ -408,14 +423,26 @@ fn build_ui(app: &Application) {
                 );
                 return;
             }
-            if let Some(cell_position) =
-                pointer_grid_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+            if let Some(target) =
+                pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
             {
+                activate_pointer_pane(
+                    target,
+                    PointerPaneActivation {
+                        workspace: &workspace,
+                        content: &content,
+                        mouse_mode: &mode,
+                        active_origin: &active_origin,
+                        selection: &selection,
+                        selection_text: &selection_text,
+                        selection_dirty: &selection_dirty,
+                    },
+                );
                 let position = if current_mode.sends_press_release() {
-                    cell_position
+                    target.position
                 } else {
-                    pointer_cursor_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
-                        .unwrap_or(cell_position)
+                    pointer_cursor_position_for_target(metrics.get(), target, x, y)
+                        .unwrap_or(target.position)
                 };
                 crate::logging::debug_log(&format!(
                     "mouse release grid col={} row={}",
@@ -474,6 +501,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
+        let pane_hits = pane_hits.clone();
         let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
@@ -489,13 +517,25 @@ fn build_ui(app: &Application) {
             }
             canvas_widget.grab_focus();
             drag_gesture_moved.set(false);
-            if let Some(position) =
-                pointer_grid_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+            if let Some(target) =
+                pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
             {
+                activate_pointer_pane(
+                    target,
+                    PointerPaneActivation {
+                        workspace: &workspace,
+                        content: &content,
+                        mouse_mode: &mode,
+                        active_origin: &active_origin,
+                        selection: &selection,
+                        selection_text: &selection_text,
+                        selection_dirty: &selection_dirty,
+                    },
+                );
                 let effects = pointer_interaction.borrow_mut().press(
                     MouseMode::default(),
                     MouseButton::Left,
-                    position,
+                    target.position,
                 );
                 crate::logging::debug_log(&format!("drag begin effects={effects:?}"));
                 apply_interaction_effects(
@@ -512,7 +552,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
-        let active_origin = active_pane_origin_col.clone();
+        let pane_hits = pane_hits.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -527,15 +567,15 @@ fn build_ui(app: &Application) {
             let Some((start_x, start_y)) = gesture.start_point() else {
                 return;
             };
-            if let Some(position) = pointer_grid_position_in_active_pane(
+            if let Some(target) = pointer_grid_position_for_panes(
                 metrics.get(),
-                active_origin.get(),
+                &pane_hits.borrow(),
                 start_x + offset_x,
                 start_y + offset_y,
             ) {
                 let effects = pointer_interaction
                     .borrow_mut()
-                    .motion(MouseMode::default(), position);
+                    .motion(MouseMode::default(), target.position);
                 if effects
                     .iter()
                     .any(|effect| matches!(effect, InteractionEffect::SelectionChanged(Some(_))))
@@ -557,7 +597,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
-        let active_origin = active_pane_origin_col.clone();
+        let pane_hits = pane_hits.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -572,15 +612,15 @@ fn build_ui(app: &Application) {
             let Some((start_x, start_y)) = gesture.start_point() else {
                 return;
             };
-            let effects = if let Some(position) = pointer_grid_position_in_active_pane(
+            let effects = if let Some(target) = pointer_grid_position_for_panes(
                 metrics.get(),
-                active_origin.get(),
+                &pane_hits.borrow(),
                 start_x + offset_x,
                 start_y + offset_y,
             ) {
                 pointer_interaction
                     .borrow_mut()
-                    .release(MouseMode::default(), position)
+                    .release(MouseMode::default(), target.position)
             } else {
                 pointer_interaction.borrow_mut().cancel()
             };
@@ -631,7 +671,7 @@ fn build_ui(app: &Application) {
     {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
-        let active_origin = active_pane_origin_col.clone();
+        let pane_hits = pane_hits.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -644,16 +684,16 @@ fn build_ui(app: &Application) {
             if !current_mode.sends_drag() {
                 return;
             }
-            if let Some(position) =
-                pointer_grid_position_in_active_pane(metrics.get(), active_origin.get(), x, y)
+            if let Some(target) =
+                pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
             {
                 crate::logging::debug_log(&format!(
                     "mouse motion grid col={} row={}",
-                    position.column, position.row
+                    target.position.column, target.position.row
                 ));
                 let effects = pointer_interaction
                     .borrow_mut()
-                    .motion(current_mode, position);
+                    .motion(current_mode, target.position);
                 crate::logging::debug_log(&format!("mouse motion effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
@@ -776,6 +816,15 @@ fn build_ui(app: &Application) {
                     .map(|pane| pane.origin_col)
                     .unwrap_or(0),
             );
+            *pane_hits.borrow_mut() = rendered
+                .panes
+                .iter()
+                .map(|pane| PaneHit {
+                    id: PaneId::from_raw(pane.pane_id),
+                    origin_col: pane.origin_col,
+                    cols: pane.cols,
+                })
+                .collect();
             let allocations_after = crate::allocation_trace::snapshot();
             crate::perf_trace::record_counter(
                 "gtk_render_allocs",
@@ -846,6 +895,7 @@ fn build_ui(app: &Application) {
         }
 
         active_pane_origin_col.set(0);
+        pane_hits.borrow_mut().clear();
         let terminal_content = if force {
             workspace_rc.borrow_mut().snapshot_active_renderable()
         } else {
@@ -2165,6 +2215,29 @@ struct CellMetrics {
     height: f64,
 }
 
+#[derive(Clone, Copy)]
+struct PaneHit {
+    id: PaneId,
+    origin_col: usize,
+    cols: usize,
+}
+
+#[derive(Clone, Copy)]
+struct PointerPanePosition {
+    pane: Option<PaneHit>,
+    position: MouseGridPosition,
+}
+
+struct PointerPaneActivation<'a> {
+    workspace: &'a std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: &'a std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+    mouse_mode: &'a std::rc::Rc<std::cell::Cell<MouseMode>>,
+    active_origin: &'a std::rc::Rc<std::cell::Cell<usize>>,
+    selection: &'a std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+    selection_text: &'a std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    selection_dirty: &'a std::rc::Rc<std::cell::Cell<bool>>,
+}
+
 fn terminal_metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalMetrics> {
     let width = widget.allocated_width();
     let height = widget.allocated_height();
@@ -2185,8 +2258,43 @@ fn terminal_metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalMetr
     })
 }
 
-fn pointer_grid_position(
+fn pointer_grid_position_for_panes(
     metrics: Option<CellMetrics>,
+    panes: &[PaneHit],
+    x: f64,
+    y: f64,
+) -> Option<PointerPanePosition> {
+    let metrics = metrics?;
+    if x < 0.0 || y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
+        return None;
+    }
+    let column = (x / metrics.width).floor().max(0.0) as usize;
+    let row = ((y / metrics.height).floor() as i32).clamp(0, u16::MAX as i32) as u16;
+    if let Some(pane) = panes.iter().copied().find(|pane| {
+        column >= pane.origin_col && column < pane.origin_col.saturating_add(pane.cols)
+    }) {
+        return Some(PointerPanePosition {
+            pane: Some(pane),
+            position: MouseGridPosition {
+                column: column
+                    .saturating_sub(pane.origin_col)
+                    .min(u16::MAX as usize) as u16,
+                row,
+            },
+        });
+    }
+    Some(PointerPanePosition {
+        pane: None,
+        position: MouseGridPosition {
+            column: column.min(u16::MAX as usize) as u16,
+            row,
+        },
+    })
+}
+
+fn pointer_cursor_position_for_target(
+    metrics: Option<CellMetrics>,
+    target: PointerPanePosition,
     x: f64,
     y: f64,
 ) -> Option<MouseGridPosition> {
@@ -2194,45 +2302,38 @@ fn pointer_grid_position(
     if x < 0.0 || y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
         return None;
     }
-    Some(MouseGridPosition {
-        column: ((x / metrics.width).floor() as i32).clamp(0, u16::MAX as i32) as u16,
-        row: ((y / metrics.height).floor() as i32).clamp(0, u16::MAX as i32) as u16,
-    })
-}
-
-fn pointer_grid_position_in_active_pane(
-    metrics: Option<CellMetrics>,
-    origin_col: usize,
-    x: f64,
-    y: f64,
-) -> Option<MouseGridPosition> {
-    let metrics = metrics?;
-    pointer_grid_position(Some(metrics), x - origin_col as f64 * metrics.width, y)
-}
-
-fn pointer_cursor_position(
-    metrics: Option<CellMetrics>,
-    x: f64,
-    y: f64,
-) -> Option<MouseGridPosition> {
-    let metrics = metrics?;
-    if x < 0.0 || y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
+    let origin_col = target.pane.map(|pane| pane.origin_col).unwrap_or(0);
+    let local_x = x - origin_col as f64 * metrics.width;
+    if local_x < 0.0 {
         return None;
     }
     Some(MouseGridPosition {
-        column: ((x / metrics.width).round() as i32).clamp(0, u16::MAX as i32) as u16,
+        column: ((local_x / metrics.width).round() as i32).clamp(0, u16::MAX as i32) as u16,
         row: ((y / metrics.height).floor() as i32).clamp(0, u16::MAX as i32) as u16,
     })
 }
 
-fn pointer_cursor_position_in_active_pane(
-    metrics: Option<CellMetrics>,
-    origin_col: usize,
-    x: f64,
-    y: f64,
-) -> Option<MouseGridPosition> {
-    let metrics = metrics?;
-    pointer_cursor_position(Some(metrics), x - origin_col as f64 * metrics.width, y)
+fn activate_pointer_pane(target: PointerPanePosition, activation: PointerPaneActivation<'_>) {
+    let Some(pane) = target.pane else {
+        return;
+    };
+    let already_active = activation.workspace.borrow().active_pane_id() == pane.id;
+    if !already_active && activation.workspace.borrow_mut().activate_pane(pane.id) {
+        clear_selection(
+            activation.selection,
+            activation.selection_text,
+            activation.selection_dirty,
+        );
+    }
+    activation.active_origin.set(pane.origin_col);
+    if let Some(fresh_content) = activation
+        .workspace
+        .borrow_mut()
+        .snapshot_active_renderable()
+    {
+        activation.mouse_mode.set(fresh_content.mouse);
+        *activation.content.borrow_mut() = Some(fresh_content);
+    }
 }
 
 fn mouse_button_from_gesture(gesture: &gtk::GestureClick) -> Option<MouseButton> {
