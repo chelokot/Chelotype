@@ -8,6 +8,16 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(530);
+const COMMAND_BLOCK_RAIL: RgbU8 = RgbU8 {
+    red: 46,
+    green: 166,
+    blue: 199,
+};
+const COMMAND_BLOCK_BG: RgbU8 = RgbU8 {
+    red: 18,
+    green: 23,
+    blue: 31,
+};
 
 #[derive(Clone)]
 pub struct TerminalCanvas {
@@ -184,6 +194,7 @@ fn draw_render_frame(
     cell_width: f64,
     line_height: f64,
 ) {
+    draw_command_blocks(context, render, line_height, cell_width);
     for line in &render.lines {
         let top = line.row as f64 * line_height;
         for run in &line.runs {
@@ -211,6 +222,27 @@ fn draw_render_frame(
         }
     } else if let Some(preedit) = &render.preedit {
         draw_preedit(widget, context, render, preedit, line_height, cell_width);
+    }
+}
+
+fn draw_command_blocks(
+    context: &cairo::Context,
+    render: &RenderFrame,
+    line_height: f64,
+    cell_width: f64,
+) {
+    for block in &render.command_blocks {
+        if block.end_row < block.prompt_start_row {
+            continue;
+        }
+        let top = block.prompt_start_row as f64 * line_height;
+        let height = (block.end_row - block.prompt_start_row + 1) as f64 * line_height;
+        set_rgb(context, COMMAND_BLOCK_BG);
+        context.rectangle(0.0, top, cell_width * 0.5, height);
+        let _ = context.fill();
+        set_rgb(context, COMMAND_BLOCK_RAIL);
+        context.rectangle(0.0, top + 2.0, 2.0, (height - 4.0).max(1.0));
+        let _ = context.fill();
     }
 }
 
@@ -250,6 +282,21 @@ fn draw_pane_separator(context: &cairo::Context, left: f64, top: f64, height: f6
     context.set_source_rgb(48.0 / 255.0, 51.0 / 255.0, 58.0 / 255.0);
     context.rectangle(left.round() - 1.0, top, 1.0, height);
     let _ = context.fill();
+}
+
+#[derive(Clone, Copy)]
+struct RgbU8 {
+    red: u8,
+    green: u8,
+    blue: u8,
+}
+
+fn set_rgb(context: &cairo::Context, color: RgbU8) {
+    context.set_source_rgb(
+        f64::from(color.red) / 255.0,
+        f64::from(color.green) / 255.0,
+        f64::from(color.blue) / 255.0,
+    );
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
