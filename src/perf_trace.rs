@@ -34,3 +34,7 @@ pub fn record_counter(event: &str, value: u64) {
         let _ = writeln!(guard, "{event}\t{value}");
     }
 }
+
+pub fn enabled() -> bool {
+    trace_file().is_some()
+}

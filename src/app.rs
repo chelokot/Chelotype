@@ -738,6 +738,11 @@ fn build_ui(app: &Application) {
                     .bytes
                     .saturating_sub(allocations_before.bytes),
             );
+            if crate::perf_trace::enabled()
+                && let Some(rss_kib) = crate::process_metrics::resident_set_kib()
+            {
+                crate::perf_trace::record_counter("process_rss_kib", rss_kib);
+            }
             canvas.set_render(rendered);
             record_pending_input_latency(&pending_input_latency);
             if selection_changed {

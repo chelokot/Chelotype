@@ -1090,6 +1090,7 @@ fi
     let input_to_render = perf_samples(&perf_trace, "input_to_render");
     let render_allocs = perf_counters(&perf_trace, "gtk_render_allocs");
     let render_alloc_bytes = perf_counters(&perf_trace, "gtk_render_alloc_bytes");
+    let rss_kib = perf_counters(&perf_trace, "process_rss_kib");
     assert!(
         render.len() >= 80,
         "held-key produced too few render samples: {}",
@@ -1110,6 +1111,11 @@ fi
         "held-key produced too few allocation samples: {}",
         render_allocs.len()
     );
+    assert!(
+        rss_kib.len() >= 80,
+        "held-key produced too few process RSS samples: {}",
+        rss_kib.len()
+    );
     let render_p95 = percentile_duration(render.clone(), 95);
     let render_p99 = percentile_duration(render, 99);
     let paint_p95 = percentile_duration(paint.clone(), 95);
@@ -1120,6 +1126,9 @@ fi
     let render_allocs_p99 = percentile_counter(render_allocs, 99);
     let render_alloc_bytes_p95 = percentile_counter(render_alloc_bytes.clone(), 95);
     let render_alloc_bytes_p99 = percentile_counter(render_alloc_bytes, 99);
+    let rss_min = *rss_kib.iter().min().expect("rss samples");
+    let rss_max = *rss_kib.iter().max().expect("rss samples");
+    let rss_growth = rss_max.saturating_sub(rss_min);
     assert!(
         render_p95 <= Duration::from_millis(8),
         "held-key gtk_render p95 exceeded 120 Hz budget: {render_p95:?}"
@@ -1159,6 +1168,11 @@ fi
     assert!(
         render_alloc_bytes_p99 <= 5_000_000,
         "held-key gtk_render allocated-byte p99 too high: {render_alloc_bytes_p99}"
+    );
+    assert!(rss_min > 0, "held-key process RSS samples must be non-zero");
+    assert!(
+        rss_growth <= 96 * 1024,
+        "held-key process RSS growth too high: min={rss_min} KiB max={rss_max} KiB growth={rss_growth} KiB"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
