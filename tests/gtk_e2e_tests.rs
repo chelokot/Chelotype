@@ -3622,6 +3622,127 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_persists_terminal_zoom_between_app_restarts_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk zoom persistence e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-zoom-persistence-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let first_geometry_trace = dir.join("first-geometry.env");
+    let second_geometry_trace = dir.join("second-geometry.env");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+config_dir="$2"
+first_geometry_trace="$3"
+second_geometry_trace="$4"
+
+launch_app() {
+    local geometry_trace="$1"
+    rm -f "$geometry_trace"
+    GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+    app_pid="$!"
+    window_id=""
+    for _ in {1..80}; do
+        window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+        if [ -n "$window_id" ] && [ -f "$geometry_trace" ]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "chelotype window or geometry did not appear for $geometry_trace" >&2
+    return 1
+}
+
+read_cell_width() {
+    sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$1"
+}
+
+app_pid=""
+trap 'if [ -n "${app_pid:-}" ]; then kill "$app_pid" 2>/dev/null || true; fi' EXIT
+launch_app "$first_geometry_trace"
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+initial="$(read_cell_width "$first_geometry_trace")"
+xdotool key --window "$window_id" ctrl+plus
+xdotool key --window "$window_id" ctrl+plus
+for _ in {1..80}; do
+    zoomed="$(read_cell_width "$first_geometry_trace")"
+    if awk -v zoomed="$zoomed" -v initial="$initial" 'BEGIN { exit !(zoomed > initial + 0.6) }'; then
+        break
+    fi
+    sleep 0.05
+done
+zoomed="$(read_cell_width "$first_geometry_trace")"
+if ! awk -v zoomed="$zoomed" -v initial="$initial" 'BEGIN { exit !(zoomed > initial + 0.6) }'; then
+    echo "Ctrl+plus did not persistently increase cell width: initial=$initial zoomed=$zoomed" >&2
+    exit 1
+fi
+if ! grep -F 'font_size_tenths=150' "$config_dir/config" >/dev/null 2>&1; then
+    echo "zoom config was not written after keyboard zoom" >&2
+    cat "$config_dir/config" >&2 || true
+    exit 1
+fi
+kill "$app_pid"
+wait "$app_pid" 2>/dev/null || true
+app_pid=""
+sleep 0.3
+
+launch_app "$second_geometry_trace"
+restarted="$(read_cell_width "$second_geometry_trace")"
+if ! awk -v restarted="$restarted" -v initial="$initial" 'BEGIN { exit !(restarted > initial + 0.6) }'; then
+    echo "restarted app did not load persisted terminal zoom: initial=$initial restarted=$restarted" >&2
+    cat "$config_dir/config" >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-zoom-persistence-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            config_dir.to_str().expect("config dir utf8"),
+            first_geometry_trace
+                .to_str()
+                .expect("first geometry trace path utf8"),
+            second_geometry_trace
+                .to_str()
+                .expect("second geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk zoom persistence e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk zoom persistence e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_supports_keyboard_selection_and_word_navigation_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!(
