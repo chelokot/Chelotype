@@ -1632,6 +1632,8 @@ fi
     let render = perf_samples(&perf_trace, "gtk_render");
     let paint = perf_samples(&perf_trace, "gtk_paint");
     let input_to_render = perf_samples(&perf_trace, "input_to_render");
+    let input_allocs = perf_counters(&perf_trace, "input_allocs_to_render");
+    let input_alloc_bytes = perf_counters(&perf_trace, "input_alloc_bytes_to_render");
     let render_allocs = perf_counters(&perf_trace, "gtk_render_allocs");
     let render_alloc_bytes = perf_counters(&perf_trace, "gtk_render_alloc_bytes");
     let rss_kib = perf_counters(&perf_trace, "process_rss_kib");
@@ -1651,6 +1653,16 @@ fi
         input_to_render.len()
     );
     assert!(
+        input_allocs.len() >= 80,
+        "held-key produced too few input allocation samples: {}",
+        input_allocs.len()
+    );
+    assert!(
+        input_alloc_bytes.len() >= 80,
+        "held-key produced too few input allocated-byte samples: {}",
+        input_alloc_bytes.len()
+    );
+    assert!(
         render_allocs.len() >= 80,
         "held-key produced too few allocation samples: {}",
         render_allocs.len()
@@ -1666,6 +1678,10 @@ fi
     let paint_p99 = percentile_duration(paint, 99);
     let input_to_render_p95 = percentile_duration(input_to_render.clone(), 95);
     let input_to_render_p99 = percentile_duration(input_to_render, 99);
+    let input_allocs_p95 = percentile_counter(input_allocs.clone(), 95);
+    let input_allocs_p99 = percentile_counter(input_allocs, 99);
+    let input_alloc_bytes_p95 = percentile_counter(input_alloc_bytes.clone(), 95);
+    let input_alloc_bytes_p99 = percentile_counter(input_alloc_bytes, 99);
     let render_allocs_p95 = percentile_counter(render_allocs.clone(), 95);
     let render_allocs_p99 = percentile_counter(render_allocs, 99);
     let render_alloc_bytes_p95 = percentile_counter(render_alloc_bytes.clone(), 95);
@@ -1696,6 +1712,22 @@ fi
     assert!(
         input_to_render_p99 <= Duration::from_millis(33),
         "held-key input_to_render p99 exceeded two-frame budget: {input_to_render_p99:?}"
+    );
+    assert!(
+        input_allocs_p95 <= 18_000,
+        "held-key input allocation p95 too high: {input_allocs_p95}"
+    );
+    assert!(
+        input_allocs_p99 <= 36_000,
+        "held-key input allocation p99 too high: {input_allocs_p99}"
+    );
+    assert!(
+        input_alloc_bytes_p95 <= 3_000_000,
+        "held-key input allocated-byte p95 too high: {input_alloc_bytes_p95}"
+    );
+    assert!(
+        input_alloc_bytes_p99 <= 6_000_000,
+        "held-key input allocated-byte p99 too high: {input_alloc_bytes_p99}"
     );
     assert!(
         render_allocs_p95 <= 15_000,

@@ -147,7 +147,7 @@ fn build_ui(app: &Application) {
     let last_content = std::rc::Rc::new(std::cell::RefCell::new(None::<RenderableContentOwned>));
     let pending_input_latency =
         std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::<
-            std::time::Instant,
+            PendingInputSample,
         >::new()));
     add_existing_workspace_pages(&tab_view, &tab_pages, &workspace_rc.borrow());
     let tab_context = TabContext {
@@ -2169,20 +2169,40 @@ fn show_canvas_context_menu(
 }
 
 type PendingInputLatency =
-    std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<std::time::Instant>>>;
+    std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<PendingInputSample>>>;
+
+#[derive(Clone, Copy, Debug)]
+struct PendingInputSample {
+    started: std::time::Instant,
+    allocations: crate::allocation_trace::AllocationSnapshot,
+}
 
 fn mark_pending_input_latency(pending_input_latency: &PendingInputLatency) {
     pending_input_latency
         .borrow_mut()
-        .push_back(std::time::Instant::now());
+        .push_back(PendingInputSample {
+            started: std::time::Instant::now(),
+            allocations: crate::allocation_trace::snapshot(),
+        });
 }
 
 fn record_pending_input_latency(pending_input_latency: &PendingInputLatency) {
     let finished = std::time::Instant::now();
-    for started in pending_input_latency.borrow_mut().drain(..) {
+    let allocations = crate::allocation_trace::snapshot();
+    for sample in pending_input_latency.borrow_mut().drain(..) {
         crate::perf_trace::record_duration(
             "input_to_render",
-            finished.saturating_duration_since(started),
+            finished.saturating_duration_since(sample.started),
+        );
+        crate::perf_trace::record_counter(
+            "input_allocs_to_render",
+            allocations
+                .allocations
+                .saturating_sub(sample.allocations.allocations),
+        );
+        crate::perf_trace::record_counter(
+            "input_alloc_bytes_to_render",
+            allocations.bytes.saturating_sub(sample.allocations.bytes),
         );
     }
 }

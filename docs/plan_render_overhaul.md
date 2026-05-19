@@ -16,10 +16,8 @@ Current architecture
 
 Next implementation order
 
-1. Replace Pango-line markup drawing with direct per-run or per-cell drawing batches.
-2. Extend GTK window event e2e beyond launch, typing, Enter, resize, drag selection, and warnings/errors to cover click-specific cursor behavior, stronger color/cursor assertions, and screenshot/pixel checks.
-3. Add clipboard-backed selection export.
-4. Add shell cursor placement strategy for mouse-driven command editing.
-5. Add smooth scrolling and command-block metadata.
-6. Add workspace/tab/split session model where each visible terminal pane owns exactly one PTY and one `libghostty-vt` terminal, and tabs can group one or more panes.
-7. Add GTK paint-path perf gates and allocation tracking.
+1. Add richer non-Latin IM/preedit layout and styling coverage.
+2. Add richer command-block interactions on top of OSC 133 metadata.
+3. Strengthen scrollback reflow coverage across resize, selection, and smooth-scroll states.
+4. Add deeper allocation/source attribution beyond per-input and per-render counters.
+5. Keep replacing broad full-frame work with smaller dirty-region render and paint paths.

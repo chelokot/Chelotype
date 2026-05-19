@@ -16,6 +16,10 @@ Live snapshots
 - Set `CHELOTYPE_SNAPSHOT=1` while running the UI; one snapshot per second is written to the snapshot directory.
 - Use `CHELOTYPE_SNAPSHOT_DIR` to override the dump location.
 - Set `CHELOTYPE_RENDER_SNAPSHOT=1` with live snapshots to also emit `.render.json`/`.render.html` files for the active rendered frame. These include transient UI overlays such as IM preedit text at the terminal cursor, which are not part of the PTY-backed terminal grid until committed.
+- Set `CHELOTYPE_GEOMETRY_TRACE=/path/to/file.env` to write canvas geometry, grid size, cell width, and line height for real-window automation.
+- Set `CHELOTYPE_SCROLL_TRACE=/path/to/file.tsv` to write GTK wheel-scroll enqueue/step/idle events for smooth-scroll automation.
+- Set `CHELOTYPE_CLIPBOARD_TRACE=/path/to/file.tsv` to write PRIMARY/CLIPBOARD selection exports.
+- Set `CHELOTYPE_PERF_TRACE=/path/to/file.tsv` to write `input_to_render`, per-input allocation-to-render, GTK render/paint, per-render allocation, and RSS samples.
 
 Usage tips
 - Inspect `markup.html` for GTK markup fidelity and color mismatches.
