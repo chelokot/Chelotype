@@ -115,12 +115,18 @@ fn build_ui(app: &Application) {
         .ok()
         .as_deref()
         == Some("1");
+    let synthetic_click_cancel_on_drag_begin =
+        std::env::var("CHELOTYPE_TEST_CLICK_CANCEL_ON_DRAG_BEGIN")
+            .ok()
+            .as_deref()
+            == Some("1");
     let mouse_mode = std::rc::Rc::new(std::cell::Cell::new(crate::backend::MouseMode::default()));
     let pointer_interaction =
         std::rc::Rc::new(std::cell::RefCell::new(PointerInteraction::default()));
     let pointer_pane_capture = std::rc::Rc::new(std::cell::Cell::new(None::<PaneHit>));
     let split_resize_drag = std::rc::Rc::new(std::cell::Cell::new(None::<SplitResizeDrag>));
     let drag_gesture_moved = std::rc::Rc::new(std::cell::Cell::new(false));
+    let drag_gesture_active = std::rc::Rc::new(std::cell::Cell::new(false));
     let left_pointer_down = std::rc::Rc::new(std::cell::Cell::new(false));
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
     let selection_text = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
@@ -303,6 +309,14 @@ fn build_ui(app: &Application) {
                             },
                         );
                     }
+                    KeyAction::UndoInput => {
+                        mark_pending_input_latency(&pending_input_latency);
+                        let _ = workspace.borrow_mut().write_active(b"\x1f");
+                    }
+                    KeyAction::RedoInput => {
+                        mark_pending_input_latency(&pending_input_latency);
+                        let _ = workspace.borrow_mut().write_active(b"\x1bxredo\r");
+                    }
                     KeyAction::ZoomIn => {
                         mark_pending_input_latency(&pending_input_latency);
                         crate::terminal_font::zoom_in();
@@ -405,6 +419,7 @@ fn build_ui(app: &Application) {
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
+        let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         let canvas_widget = canvas.widget().clone();
         let pending_input_latency = pending_input_latency.clone();
@@ -420,6 +435,7 @@ fn build_ui(app: &Application) {
         click_controller.connect_pressed(move |gesture, press_count, x, y| {
             canvas_widget.grab_focus();
             left_pointer_down.set(false);
+            drag_gesture_active.set(false);
             drag_gesture_moved.set(false);
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
             if split_resize_boundary_at(metrics.get(), &pane_hits.borrow(), x).is_some() {
@@ -504,10 +520,12 @@ fn build_ui(app: &Application) {
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
+        let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
             left_pointer_down.set(false);
+            drag_gesture_active.set(false);
             let current_mode = current_mouse_mode(&content, mode.get());
             if drag_gesture_moved.get() && !current_mode.sends_press_release() {
                 pointer_pane_capture.set(None);
@@ -594,11 +612,15 @@ fn build_ui(app: &Application) {
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
+        let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         gtk::prelude::GestureExt::connect_cancel(&click_controller, move |_gesture, _sequence| {
-            left_pointer_down.set(false);
-            pointer_pane_capture.set(None);
-            let effects = pointer_interaction.borrow_mut().cancel();
+            let effects = cancel_click_gesture(
+                &drag_gesture_active,
+                &left_pointer_down,
+                &pointer_pane_capture,
+                &pointer_interaction,
+            );
             crate::logging::debug_log(&format!("mouse gesture cancelled effects={effects:?}"));
             apply_interaction_effects(
                 effects,
@@ -632,12 +654,14 @@ fn build_ui(app: &Application) {
         let pointer_pane_capture = pointer_pane_capture.clone();
         let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
+        let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         let canvas_widget = canvas.widget().clone();
         drag_controller.connect_drag_begin(move |_gesture, x, y| {
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
                 return;
             }
+            drag_gesture_active.set(true);
             left_pointer_down.set(true);
             canvas_widget.grab_focus();
             drag_gesture_moved.set(false);
@@ -694,6 +718,26 @@ fn build_ui(app: &Application) {
                     &keyboard_selection,
                     &content,
                 );
+                if synthetic_click_cancel_on_drag_begin {
+                    let effects = cancel_click_gesture(
+                        &drag_gesture_active,
+                        &left_pointer_down,
+                        &pointer_pane_capture,
+                        &pointer_interaction,
+                    );
+                    crate::logging::debug_log(&format!(
+                        "synthetic click cancel during drag begin effects={effects:?}"
+                    ));
+                    apply_interaction_effects(
+                        effects,
+                        &workspace,
+                        &selection,
+                        &selection_text,
+                        &selection_dirty,
+                        &keyboard_selection,
+                        &content,
+                    );
+                }
             }
         });
     }
@@ -817,9 +861,11 @@ fn build_ui(app: &Application) {
         let pointer_pane_capture = pointer_pane_capture.clone();
         let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
+        let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         drag_controller.connect_drag_end(move |gesture, offset_x, offset_y| {
             left_pointer_down.set(false);
+            drag_gesture_active.set(false);
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
                 return;
             }
@@ -875,9 +921,11 @@ fn build_ui(app: &Application) {
         let pointer_pane_capture = pointer_pane_capture.clone();
         let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
+        let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         gtk::prelude::GestureExt::connect_cancel(&drag_controller, move |_gesture, _sequence| {
             left_pointer_down.set(false);
+            drag_gesture_active.set(false);
             drag_gesture_moved.set(false);
             pointer_pane_capture.set(None);
             split_resize_drag.set(None);
@@ -2625,6 +2673,21 @@ fn write_trace_file(path: &std::path::Path, content: &str) {
     }
 }
 
+fn cancel_click_gesture(
+    drag_gesture_active: &std::cell::Cell<bool>,
+    left_pointer_down: &std::cell::Cell<bool>,
+    pointer_pane_capture: &std::cell::Cell<Option<PaneHit>>,
+    pointer_interaction: &std::cell::RefCell<PointerInteraction>,
+) -> Vec<InteractionEffect> {
+    if drag_gesture_active.get() {
+        crate::logging::debug_log("mouse click gesture cancel ignored during active drag");
+        return Vec::new();
+    }
+    left_pointer_down.set(false);
+    pointer_pane_capture.set(None);
+    pointer_interaction.borrow_mut().cancel()
+}
+
 fn apply_interaction_effects(
     effects: Vec<InteractionEffect>,
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
@@ -2952,5 +3015,19 @@ mod tests {
             split_resize_boundary_at(metrics(), &[left, right], 409.0),
             None
         );
+    }
+
+    #[test]
+    fn click_gesture_cancel_does_not_abort_active_drag_selection() {
+        let active = std::cell::Cell::new(true);
+        let left_down = std::cell::Cell::new(true);
+        let capture = std::cell::Cell::new(Some(pane(0, 80)));
+        let interaction = std::cell::RefCell::new(PointerInteraction::default());
+
+        let effects = cancel_click_gesture(&active, &left_down, &capture, &interaction);
+
+        assert!(effects.is_empty());
+        assert!(left_down.get());
+        assert!(capture.get().is_some());
     }
 }

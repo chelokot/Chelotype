@@ -224,6 +224,8 @@ impl WorkspaceHeadlessRuntime {
                         KeyAction::CopySelection
                         | KeyAction::CutSelection
                         | KeyAction::PasteClipboard
+                        | KeyAction::UndoInput
+                        | KeyAction::RedoInput
                         | KeyAction::ZoomIn
                         | KeyAction::ZoomOut
                         | KeyAction::ZoomReset => Ok(()),
@@ -351,6 +353,8 @@ impl HeadlessRuntime {
                         KeyAction::CopySelection
                         | KeyAction::CutSelection
                         | KeyAction::PasteClipboard
+                        | KeyAction::UndoInput
+                        | KeyAction::RedoInput
                         | KeyAction::NewTab
                         | KeyAction::CloseTab
                         | KeyAction::NextTab

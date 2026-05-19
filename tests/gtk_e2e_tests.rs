@@ -2668,7 +2668,8 @@ snapshot_dir="$2"
 clipboard_trace="$3"
 geometry_trace="$4"
 window_id="$CHELOTYPE_NESTED_WAYLAND_X_WINDOW"
-ZSH_DISABLE_COMPFIX=true DISABLE_AUTO_UPDATE=true DISABLE_UPDATE_PROMPT=true GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_TEST_SUPPRESS_MOTION_BUTTON_MASK=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+rm -f /tmp/chelotype.log
+ZSH_DISABLE_COMPFIX=true DISABLE_AUTO_UPDATE=true DISABLE_UPDATE_PROMPT=true GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_TEST_SUPPRESS_MOTION_BUTTON_MASK=1 CHELOTYPE_TEST_CLICK_CANCEL_ON_DRAG_BEGIN=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 app_pid="$!"
 cleanup() {
     kill "$app_pid" 2>/dev/null || true
@@ -2721,6 +2722,7 @@ if ! grep -F 'primary	WAYLAND' "$clipboard_trace" >/dev/null 2>&1; then
     echo "window=$window_id row=$marker_row start=$start_x,$target_y end=$end_x,$target_y" >&2
     cat "$clipboard_trace" >&2 || true
     cat "$latest_txt" >&2 || true
+    cat /tmp/chelotype.log >&2 || true
     exit 1
 fi
 word_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (14.5 * cell) }')"
@@ -2736,6 +2738,7 @@ echo "nested Wayland double click did not select word" >&2
 echo "window=$window_id row=$marker_row word=$word_x,$target_y" >&2
 cat "$clipboard_trace" >&2 || true
 cat "$latest_txt" >&2 || true
+cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
@@ -2765,8 +2768,17 @@ exit 1
     assert_clean_gtk_stderr(&stderr);
 
     let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
-    assert!(trace.lines().any(|line| line.starts_with("primary\tWAYLAND")));
+    assert!(
+        trace
+            .lines()
+            .any(|line| line.starts_with("primary\tWAYLAND"))
+    );
     assert!(trace.lines().any(|line| line == "primary\tbeta"));
+    let debug = read_to_string("/tmp/chelotype.log").unwrap_or_default();
+    assert!(
+        debug.contains("mouse click gesture cancel ignored during active drag"),
+        "nested Wayland e2e did not exercise click-cancel-during-drag guard:\n{debug}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -4580,6 +4592,135 @@ wait_latest_text '❯ abcdefX'
 
     let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
     assert!(trace.lines().any(|line| line == "primary\tabc"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_supports_input_undo_and_redo_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk input undo/redo e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-input-undo-redo-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let zdot = dir.join("zsh");
+    std::fs::create_dir_all(&zdot).expect("zsh fixture dir");
+    std::fs::write(
+        zdot.join(".zshrc"),
+        "PS1='❯ '\nbindkey $'\\C-z' undo\nbindkey $'\\exredo\\r' redo\n",
+    )
+    .expect("zshrc fixture");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+zdot="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+wait_latest_text() {
+    local text="$1"
+    for _ in {1..100}; do
+        latest="$(latest_txt || true)"
+        if [ -n "$latest" ] && grep -F "$text" "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text did not become: $text" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    return 1
+}
+wait_prompt_without_input() {
+    for _ in {1..100}; do
+        latest="$(latest_txt || true)"
+        if [ -n "$latest" ] && grep -E '^❯[[:space:]]*$' "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "prompt did not return to empty input" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    return 1
+}
+xdotool type --window "$window_id" --delay 2 "a"
+wait_latest_text '❯ a'
+xdotool type --window "$window_id" --delay 2 "b"
+wait_latest_text '❯ ab'
+xdotool type --window "$window_id" --delay 2 "c"
+wait_latest_text '❯ abc'
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text '❯ ab'
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text '❯ a'
+xdotool key --window "$window_id" ctrl+z
+wait_prompt_without_input
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text '❯ a'
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text '❯ ab'
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text '❯ a'
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ aX'
+xdotool key --window "$window_id" ctrl+shift+z
+sleep 0.2
+wait_latest_text '❯ aX'
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-input-undo-redo-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            zdot.to_str().expect("zsh fixture dir utf8"),
+        ])
+        .output()
+        .expect("run gtk input undo/redo e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk input undo/redo e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

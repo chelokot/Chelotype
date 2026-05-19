@@ -13,6 +13,8 @@ pub enum KeyAction {
     CopySelection,
     CutSelection,
     PasteClipboard,
+    UndoInput,
+    RedoInput,
     NewTab,
     CloseTab,
     NextTab,
@@ -116,6 +118,20 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
         {
             return Some(KeyAction::PasteClipboard);
         }
+        if key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'z'))
+        {
+            return Some(KeyAction::UndoInput);
+        }
+    }
+    if ctrl
+        && shift
+        && key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'z'))
+    {
+        return Some(KeyAction::RedoInput);
     }
     if state.contains(gdk::ModifierType::SHIFT_MASK) {
         match key {
@@ -363,6 +379,17 @@ mod tests {
         assert_eq!(
             key_to_action(gdk::Key::v, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::PasteClipboard)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::z, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::UndoInput)
+        );
+        assert_eq!(
+            key_to_action(
+                gdk::Key::z,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::RedoInput)
         );
         assert_eq!(
             key_to_action(gdk::Key::plus, gdk::ModifierType::CONTROL_MASK),
