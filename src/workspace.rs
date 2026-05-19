@@ -12,6 +12,11 @@ impl PaneId {
     pub fn raw(self) -> u64 {
         self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
