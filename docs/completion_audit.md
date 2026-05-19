@@ -7,8 +7,8 @@ Chelotype needs one real PTY-backed terminal session, one terminal-core state, s
 Prompt-to-artifact checklist
 
 - One real PTY per terminal session
-  - Evidence: `src/backend.rs` owns one `portable_pty` master/child per `TerminalBackend`; `src/workspace.rs` stores tabs that each own one or more panes, and each pane owns its own `TerminalBackend`; the GTK app talks to the active workspace pane.
-  - Coverage: `backend_writes_to_single_pty_and_reads_shell_output`, `workspace_tracks_active_tab_identity`, `workspace_keeps_each_tab_terminal_state_isolated`, `workspace_splits_active_tab_into_isolated_panes`, and `gtk_e2e_creates_and_switches_terminal_tabs_under_xvfb`.
+  - Evidence: `src/backend.rs` owns one `portable_pty` master/child per `TerminalBackend`; `src/workspace.rs` stores tabs that each own one or more panes, each pane owns its own `TerminalBackend`, and active-tab panes can be snapshotted together for split rendering; the GTK app talks to the active workspace pane.
+  - Coverage: `backend_writes_to_single_pty_and_reads_shell_output`, `workspace_tracks_active_tab_identity`, `workspace_keeps_each_tab_terminal_state_isolated`, `workspace_splits_active_tab_into_isolated_panes`, `workspace_snapshots_all_panes_in_active_tab`, and `gtk_e2e_creates_and_switches_terminal_tabs_under_xvfb`.
   - Status: partial; workspace tabs, visible tabs, and real split-pane ownership inside a tab exist, but split panes are not rendered as simultaneous GTK panes yet.
 - One terminal-core state / shell-driven source of truth
   - Evidence: `src/backend.rs` owns one `libghostty_vt::Terminal`; PTY reader bytes are fed into that terminal state.
@@ -59,8 +59,8 @@ Prompt-to-artifact checklist
   - Evidence: `scripts/with-zig.sh`, binary-level headless mode, clean `zsh -f` diagnostics fixture, README setup/run commands, and Xvfb-based GTK e2e test.
   - Status: partial; no CI container image yet.
 - Workspaces, tabs/splits, command blocks, smooth scrolling
-  - Evidence: `src/workspace.rs` provides active-tab routing, multi-tab ownership, and active-pane routing inside each tab; `src/app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active workspace pane; the header exposes tab buttons and a new-tab button; `src/command_blocks.rs` builds semantic-prompt command blocks; `src/diagnostics.rs` exports command-block metadata in structured render dumps.
-  - Coverage: workspace unit tests prove tab identity switching, isolated terminal state across two top-level tabs, and isolated terminal state across two real panes inside one tab; input unit tests cover tab shortcuts; GTK e2e creates a second terminal tab, verifies active tab isolation, and switches back; command-block unit tests, renderer tests, and OSC 133 headless e2e prove prompt/continuation/output row boundaries.
+  - Evidence: `src/workspace.rs` provides active-tab routing, multi-tab ownership, active-pane routing inside each tab, and active-tab multi-pane render snapshots; `src/app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active workspace pane; the header exposes tab buttons and a new-tab button; `src/command_blocks.rs` builds semantic-prompt command blocks; `src/diagnostics.rs` exports command-block metadata in structured render dumps.
+  - Coverage: workspace unit tests prove tab identity switching, isolated terminal state across two top-level tabs, isolated terminal state across two real panes inside one tab, and simultaneous snapshot extraction for all panes in the active tab; input unit tests cover tab shortcuts; GTK e2e creates a second terminal tab, verifies active tab isolation, and switches back; command-block unit tests, renderer tests, and OSC 133 headless e2e prove prompt/continuation/output row boundaries.
   - Status: partial; visible tabs and split-pane workspace ownership exist, but GTK split-pane layout, smooth scroll model, and command-block UI are not implemented yet.
 
 Current green commands

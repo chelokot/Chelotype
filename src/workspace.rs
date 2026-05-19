@@ -23,6 +23,13 @@ pub struct PaneInfo {
     pub index: usize,
 }
 
+pub struct PaneRenderable {
+    pub id: PaneId,
+    pub active: bool,
+    pub index: usize,
+    pub content: RenderableContentOwned,
+}
+
 pub struct TerminalWorkspace {
     tabs: Vec<TerminalTab>,
     active_tab: TabId,
@@ -285,6 +292,23 @@ impl TerminalWorkspace {
         self.active_pane_mut().snapshot_renderable_if_dirty()
     }
 
+    pub fn snapshot_active_tab_renderables(&mut self) -> Vec<PaneRenderable> {
+        let tab = self.active_tab_mut();
+        let active_pane = tab.active_pane;
+        tab.panes
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, pane)| {
+                Some(PaneRenderable {
+                    id: pane.id,
+                    active: pane.id == active_pane,
+                    index,
+                    content: pane.backend.snapshot_renderable()?,
+                })
+            })
+            .collect()
+    }
+
     fn active_tab(&self) -> &TerminalTab {
         let active = self.active_tab;
         self.tabs
@@ -541,6 +565,46 @@ mod tests {
         workspace.activate_previous_pane();
         assert_eq!(workspace.active_pane_id(), first_pane);
         assert!(!workspace.activate_pane(PaneId(999)));
+
+        let _ = workspace.write_active(b"exit\n");
+        assert!(workspace.activate_pane(second_pane));
+        let _ = workspace.write_active(b"exit\n");
+    }
+
+    #[test]
+    fn workspace_snapshots_all_panes_in_active_tab() {
+        let mut workspace = TerminalWorkspace::spawn_with(shell_command()).expect("spawn tab");
+        let first_pane = workspace.active_pane_id();
+        workspace
+            .write_active(b"printf 'FIRST_VISIBLE_SPLIT\\n'\n")
+            .expect("write first pane");
+        wait_for_active_text(&mut workspace, "FIRST_VISIBLE_SPLIT");
+
+        let second_pane = workspace
+            .split_active_with(shell_command())
+            .expect("spawn split pane");
+        workspace
+            .write_active(b"printf 'SECOND_VISIBLE_SPLIT\\n'\n")
+            .expect("write second pane");
+        wait_for_active_text(&mut workspace, "SECOND_VISIBLE_SPLIT");
+
+        let renderables = workspace.snapshot_active_tab_renderables();
+        assert_eq!(renderables.len(), 2);
+        assert_eq!(renderables[0].id, first_pane);
+        assert_eq!(renderables[0].index, 0);
+        assert!(!renderables[0].active);
+        assert!(lines_to_text(&renderables[0].content.lines).contains("FIRST_VISIBLE_SPLIT"));
+        assert!(!lines_to_text(&renderables[0].content.lines).contains("SECOND_VISIBLE_SPLIT"));
+        assert_eq!(renderables[1].id, second_pane);
+        assert_eq!(renderables[1].index, 1);
+        assert!(renderables[1].active);
+        assert!(lines_to_text(&renderables[1].content.lines).contains("SECOND_VISIBLE_SPLIT"));
+        assert!(!lines_to_text(&renderables[1].content.lines).contains("FIRST_VISIBLE_SPLIT"));
+
+        assert!(workspace.activate_pane(first_pane));
+        let renderables = workspace.snapshot_active_tab_renderables();
+        assert!(renderables[0].active);
+        assert!(!renderables[1].active);
 
         let _ = workspace.write_active(b"exit\n");
         assert!(workspace.activate_pane(second_pane));
