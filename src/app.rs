@@ -148,6 +148,46 @@ fn build_ui(app: &Application) {
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let im_context = gtk::IMMulticontext::new();
+    im_context.set_client_widget(Some(canvas.widget()));
+    im_context.set_use_preedit(true);
+    key_controller.set_im_context(Some(&im_context));
+    {
+        let workspace = workspace_rc.clone();
+        let content = last_content.clone();
+        let selection = selection.clone();
+        let selection_text = selection_text.clone();
+        let selection_dirty = selection_dirty.clone();
+        let pending_input_latency = pending_input_latency.clone();
+        im_context.connect_commit(move |_context, committed| {
+            if committed.is_empty() {
+                return;
+            }
+            mark_pending_input_latency(&pending_input_latency);
+            write_key_with_selection(
+                &workspace,
+                &content,
+                &selection,
+                &selection_text,
+                &selection_dirty,
+                committed.as_bytes().to_vec(),
+            );
+        });
+    }
+    let focus_controller = gtk::EventControllerFocus::new();
+    {
+        let im_context = im_context.clone();
+        focus_controller.connect_enter(move |_| {
+            im_context.focus_in();
+        });
+    }
+    {
+        let im_context = im_context.clone();
+        focus_controller.connect_leave(move |_| {
+            im_context.focus_out();
+        });
+    }
+    canvas.widget().add_controller(focus_controller);
     {
         let workspace = workspace_rc.clone();
         let content = last_content.clone();
