@@ -3902,6 +3902,102 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_ctrl_c_without_selection_interrupts_running_program_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk Ctrl+C interrupt e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-ctrl-c-interrupt-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "cat"
+xdotool key --window "$window_id" Return
+sleep 0.3
+xdotool type --window "$window_id" --delay 2 "CAT_INPUT_BEFORE_INTERRUPT"
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    if grep -R '^CAT_INPUT_BEFORE_INTERRUPT' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '^CAT_INPUT_BEFORE_INTERRUPT' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "cat did not echo input before interrupt" >&2
+    grep -R 'CAT_INPUT' "$snapshot_dir"/*.txt >&2 || true
+    exit 1
+fi
+xdotool key --window "$window_id" ctrl+c
+sleep 0.3
+xdotool type --window "$window_id" --delay 2 "printf 'AFTER_CTRL_C_INTERRUPT\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    if grep -R '^AFTER_CTRL_C_INTERRUPT' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "Ctrl+C without selection did not interrupt cat and return to shell" >&2
+grep -R 'AFTER_CTRL_C_INTERRUPT\\|printf' "$snapshot_dir"/*.txt >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-ctrl-c-interrupt-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+        ])
+        .output()
+        .expect("run gtk Ctrl+C interrupt e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk Ctrl+C interrupt e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_replaces_selected_input_text_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk input selection e2e because xvfb-run or xdotool is not installed");

@@ -6,6 +6,12 @@ pub const INPUT_UNDO_SEQUENCE: &[u8] = b"\x1b[57345u";
 pub const INPUT_REDO_SEQUENCE: &[u8] = b"\x1b[57346u";
 
 const FISH_CHELOTYPE_INIT: &str = "\
+functions -q fish_prompt; and functions -c fish_prompt __chelotype_user_fish_prompt
+function fish_prompt
+    printf '\\e]133;A\\e\\\\'
+    __chelotype_user_fish_prompt
+    printf '\\e]133;B\\e\\\\'
+end
 function __chelotype_capture_undo
     set -g __chelotype_undo_lines $__chelotype_undo_lines x(string escape --style=var -- (commandline))
     set -g __chelotype_undo_cursors $__chelotype_undo_cursors (commandline -C)
@@ -190,7 +196,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
 
-        assert!(line.starts_with("'/usr/bin/fish' '--init-command' 'function __chelotype"));
+        assert!(line.starts_with("'/usr/bin/fish' '--init-command' 'functions -q fish_prompt"));
+        assert!(line.contains("__chelotype_user_fish_prompt"));
         assert!(line.contains("__chelotype_redo"));
     }
 }

@@ -21,6 +21,7 @@ use crate::snapshot::{
     write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
 };
 use crate::terminal_font::metrics_for_widget;
+use crate::terminal_grid::TerminalSemanticPrompt;
 use crate::workspace::{PaneId, TabId, TerminalWorkspace};
 use crate::workspace_render::{WorkspaceRenderFrame, WorkspaceRenderLayout};
 use adw::Application;
@@ -368,15 +369,11 @@ fn build_ui(app: &Application) {
                     }
                     KeyAction::UndoInput => {
                         mark_pending_input_latency(&pending_input_latency);
-                        let _ = workspace
-                            .borrow_mut()
-                            .write_active(crate::shell::INPUT_UNDO_SEQUENCE);
+                        write_input_undo(&workspace, &content);
                     }
                     KeyAction::RedoInput => {
                         mark_pending_input_latency(&pending_input_latency);
-                        let _ = workspace
-                            .borrow_mut()
-                            .write_active(crate::shell::INPUT_REDO_SEQUENCE);
+                        write_input_redo(&workspace, &content);
                     }
                     KeyAction::ZoomIn => {
                         mark_pending_input_latency(&pending_input_latency);
@@ -2454,7 +2451,8 @@ fn write_key_with_selection(
     data: Vec<u8>,
 ) {
     let Some(selection_range) = selection.get() else {
-        let _ = write_active_input_edit(workspace, &data);
+        let content = content.borrow();
+        let _ = write_active_input_edit(workspace, content.as_ref(), &data);
         return;
     };
     let Some(content) = content.borrow().clone() else {
@@ -2464,7 +2462,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, &data);
+        let _ = write_active_input_edit(workspace, None, &data);
         return;
     };
     selection.set(Some(selection_range));
@@ -2478,7 +2476,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, &data);
+        let _ = write_active_input_edit(workspace, Some(&content), &data);
         return;
     };
     let Some(selected) = text_for_viewport_selection(&content, viewport_selection) else {
@@ -2488,7 +2486,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, &data);
+        let _ = write_active_input_edit(workspace, Some(&content), &data);
         return;
     };
     let target = MouseGridPosition {
@@ -2517,7 +2515,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, &data);
+        let _ = write_active_input_edit(workspace, Some(&content), &data);
         return;
     };
 
@@ -2534,14 +2532,18 @@ fn write_key_with_selection(
         selection_dirty,
         keyboard_selection,
     );
-    let _ = write_active_input_edit(workspace, &replacement);
+    let _ = write_active_input_edit(workspace, Some(&content), &replacement);
 }
 
 fn write_active_input_edit(
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: Option<&RenderableContentOwned>,
     data: &[u8],
 ) -> std::io::Result<()> {
-    if crate::shell::default_shell_has_input_edit_bridge() && terminal_bytes_edit_input(data) {
+    if crate::shell::default_shell_has_input_edit_bridge()
+        && content.is_some_and(shell_input_bridge_active)
+        && terminal_bytes_edit_input(data)
+    {
         let mut combined = crate::shell::INPUT_UNDO_CAPTURE_SEQUENCE.to_vec();
         combined.extend_from_slice(data);
         workspace.borrow_mut().write_active(&combined)
@@ -2555,6 +2557,45 @@ fn terminal_bytes_edit_input(data: &[u8]) -> bool {
         return false;
     }
     true
+}
+
+fn write_input_undo(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+) {
+    let content = content.borrow();
+    let bytes = if crate::shell::default_shell_has_input_edit_bridge()
+        && content.as_ref().is_some_and(shell_input_bridge_active)
+    {
+        crate::shell::INPUT_UNDO_SEQUENCE
+    } else {
+        b"\x1a"
+    };
+    let _ = workspace.borrow_mut().write_active(bytes);
+}
+
+fn write_input_redo(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+) {
+    let content = content.borrow();
+    if crate::shell::default_shell_has_input_edit_bridge()
+        && content.as_ref().is_some_and(shell_input_bridge_active)
+    {
+        let _ = workspace
+            .borrow_mut()
+            .write_active(crate::shell::INPUT_REDO_SEQUENCE);
+    }
+}
+
+fn shell_input_bridge_active(content: &RenderableContentOwned) -> bool {
+    let Some(row) = usize::try_from(content.cursor_line).ok() else {
+        return false;
+    };
+    content
+        .line_metadata
+        .get(row)
+        .is_some_and(|metadata| metadata.semantic_prompt != TerminalSemanticPrompt::None)
 }
 
 fn current_mouse_mode(
