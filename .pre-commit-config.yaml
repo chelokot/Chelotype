@@ -13,6 +13,6 @@ repos:
     pass_filenames: false
   - id: cargo-test
     name: cargo test
-    entry: bash scripts/with-zig.sh cargo test
+    entry: bash scripts/with-zig.sh cargo test -- --test-threads=1
     language: system
     pass_filenames: false

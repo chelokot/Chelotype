@@ -10,7 +10,7 @@ use crate::render::{RenderLine, Renderer};
 use crate::selection::{GridPoint, SelectionRange, selected_text};
 use crate::snapshot::{write_snapshot, write_workspace_render_snapshot};
 use crate::workspace::TerminalWorkspace;
-use crate::workspace_render::WorkspaceRenderFrame;
+use crate::workspace_render::{WorkspaceRenderFrame, WorkspaceRenderLayout};
 use gtk::gdk;
 use gtk::glib;
 use serde::Serialize;
@@ -68,7 +68,9 @@ fn run_headless_workspace_scenario(scenario: HeadlessScenario) -> std::io::Resul
     }
     let panes = wait_for_workspace_content(&mut workspace, &scenario.expected)?;
     let selection = scenario.selection.or(runtime.selection);
-    let rendered = WorkspaceRenderFrame::from_active_tab_panes(panes, selection);
+    let layout = runtime.workspace_render_layout(&workspace);
+    let rendered =
+        WorkspaceRenderFrame::from_active_tab_panes_with_layout(panes, selection, layout);
     write_workspace_render_dump(rendered)
 }
 
@@ -129,6 +131,11 @@ enum HeadlessAction {
     Split,
     PaneNext,
     PanePrevious,
+    PaneResize {
+        boundary_index: usize,
+        delta_cols: i16,
+        size: ScreenSize,
+    },
     MousePress(MouseButton, MouseGridPosition),
     MouseDrag(MouseGridPosition),
     MouseRelease(MouseGridPosition),
@@ -137,7 +144,7 @@ enum HeadlessAction {
 impl HeadlessAction {
     fn needs_workspace(&self) -> bool {
         match self {
-            Self::Split | Self::PaneNext | Self::PanePrevious => true,
+            Self::Split | Self::PaneNext | Self::PanePrevious | Self::PaneResize { .. } => true,
             Self::Key(key) => matches!(
                 key_to_action(key.key, key.modifiers),
                 Some(
@@ -168,6 +175,7 @@ struct HeadlessRuntime {
 struct WorkspaceHeadlessRuntime {
     pointer: PointerInteraction,
     selection: Option<SelectionRange>,
+    layout_size: Option<ScreenSize>,
 }
 
 impl WorkspaceHeadlessRuntime {
@@ -182,10 +190,23 @@ impl WorkspaceHeadlessRuntime {
                 if let Some(action) = key_to_action(key.key, key.modifiers) {
                     match action {
                         KeyAction::Write(bytes) => workspace.write_active(&bytes),
+                        KeyAction::CursorMove {
+                            direction,
+                            unit: crate::input::CursorUnit::Cell,
+                            selecting: false,
+                        } => workspace.write_active(match direction {
+                            crate::input::CursorDirection::Left => b"\x1b[D",
+                            crate::input::CursorDirection::Right => b"\x1b[C",
+                        }),
                         KeyAction::CursorMove { .. } | KeyAction::SelectInput => Ok(()),
                         KeyAction::ScrollDisplay(lines) => workspace.scroll_active(lines),
                         KeyAction::NewTab => {
                             workspace.add_tab_with(headless_shell_command())?;
+                            Ok(())
+                        }
+                        KeyAction::CloseTab => {
+                            let active = workspace.active_tab_id();
+                            let _ = workspace.close(active);
                             Ok(())
                         }
                         KeyAction::NextTab => {
@@ -211,7 +232,10 @@ impl WorkspaceHeadlessRuntime {
                     Ok(())
                 }
             }
-            HeadlessAction::Resize(size) => workspace.resize_active(*size),
+            HeadlessAction::Resize(size) => {
+                self.layout_size = Some(*size);
+                workspace.resize_active_tab(*size)
+            }
             HeadlessAction::Scroll(lines) => workspace.scroll_active(*lines),
             HeadlessAction::Wait(expected) => {
                 wait_for_workspace_content(workspace, std::slice::from_ref(expected)).map(|_| ())
@@ -228,6 +252,15 @@ impl WorkspaceHeadlessRuntime {
                 workspace.activate_previous_pane();
                 Ok(())
             }
+            HeadlessAction::PaneResize {
+                boundary_index,
+                delta_cols,
+                size,
+            } => workspace
+                .resize_active_tab_split(*boundary_index, *delta_cols, *size)
+                .map(|_| {
+                    self.layout_size = Some(*size);
+                }),
             HeadlessAction::MousePress(button, position) => {
                 let mouse_mode = workspace
                     .snapshot_active_renderable()
@@ -253,6 +286,22 @@ impl WorkspaceHeadlessRuntime {
                 self.apply_interaction_effects(workspace, effects)
             }
         }
+    }
+
+    fn workspace_render_layout(
+        &self,
+        workspace: &TerminalWorkspace,
+    ) -> Option<WorkspaceRenderLayout> {
+        let size = self.layout_size?;
+        Some(WorkspaceRenderLayout {
+            cols: usize::from(size.cols),
+            rows: usize::from(size.rows),
+            pane_cols: workspace
+                .active_tab_pane_columns(size.cols)
+                .into_iter()
+                .map(usize::from)
+                .collect(),
+        })
     }
 
     fn apply_interaction_effects(
@@ -289,12 +338,21 @@ impl HeadlessRuntime {
                 if let Some(action) = key_to_action(key.key, key.modifiers) {
                     match action {
                         KeyAction::Write(bytes) => backend.write(&bytes),
+                        KeyAction::CursorMove {
+                            direction,
+                            unit: crate::input::CursorUnit::Cell,
+                            selecting: false,
+                        } => backend.write(match direction {
+                            crate::input::CursorDirection::Left => b"\x1b[D",
+                            crate::input::CursorDirection::Right => b"\x1b[C",
+                        }),
                         KeyAction::CursorMove { .. } | KeyAction::SelectInput => Ok(()),
                         KeyAction::ScrollDisplay(lines) => backend.scroll_display(lines),
                         KeyAction::CopySelection
                         | KeyAction::CutSelection
                         | KeyAction::PasteClipboard
                         | KeyAction::NewTab
+                        | KeyAction::CloseTab
                         | KeyAction::NextTab
                         | KeyAction::PreviousTab
                         | KeyAction::SplitPane
@@ -311,9 +369,10 @@ impl HeadlessRuntime {
             HeadlessAction::Wait(expected) => {
                 wait_for_headless_content(backend, std::slice::from_ref(expected)).map(|_| ())
             }
-            HeadlessAction::Split | HeadlessAction::PaneNext | HeadlessAction::PanePrevious => {
-                Ok(())
-            }
+            HeadlessAction::Split
+            | HeadlessAction::PaneNext
+            | HeadlessAction::PanePrevious
+            | HeadlessAction::PaneResize { .. } => Ok(()),
             HeadlessAction::MousePress(button, position) => {
                 let mouse_mode = backend
                     .snapshot_renderable()
@@ -419,6 +478,11 @@ fn parse_headless_action(input: &str) -> HeadlessAction {
     if input == "pane:previous" {
         return HeadlessAction::PanePrevious;
     }
+    if let Some(resize) = input.strip_prefix("pane:resize:")
+        && let Some(action) = parse_pane_resize(resize)
+    {
+        return action;
+    }
     if let Some(mouse) = input.strip_prefix("mouse:")
         && let Some(action) = parse_mouse_action(mouse)
     {
@@ -470,6 +534,15 @@ fn parse_headless_key(input: &str) -> Option<HeadlessKey> {
 fn parse_screen_size(input: &str) -> Option<ScreenSize> {
     let (cols, rows) = input.split_once('x')?;
     ScreenSize::new(cols.parse().ok()?, rows.parse().ok()?).ok()
+}
+
+fn parse_pane_resize(input: &str) -> Option<HeadlessAction> {
+    let mut parts = input.split(':');
+    Some(HeadlessAction::PaneResize {
+        boundary_index: parts.next()?.parse().ok()?,
+        delta_cols: parts.next()?.parse().ok()?,
+        size: parse_screen_size(parts.next()?)?,
+    })
 }
 
 fn parse_mouse_action(input: &str) -> Option<HeadlessAction> {
@@ -699,6 +772,14 @@ mod tests {
         assert_eq!(
             parse_headless_action("pane:previous"),
             HeadlessAction::PanePrevious
+        );
+        assert_eq!(
+            parse_headless_action("pane:resize:0:20:81x12"),
+            HeadlessAction::PaneResize {
+                boundary_index: 0,
+                delta_cols: 20,
+                size: ScreenSize::new(81, 12).expect("valid size"),
+            }
         );
     }
 

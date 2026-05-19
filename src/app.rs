@@ -89,7 +89,6 @@ fn build_ui(app: &Application) {
         .default_height(760)
         .content(&content)
         .build();
-
     apply_style(canvas.widget());
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
     let last_snapshot = std::rc::Rc::new(std::cell::RefCell::new(std::time::Instant::now()));
@@ -108,6 +107,7 @@ fn build_ui(app: &Application) {
     let pointer_interaction =
         std::rc::Rc::new(std::cell::RefCell::new(PointerInteraction::default()));
     let pointer_pane_capture = std::rc::Rc::new(std::cell::Cell::new(None::<PaneHit>));
+    let split_resize_drag = std::rc::Rc::new(std::cell::Cell::new(None::<SplitResizeDrag>));
     let drag_gesture_moved = std::rc::Rc::new(std::cell::Cell::new(false));
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
     let selection_text = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
@@ -158,6 +158,7 @@ fn build_ui(app: &Application) {
         let force_snapshot = force_snapshot.clone();
         let tab_view = tab_view.clone();
         let tab_pages = tab_pages.clone();
+        let tabs = tab_context.clone();
         let last_size = last_size.clone();
         let pending_input_latency = pending_input_latency.clone();
         key_controller.connect_key_pressed(move |_ctrl, key, _code, state| {
@@ -262,19 +263,16 @@ fn build_ui(app: &Application) {
                         add_launch_target_tab(
                             LaunchTarget::Host,
                             &LaunchMenuContext {
-                                tabs: TabContext {
-                                    workspace: workspace.clone(),
-                                    tab_view: tab_view.clone(),
-                                    tab_pages: tab_pages.clone(),
-                                    force_snapshot: force_snapshot.clone(),
-                                    selection: selection.clone(),
-                                    selection_text: selection_text.clone(),
-                                    selection_dirty: selection_dirty.clone(),
-                                },
+                                tabs: tabs.clone(),
                                 last_size: last_size.clone(),
                                 popover: gtk::Popover::new(),
                             },
                         );
+                    }
+                    KeyAction::CloseTab => {
+                        if let Some(id) = active_tab_id(&tabs) {
+                            close_tab(&tabs, id);
+                        }
                     }
                     KeyAction::SplitPane => {
                         if workspace.borrow_mut().split_shell_active().is_ok() {
@@ -339,10 +337,24 @@ fn build_ui(app: &Application) {
         let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         let canvas_widget = canvas.widget().clone();
+        let pending_input_latency = pending_input_latency.clone();
+        let context_menu = CanvasContextMenuContext {
+            workspace: workspace.clone(),
+            content: content.clone(),
+            selection: selection.clone(),
+            selection_text: selection_text.clone(),
+            selection_dirty: selection_dirty.clone(),
+            pending_input_latency: pending_input_latency.clone(),
+        };
         click_controller.connect_pressed(move |gesture, press_count, x, y| {
             canvas_widget.grab_focus();
             drag_gesture_moved.set(false);
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
+            if split_resize_boundary_at(metrics.get(), &pane_hits.borrow(), x).is_some() {
+                pointer_pane_capture.set(None);
+                let _ = pointer_interaction.borrow_mut().cancel();
+                return;
+            }
             if let Some(target) =
                 pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
             {
@@ -365,6 +377,12 @@ fn build_ui(app: &Application) {
                 ));
                 let current_mode = current_mouse_mode(&content, mode.get());
                 crate::logging::debug_log(&format!("mouse press mode={current_mode:?}"));
+                let button = mouse_button_from_gesture(gesture).unwrap_or(MouseButton::Left);
+                if button == MouseButton::Right && !current_mode.sends_press_release() {
+                    show_canvas_context_menu(&canvas_widget, x, y, context_menu.clone());
+                    let _ = pointer_interaction.borrow_mut().cancel();
+                    return;
+                }
                 if !current_mode.sends_press_release()
                     && select_mouse_click_range(
                         &content,
@@ -379,7 +397,6 @@ fn build_ui(app: &Application) {
                     let _ = pointer_interaction.borrow_mut().cancel();
                     return;
                 }
-                let button = mouse_button_from_gesture(gesture).unwrap_or(MouseButton::Left);
                 let effects =
                     pointer_interaction
                         .borrow_mut()
@@ -514,6 +531,8 @@ fn build_ui(app: &Application) {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
         let pane_hits = pane_hits.clone();
+        let last_size = last_size.clone();
+        let force_snapshot = force_snapshot.clone();
         let active_origin = active_pane_origin_col.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
@@ -522,6 +541,7 @@ fn build_ui(app: &Application) {
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
+        let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         let canvas_widget = canvas.widget().clone();
         drag_controller.connect_drag_begin(move |_gesture, x, y| {
@@ -530,6 +550,27 @@ fn build_ui(app: &Application) {
             }
             canvas_widget.grab_focus();
             drag_gesture_moved.set(false);
+            if let Some(boundary_index) =
+                split_resize_boundary_at(metrics.get(), &pane_hits.borrow(), x)
+            {
+                crate::logging::debug_log(&format!(
+                    "split resize begin boundary={boundary_index} x={x:.1}"
+                ));
+                split_resize_drag.set(Some(SplitResizeDrag {
+                    boundary_index,
+                    start_x: x,
+                    applied_delta_cols: 0,
+                }));
+                drag_gesture_moved.set(true);
+                pointer_pane_capture.set(None);
+                let _ = pointer_interaction.borrow_mut().cancel();
+                if let Some(size) = last_size.get() {
+                    let _ = workspace.borrow_mut().resize_active_tab(size);
+                }
+                force_snapshot.set(true);
+                canvas_widget.queue_draw();
+                return;
+            }
             if let Some(target) =
                 pointer_grid_position_for_panes(metrics.get(), &pane_hits.borrow(), x, y)
             {
@@ -567,6 +608,8 @@ fn build_ui(app: &Application) {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
         let pane_hits = pane_hits.clone();
+        let last_size = last_size.clone();
+        let force_snapshot = force_snapshot.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -574,7 +617,9 @@ fn build_ui(app: &Application) {
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
+        let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
+        let canvas_widget = canvas.widget().clone();
         drag_controller.connect_drag_update(move |gesture, offset_x, offset_y| {
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
                 return;
@@ -582,6 +627,59 @@ fn build_ui(app: &Application) {
             let Some((start_x, start_y)) = gesture.start_point() else {
                 return;
             };
+            if let Some(mut resize) = split_resize_drag.get() {
+                if let (Some(metrics), Some(size)) = (metrics.get(), last_size.get()) {
+                    let current_delta_cols =
+                        ((start_x + offset_x - resize.start_x) / metrics.width).round() as i16;
+                    let incremental_delta = current_delta_cols - resize.applied_delta_cols;
+                    if incremental_delta != 0 {
+                        let applied_delta = {
+                            let mut workspace = workspace.borrow_mut();
+                            let before = workspace
+                                .active_tab_pane_columns(size.cols)
+                                .get(resize.boundary_index)
+                                .copied()
+                                .unwrap_or_default()
+                                as i16;
+                            if workspace
+                                .resize_active_tab_split(
+                                    resize.boundary_index,
+                                    incremental_delta,
+                                    size,
+                                )
+                                .unwrap_or(false)
+                            {
+                                workspace
+                                    .active_tab_pane_columns(size.cols)
+                                    .get(resize.boundary_index)
+                                    .copied()
+                                    .unwrap_or_default() as i16
+                                    - before
+                            } else {
+                                0
+                            }
+                        };
+                        if applied_delta == 0 {
+                            crate::logging::debug_log(&format!(
+                                "split resize clamped boundary={} requested_delta={incremental_delta}",
+                                resize.boundary_index
+                            ));
+                            drag_gesture_moved.set(true);
+                            return;
+                        }
+                        crate::logging::debug_log(&format!(
+                            "split resize update boundary={} requested_delta={incremental_delta} applied_delta={applied_delta}",
+                            resize.boundary_index
+                        ));
+                        resize.applied_delta_cols += applied_delta;
+                        split_resize_drag.set(Some(resize));
+                        force_snapshot.set(true);
+                        canvas_widget.queue_draw();
+                    }
+                }
+                drag_gesture_moved.set(true);
+                return;
+            }
             if let Some(target) = pointer_grid_position_for_capture_or_panes(
                 metrics.get(),
                 pointer_pane_capture.get(),
@@ -621,9 +719,14 @@ fn build_ui(app: &Application) {
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
+        let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         drag_controller.connect_drag_end(move |gesture, offset_x, offset_y| {
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
+                return;
+            }
+            if split_resize_drag.replace(None).is_some() {
+                drag_gesture_moved.set(false);
                 return;
             }
             let Some((start_x, start_y)) = gesture.start_point() else {
@@ -670,10 +773,12 @@ fn build_ui(app: &Application) {
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
+        let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         gtk::prelude::GestureExt::connect_cancel(&drag_controller, move |_gesture, _sequence| {
             drag_gesture_moved.set(false);
             pointer_pane_capture.set(None);
+            split_resize_drag.set(None);
             let effects = pointer_interaction.borrow_mut().cancel();
             crate::logging::debug_log(&format!("drag gesture cancelled effects={effects:?}"));
             apply_interaction_effects(
@@ -700,8 +805,18 @@ fn build_ui(app: &Application) {
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
-        motion_controller.connect_motion(move |_controller, x, y| {
+        let split_resize_drag = split_resize_drag.clone();
+        motion_controller.connect_motion(move |controller, x, y| {
             crate::logging::debug_log(&format!("mouse motion x={x:.1} y={y:.1}"));
+            if split_resize_drag.get().is_some()
+                || split_resize_boundary_at(metrics.get(), &pane_hits.borrow(), x).is_some()
+            {
+                if let Some(widget) = controller.widget() {
+                    widget.set_cursor_from_name(Some("col-resize"));
+                }
+            } else if let Some(widget) = controller.widget() {
+                widget.set_cursor_from_name(Some("text"));
+            }
             let current_mode = current_mouse_mode(&content, mode.get());
             if !current_mode.sends_drag() {
                 return;
@@ -802,6 +917,12 @@ fn build_ui(app: &Application) {
         let layout = measured_metrics.map(|metrics| WorkspaceRenderLayout {
             cols: usize::from(metrics.size.cols),
             rows: usize::from(metrics.size.rows),
+            pane_cols: workspace_rc
+                .borrow()
+                .active_tab_pane_columns(metrics.size.cols)
+                .into_iter()
+                .map(usize::from)
+                .collect(),
         });
 
         if pane_count > 1 {
@@ -1636,6 +1757,122 @@ fn paste_clipboard_text(
         });
 }
 
+#[derive(Clone)]
+struct CanvasContextMenuContext {
+    workspace: std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+    selection: std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+    selection_text: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_input_latency: PendingInputLatency,
+}
+
+fn show_canvas_context_menu(
+    widget: &gtk::DrawingArea,
+    x: f64,
+    y: f64,
+    context: CanvasContextMenuContext,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_parent(widget);
+    popover.set_has_arrow(false);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        x.round() as i32,
+        y.round() as i32,
+        1,
+        1,
+    )));
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    menu.add_css_class("terminal-context-menu");
+
+    let copy = gtk::Button::with_label("Copy");
+    copy.add_css_class("flat");
+    copy.set_sensitive(context.selection_text.borrow().is_some());
+    {
+        let widget = widget.clone();
+        let selection_text = context.selection_text.clone();
+        let popover = popover.clone();
+        copy.connect_clicked(move |_| {
+            copy_selection_to_clipboard(&widget, &selection_text);
+            popover.popdown();
+        });
+    }
+    menu.append(&copy);
+
+    let cut = gtk::Button::with_label("Cut");
+    cut.add_css_class("flat");
+    cut.set_sensitive(context.selection_text.borrow().is_some());
+    {
+        let widget = widget.clone();
+        let workspace = context.workspace.clone();
+        let content = context.content.clone();
+        let selection = context.selection.clone();
+        let selection_text = context.selection_text.clone();
+        let selection_dirty = context.selection_dirty.clone();
+        let pending_input_latency = context.pending_input_latency.clone();
+        let popover = popover.clone();
+        cut.connect_clicked(move |_| {
+            if copy_selection_to_clipboard(&widget, &selection_text) {
+                mark_pending_input_latency(&pending_input_latency);
+                write_key_with_selection(
+                    &workspace,
+                    &content,
+                    &selection,
+                    &selection_text,
+                    &selection_dirty,
+                    b"\x1b[3~".to_vec(),
+                );
+            }
+            popover.popdown();
+        });
+    }
+    menu.append(&cut);
+
+    let paste = gtk::Button::with_label("Paste");
+    paste.add_css_class("flat");
+    {
+        let widget = widget.clone();
+        let workspace = context.workspace.clone();
+        let content = context.content.clone();
+        let selection = context.selection.clone();
+        let selection_text = context.selection_text.clone();
+        let selection_dirty = context.selection_dirty.clone();
+        let pending_input_latency = context.pending_input_latency.clone();
+        let popover = popover.clone();
+        paste.connect_clicked(move |_| {
+            paste_clipboard_text(
+                &widget,
+                workspace.clone(),
+                content.clone(),
+                selection.clone(),
+                selection_text.clone(),
+                selection_dirty.clone(),
+                pending_input_latency.clone(),
+            );
+            popover.popdown();
+        });
+    }
+    menu.append(&paste);
+
+    let select_all = gtk::Button::with_label("Select Input");
+    select_all.add_css_class("flat");
+    {
+        let content = context.content.clone();
+        let selection = context.selection.clone();
+        let selection_text = context.selection_text.clone();
+        let selection_dirty = context.selection_dirty.clone();
+        let popover = popover.clone();
+        select_all.connect_clicked(move |_| {
+            select_active_input(&content, &selection, &selection_text, &selection_dirty);
+            popover.popdown();
+        });
+    }
+    menu.append(&select_all);
+
+    popover.set_child(Some(&menu));
+    popover.popup();
+}
+
 type PendingInputLatency =
     std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<std::time::Instant>>>;
 
@@ -1734,7 +1971,9 @@ fn select_mouse_click_range(
     };
     let row = usize::from(position.row);
     let column = usize::from(position.column);
-    let range = if press_count >= 3 {
+    let range = if press_count >= 3 && Some(row) == usize::try_from(content.cursor_line).ok() {
+        input_line_range(&content.lines, row)
+    } else if press_count >= 3 {
         line_range(&content.lines, row)
     } else {
         word_range_at(&content.lines, row, column)
@@ -1756,6 +1995,19 @@ fn set_viewport_selection(
     selection.set(Some(anchor_range_to_display(range, content.display_offset)));
     *selection_text.borrow_mut() = text_for_viewport_selection(content, range);
     selection_dirty.set(true);
+}
+
+fn input_line_range(
+    lines: &[Vec<crate::terminal_grid::TerminalCell>],
+    row: usize,
+) -> Option<SelectionRange> {
+    let line = lines.get(row)?;
+    let start = input_start_column(line);
+    let end = line_significant_len(line);
+    (end > start).then_some(SelectionRange::new(
+        GridPoint { row, column: start },
+        GridPoint { row, column: end },
+    ))
 }
 
 fn clear_selection(
@@ -1859,16 +2111,28 @@ fn move_cursor_from_keyboard(
     let Some(content) = content.borrow().clone() else {
         return;
     };
-    let current_override = if cursor_move.selecting {
-        keyboard_selection_cursor(
+    let cursor = active_cursor_point(&content);
+    let current_override = if cursor_move.selecting { cursor } else { None };
+    if !cursor_move.selecting
+        && let Some(target) = keyboard_selection_collapse_target(
             selection.get(),
             content.display_offset,
             content.lines.len(),
             cursor_move.direction,
         )
-    } else {
-        None
-    };
+    {
+        clear_selection(selection, selection_text, selection_dirty);
+        if let Some(bytes) = cursor_movement_bytes_for_content(
+            &content,
+            MouseGridPosition {
+                row: target.row.min(u16::MAX as usize) as u16,
+                column: target.column.min(u16::MAX as usize) as u16,
+            },
+        ) {
+            let _ = workspace.borrow_mut().write_active(&bytes);
+        }
+        return;
+    }
     let Some(target) = keyboard_cursor_target(
         &content,
         cursor_move.direction,
@@ -1878,14 +2142,7 @@ fn move_cursor_from_keyboard(
         return;
     };
     if cursor_move.selecting {
-        select_keyboard_cursor_range(
-            &content,
-            target,
-            selection,
-            selection_text,
-            selection_dirty,
-            cursor_move.direction,
-        );
+        select_keyboard_cursor_range(&content, target, selection, selection_text, selection_dirty);
     } else if selection.get().is_some() {
         clear_selection(selection, selection_text, selection_dirty);
     }
@@ -1921,7 +2178,14 @@ fn keyboard_cursor_target(
     })
 }
 
-fn keyboard_selection_cursor(
+fn active_cursor_point(content: &RenderableContentOwned) -> Option<GridPoint> {
+    Some(GridPoint {
+        row: usize::try_from(content.cursor_line).ok()?,
+        column: usize::try_from(content.cursor_col).ok()?,
+    })
+}
+
+fn keyboard_selection_collapse_target(
     selection: Option<SelectionRange>,
     display_offset: usize,
     viewport_rows: usize,
@@ -1932,6 +2196,20 @@ fn keyboard_selection_cursor(
         CursorDirection::Left => range.start,
         CursorDirection::Right => range.end,
     })
+}
+
+fn keyboard_selection_anchor(
+    selection: Option<SelectionRange>,
+    cursor: GridPoint,
+) -> Option<GridPoint> {
+    let range = selection?;
+    if cursor == range.start {
+        Some(range.end)
+    } else if cursor == range.end {
+        Some(range.start)
+    } else {
+        None
+    }
 }
 
 fn keyboard_cursor_bytes(
@@ -1952,7 +2230,6 @@ fn select_keyboard_cursor_range(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
-    direction: CursorDirection,
 ) {
     let Some(cursor_row) = usize::try_from(content.cursor_line).ok() else {
         return;
@@ -1970,10 +2247,7 @@ fn select_keyboard_cursor_range(
     };
     let anchor = selection
         .get()
-        .map(|range| match direction {
-            CursorDirection::Left => range.end,
-            CursorDirection::Right => range.start,
-        })
+        .and_then(|range| keyboard_selection_anchor(Some(range), cursor))
         .unwrap_or(cursor);
     let absolute = SelectionRange::new(anchor, target);
     selection.set(Some(absolute));
@@ -2164,6 +2438,20 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             min-width: 13rem;
             margin: 0.5rem;
         }
+        .terminal-context-menu {
+            background: #2f2f33;
+            border-radius: 0.5rem;
+            padding: 0.375rem;
+        }
+        .terminal-context-menu button {
+            background: transparent;
+            border-radius: 0.375rem;
+            padding: 0.375rem 0.75rem;
+            min-height: 1.75rem;
+        }
+        .terminal-context-menu button:hover {
+            background: #3a3a3e;
+        }
     ";
     let provider = gtk::CssProvider::new();
     provider.load_from_data(css);
@@ -2249,6 +2537,13 @@ struct PaneHit {
 }
 
 #[derive(Clone, Copy)]
+struct SplitResizeDrag {
+    boundary_index: usize,
+    start_x: f64,
+    applied_delta_cols: i16,
+}
+
+#[derive(Clone, Copy)]
 struct PointerPanePosition {
     pane: Option<PaneHit>,
     position: MouseGridPosition,
@@ -2315,6 +2610,28 @@ fn pointer_grid_position_for_panes(
             column: column.min(u16::MAX as usize) as u16,
             row,
         },
+    })
+}
+
+fn split_resize_boundary_at(
+    metrics: Option<CellMetrics>,
+    panes: &[PaneHit],
+    x: f64,
+) -> Option<usize> {
+    let metrics = metrics?;
+    if panes.len() < 2 || x < 0.0 || metrics.width <= 0.0 {
+        return None;
+    }
+    let threshold = (metrics.width * 0.6).max(8.0);
+    panes.windows(2).enumerate().find_map(|(index, pair)| {
+        let [left, right] = pair else {
+            return None;
+        };
+        if left.origin_col.saturating_add(left.cols) != right.origin_col {
+            return None;
+        }
+        let boundary_x = right.origin_col as f64 * metrics.width;
+        ((x - boundary_x).abs() <= threshold).then_some(index)
     })
 }
 
@@ -2459,5 +2776,62 @@ mod tests {
         assert_eq!(target.pane.expect("pane").id, right.id);
         assert_eq!(target.position.column, 3);
         assert_eq!(target.position.row, 2);
+    }
+
+    #[test]
+    fn split_resize_boundary_hit_test_uses_rendered_pane_edges() {
+        let left = pane(0, 40);
+        let right = pane(40, 40);
+
+        assert_eq!(
+            split_resize_boundary_at(metrics(), &[left, right], 400.0),
+            Some(0)
+        );
+        assert_eq!(
+            split_resize_boundary_at(metrics(), &[left, right], 403.0),
+            Some(0)
+        );
+        assert_eq!(
+            split_resize_boundary_at(metrics(), &[left, right], 407.0),
+            Some(0)
+        );
+        assert_eq!(
+            split_resize_boundary_at(metrics(), &[left, right], 409.0),
+            None
+        );
+    }
+
+    #[test]
+    fn keyboard_selection_anchor_stays_fixed_while_focus_moves_both_directions() {
+        let range = SelectionRange::new(
+            GridPoint { row: 4, column: 5 },
+            GridPoint { row: 4, column: 6 },
+        );
+
+        assert_eq!(
+            keyboard_selection_anchor(Some(range), GridPoint { row: 4, column: 5 }),
+            Some(GridPoint { row: 4, column: 6 })
+        );
+        assert_eq!(
+            keyboard_selection_anchor(Some(range), GridPoint { row: 4, column: 6 }),
+            Some(GridPoint { row: 4, column: 5 })
+        );
+    }
+
+    #[test]
+    fn keyboard_selection_collapse_uses_requested_selection_boundary() {
+        let range = SelectionRange::new(
+            GridPoint { row: 4, column: 5 },
+            GridPoint { row: 4, column: 8 },
+        );
+
+        assert_eq!(
+            keyboard_selection_collapse_target(Some(range), 0, 10, CursorDirection::Left),
+            Some(GridPoint { row: 4, column: 5 })
+        );
+        assert_eq!(
+            keyboard_selection_collapse_target(Some(range), 0, 10, CursorDirection::Right),
+            Some(GridPoint { row: 4, column: 8 })
+        );
     }
 }

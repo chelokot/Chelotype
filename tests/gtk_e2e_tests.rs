@@ -483,7 +483,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -597,7 +597,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -692,7 +692,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -804,7 +804,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -954,7 +954,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -1048,7 +1048,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -1145,7 +1145,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -1318,7 +1318,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 latest_txt() {
@@ -1362,6 +1362,13 @@ xdotool key --window "$window_id" Return
 wait_latest_contains_only 'TAB_TWO_ACTIVE' 'TAB_ONE_ACTIVE'
 xdotool key --window "$window_id" ctrl+Page_Up
 wait_latest_contains_only 'TAB_ONE_ACTIVE' 'TAB_TWO_ACTIVE'
+xdotool key --window "$window_id" ctrl+Page_Down
+wait_latest_contains_only 'TAB_TWO_ACTIVE' 'TAB_ONE_ACTIVE'
+xdotool key --window "$window_id" ctrl+shift+w
+wait_latest_contains_only 'TAB_ONE_ACTIVE' 'TAB_TWO_ACTIVE'
+xdotool type --window "$window_id" --delay 2 "printf 'TAB_ONE_AFTER_CLOSE\n'"
+xdotool key --window "$window_id" Return
+wait_latest_contains_only 'TAB_ONE_AFTER_CLOSE' 'TAB_TWO_ACTIVE'
 "#;
 
     let output = Command::new("xvfb-run")
@@ -1433,7 +1440,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 wait_contains() {
@@ -1560,7 +1567,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 wait_contains() {
@@ -1714,7 +1721,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -1862,7 +1869,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 wait_contains() {
@@ -1992,6 +1999,179 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_drag_resizes_split_panes_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") || !has_command("python3") {
+        eprintln!(
+            "skipping gtk split resize e2e because xvfb-run, xdotool, or python3 is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-split-resize-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let geometry_trace = dir.join("geometry.env");
+    let resize_result = dir.join("resize.tsv");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+geometry_trace="$3"
+resize_result="$4"
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+wait_contains() {
+    needle="$1"
+    for _ in {1..140}; do
+        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "snapshot never contained $needle" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "printf 'SPLIT_RESIZE_LEFT\n'"
+xdotool key --window "$window_id" Return
+wait_contains 'SPLIT_RESIZE_LEFT'
+xdotool key --window "$window_id" ctrl+shift+e
+sleep 0.5
+xdotool type --window "$window_id" --delay 2 "printf 'SPLIT_RESIZE_RIGHT\n'"
+xdotool key --window "$window_id" Return
+wait_contains 'SPLIT_RESIZE_RIGHT'
+latest_json=""
+for _ in {1..120}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ] && grep -F 'SPLIT_RESIZE_LEFT' "$latest_json" >/dev/null 2>&1 && grep -F 'SPLIT_RESIZE_RIGHT' "$latest_json" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
+    echo "split resize setup snapshots or geometry did not appear" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+read -r initial_left initial_right right_origin < <(python3 - "$latest_json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    frame = json.load(handle)
+left, right = frame["panes"][:2]
+print(left["cols"], right["cols"], right["origin_col"])
+PY
+)
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+boundary_x="$(awk -v canvas_x="$canvas_x" -v origin="$right_origin" -v cell="$cell_width" 'BEGIN { printf "%d", canvas_x + (origin * cell) }')"
+target_x="$(awk -v boundary="$boundary_x" -v cell="$cell_width" 'BEGIN { printf "%d", boundary + (10 * cell) }')"
+target_y="$(awk -v canvas_y="$canvas_y" -v line="$line_height" 'BEGIN { printf "%d", canvas_y + (3 * line) }')"
+echo "split resize drag window=$window_id initial=$initial_left,$initial_right boundary=$boundary_x target=$target_x,$target_y" >&2
+xdotool mousemove --window "$window_id" "$boundary_x" "$target_y"
+xdotool mousedown 1
+sleep 0.08
+xdotool mousemove --window "$window_id" "$target_x" "$target_y"
+sleep 0.08
+xdotool mouseup 1
+for _ in {1..140}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ] && python3 - "$latest_json" "$initial_left" "$initial_right" > "$resize_result" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    frame = json.load(handle)
+left, right = frame["panes"][:2]
+initial_left = int(sys.argv[2])
+initial_right = int(sys.argv[3])
+left_cols = int(left["cols"])
+right_cols = int(right["cols"])
+if left_cols - initial_left >= 6 and initial_right - right_cols >= 6 and int(right["origin_col"]) == left_cols:
+    print(initial_left, initial_right, left_cols, right_cols, sep="\t")
+else:
+    raise SystemExit(1)
+PY
+    then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "split pane drag did not resize rendered pane geometry" >&2
+echo "initial left/right: $initial_left $initial_right" >&2
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+[ -n "$latest_json" ] && sed -n '1,120p' "$latest_json" >&2
+cat /tmp/chelotype.log >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-split-resize-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+            resize_result.to_str().expect("resize result path utf8"),
+        ])
+        .output()
+        .expect("run gtk split resize e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk split resize e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let result = read_to_string(&resize_result).expect("read split resize result");
+    let values = result
+        .trim()
+        .split('\t')
+        .map(|value| value.parse::<u64>().expect("resize metric"))
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 4, "{result}");
+    assert!(
+        values[2] > values[0] && values[3] < values[1],
+        "split resize did not grow left and shrink right pane: {result}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_selects_text_with_real_mouse_drag_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk mouse e2e because xvfb-run or xdotool is not installed");
@@ -2028,7 +2208,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -2161,7 +2341,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -2207,6 +2387,10 @@ if ! grep -F 'primary	DRAG_RELEASE_STABLE' "$clipboard_trace" >/dev/null 2>&1; t
     cat "$clipboard_trace" >&2 || true
     exit 1
 fi
+xdotool click 3
+sleep 0.1
+xdotool key --window "$window_id" Escape
+sleep 0.1
 xdotool mousemove 620 420
 sleep 0.2
 xdotool key --window "$window_id" ctrl+shift+c
@@ -2295,7 +2479,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -2428,7 +2612,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -2553,7 +2737,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -2590,12 +2774,66 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "X"
 for _ in {1..100}; do
     if grep -R '❯ Xef' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '❯ Xef' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "selected input text was not replaced by typed text" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
+    exit 1
+fi
+xdotool key --window "$window_id" ctrl+a
+sleep 0.1
+xdotool key --window "$window_id" BackSpace
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "alpha beta"
+for _ in {1..100}; do
+    if grep -R '❯ alpha beta' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+word_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (9.5 * cell) }')"
+xdotool mousemove "$word_x" "$target_y"
+xdotool click --repeat 2 --delay 40 1
+sleep 0.1
+xdotool type --window "$window_id" --delay 2 "X"
+for _ in {1..100}; do
+    if grep -R '❯ alpha X' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '❯ alpha X' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "double-clicked input word was not replaced" >&2
+    grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
+    exit 1
+fi
+xdotool key --window "$window_id" ctrl+a
+sleep 0.1
+xdotool key --window "$window_id" BackSpace
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "alpha beta"
+for _ in {1..100}; do
+    if grep -R '❯ alpha beta' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+line_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (4.5 * cell) }')"
+xdotool mousemove "$line_x" "$target_y"
+xdotool click --repeat 3 --delay 40 1
+sleep 0.1
+xdotool type --window "$window_id" --delay 2 "Z"
+for _ in {1..100}; do
+    if grep -R '❯ Z' "$snapshot_dir" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
 done
-echo "selected input text was not replaced by typed text" >&2
-find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+echo "triple-clicked input line was not replaced as input-only text" >&2
 grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
 exit 1
 "#;
@@ -2673,7 +2911,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -2815,7 +3053,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ] || [ ! -f "$geometry_trace" ]; then
-    echo "Chelotype window or geometry did not appear" >&2
+    echo "chelotype window or geometry did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -2913,7 +3151,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -2929,6 +3167,21 @@ wait_text() {
     done
     echo "text did not appear: $text" >&2
     grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
+    return 1
+}
+
+wait_latest_text() {
+    local text="$1"
+    for _ in {1..100}; do
+        latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+        if [ -n "$latest_txt" ] && grep -F "$text" "$latest_txt" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text did not become: $text" >&2
+    latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+    [ -n "$latest_txt" ] && cat "$latest_txt" >&2
     return 1
 }
 
@@ -2964,7 +3217,55 @@ sleep 0.1
 xdotool key --window "$window_id" shift+Left
 sleep 0.1
 xdotool type --window "$window_id" --delay 2 "X"
-wait_text '❯ abcdX'
+wait_latest_text '❯ abcdX'
+clear_input
+
+xdotool type --window "$window_id" --delay 2 "abcdef"
+wait_latest_text '❯ abcdef'
+xdotool key --window "$window_id" shift+Left
+sleep 0.1
+xdotool key --window "$window_id" shift+Right
+sleep 0.1
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ abcdefX'
+clear_input
+
+xdotool type --window "$window_id" --delay 2 "abcdef"
+wait_latest_text '❯ abcdef'
+xdotool key --window "$window_id" shift+Left
+sleep 0.05
+xdotool key --window "$window_id" shift+Right
+sleep 0.05
+xdotool key --window "$window_id" shift+Left
+sleep 0.05
+xdotool key --window "$window_id" shift+Right
+sleep 0.05
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ abcdefX'
+clear_input
+
+xdotool type --window "$window_id" --delay 2 "abcdef"
+wait_latest_text '❯ abcdef'
+xdotool key --window "$window_id" shift+Left
+sleep 0.1
+xdotool key --window "$window_id" shift+Left
+sleep 0.1
+xdotool key --window "$window_id" Left
+sleep 0.1
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ abcdXef'
+clear_input
+
+xdotool type --window "$window_id" --delay 2 "abcdef"
+wait_latest_text '❯ abcdef'
+xdotool key --window "$window_id" shift+Left
+sleep 0.1
+xdotool key --window "$window_id" shift+Left
+sleep 0.1
+xdotool key --window "$window_id" Right
+sleep 0.1
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ abcdefX'
 clear_input
 
 xdotool type --window "$window_id" --delay 2 "one two three"
@@ -2972,7 +3273,21 @@ wait_text '❯ one two three'
 xdotool key --window "$window_id" ctrl+shift+Left
 sleep 0.1
 xdotool type --window "$window_id" --delay 2 "X"
-wait_text '❯ one two X'
+wait_latest_text '❯ one two X'
+clear_input
+
+xdotool type --window "$window_id" --delay 2 "abcde"
+wait_latest_text '❯ abcde'
+xdotool key --window "$window_id" ctrl+Left
+sleep 0.1
+xdotool key --window "$window_id" Right
+sleep 0.1
+xdotool key --window "$window_id" Right
+sleep 0.1
+xdotool key --window "$window_id" ctrl+shift+Right
+sleep 0.1
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ abX'
 "#;
 
     let output = Command::new("xvfb-run")
@@ -3039,7 +3354,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -3167,7 +3482,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -3316,7 +3631,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -3466,7 +3781,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -3613,7 +3928,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 xdotool windowfocus "$window_id" || true
@@ -3732,7 +4047,7 @@ for _ in {1..80}; do
     sleep 0.1
 done
 if [ -z "$window_id" ]; then
-    echo "Chelotype window did not appear" >&2
+    echo "chelotype window did not appear" >&2
     exit 1
 fi
 initial_rows=""

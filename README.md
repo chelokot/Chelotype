@@ -15,7 +15,7 @@ The first run downloads Zig 0.15.2 into `.tools/` because `libghostty-vt` builds
 ```sh
 bash scripts/with-zig.sh cargo fmt -- --check
 bash scripts/with-zig.sh cargo clippy --all-targets -- -D warnings
-bash scripts/with-zig.sh cargo test
+bash scripts/with-zig.sh cargo test -- --test-threads=1
 bash scripts/with-zig.sh cargo bench --bench pipeline -- --sample-size 10
 ```
 
@@ -49,4 +49,4 @@ Build first with `bash scripts/with-zig.sh cargo build`, or just run the covered
 bash scripts/with-zig.sh cargo test --test gtk_e2e_tests
 ```
 
-The same test file also runs scenarios that verify ANSI-colored cells, capture a nonblank real-window screenshot, check truecolor terminal output, narrow cursor shape, and cursor blink/reset at the pixel level, send real keyboard events with `xdotool`, click the current input row to move the shell cursor, forward terminal mouse-reporting bytes to the PTY, drag-select terminal text with the mouse, keep released drag selections stable for copy, export PRIMARY/CLIPBOARD selection text, resize the GTK window, and inspect the resulting structured snapshots.
+The same test file also runs scenarios that verify ANSI-colored cells, capture a nonblank real-window screenshot, check truecolor terminal output, narrow cursor shape, and cursor blink/reset at the pixel level, send real keyboard events with `xdotool`, click the current input row to move the shell cursor, forward terminal mouse-reporting bytes to the PTY, drag-select terminal text with the mouse, keep released drag selections stable for copy, export PRIMARY/CLIPBOARD selection text, resize split panes by dragging the divider, resize the GTK window, and inspect the resulting structured snapshots.

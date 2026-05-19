@@ -14,6 +14,7 @@ pub enum KeyAction {
     CutSelection,
     PasteClipboard,
     NewTab,
+    CloseTab,
     NextTab,
     PreviousTab,
     SplitPane,
@@ -37,7 +38,7 @@ pub enum CursorUnit {
 pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyAction> {
     let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
     let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
-    if matches!(key, gdk::Key::Left | gdk::Key::Right) && (ctrl || shift) {
+    if matches!(key, gdk::Key::Left | gdk::Key::Right) {
         return Some(KeyAction::CursorMove {
             direction: if key == gdk::Key::Left {
                 CursorDirection::Left
@@ -85,6 +86,14 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
             .is_some_and(|ch| ch.eq_ignore_ascii_case(&'t'))
     {
         return Some(KeyAction::NewTab);
+    }
+    if ctrl
+        && shift
+        && key
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'w'))
+    {
+        return Some(KeyAction::CloseTab);
     }
     if ctrl
         && shift
@@ -209,6 +218,14 @@ mod tests {
     #[test]
     fn maps_arrow_selection_and_word_movement() {
         assert_eq!(
+            key_to_action(gdk::Key::Left, gdk::ModifierType::empty()),
+            Some(KeyAction::CursorMove {
+                direction: CursorDirection::Left,
+                unit: CursorUnit::Cell,
+                selecting: false,
+            })
+        );
+        assert_eq!(
             key_to_action(gdk::Key::Left, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::CursorMove {
                 direction: CursorDirection::Left,
@@ -308,6 +325,13 @@ mod tests {
                 gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
             ),
             Some(KeyAction::NewTab)
+        );
+        assert_eq!(
+            key_to_action(
+                gdk::Key::w,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::CloseTab)
         );
         assert_eq!(
             key_to_action(gdk::Key::Page_Down, gdk::ModifierType::CONTROL_MASK),

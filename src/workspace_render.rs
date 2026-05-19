@@ -20,10 +20,11 @@ pub struct PaneRenderFrame {
     pub frame: RenderFrame,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceRenderLayout {
     pub cols: usize,
     pub rows: usize,
+    pub pane_cols: Vec<usize>,
 }
 
 impl WorkspaceRenderFrame {
@@ -47,7 +48,7 @@ impl WorkspaceRenderFrame {
                 .scan(0usize, |origin_col, (fallback_index, pane)| {
                     let selection = pane.active.then_some(active_selection).flatten();
                     let pane_layout = pane_layout(
-                        layout,
+                        layout.as_ref(),
                         pane_count,
                         fallback_index,
                         *origin_col,
@@ -93,24 +94,32 @@ struct PaneLayout {
 }
 
 fn pane_layout(
-    layout: Option<WorkspaceRenderLayout>,
+    layout: Option<&WorkspaceRenderLayout>,
     pane_count: usize,
     index: usize,
     origin_col: usize,
     content: &crate::backend::RenderableContentOwned,
 ) -> PaneLayout {
     if let Some(layout) = layout {
-        let base = layout.cols / pane_count.max(1);
-        let remainder = layout.cols % pane_count.max(1);
+        let cols = layout
+            .pane_cols
+            .get(index)
+            .copied()
+            .filter(|_| layout.pane_cols.len() == pane_count)
+            .unwrap_or_else(|| {
+                let base = layout.cols / pane_count.max(1);
+                let remainder = layout.cols % pane_count.max(1);
+                base + usize::from(index < remainder)
+            });
         return PaneLayout {
             origin_col,
             origin_row: 0,
-            cols: base + usize::from(index < remainder),
+            cols,
             rows: layout.rows,
         };
     }
     PaneLayout {
-        origin_col: 0,
+        origin_col,
         origin_row: 0,
         cols: content.lines.iter().map(Vec::len).max().unwrap_or(0),
         rows: content.lines.len(),
@@ -153,7 +162,11 @@ mod tests {
         let frame = WorkspaceRenderFrame::from_active_tab_panes_with_layout(
             vec![pane(10, 0, false, "left"), pane(11, 1, true, "right")],
             None,
-            Some(WorkspaceRenderLayout { cols: 81, rows: 24 }),
+            Some(WorkspaceRenderLayout {
+                cols: 81,
+                rows: 24,
+                pane_cols: Vec::new(),
+            }),
         );
 
         assert_eq!(frame.panes.len(), 2);
@@ -166,5 +179,36 @@ mod tests {
         assert_eq!(frame.panes[1].cols, 40);
         assert_eq!(frame.panes[1].rows, 24);
         assert!(frame.panes[1].active);
+    }
+
+    #[test]
+    fn honors_explicit_active_tab_pane_columns() {
+        let frame = WorkspaceRenderFrame::from_active_tab_panes_with_layout(
+            vec![pane(10, 0, true, "left"), pane(11, 1, false, "right")],
+            None,
+            Some(WorkspaceRenderLayout {
+                cols: 81,
+                rows: 24,
+                pane_cols: vec![61, 20],
+            }),
+        );
+
+        assert_eq!(frame.panes[0].origin_col, 0);
+        assert_eq!(frame.panes[0].cols, 61);
+        assert_eq!(frame.panes[1].origin_col, 61);
+        assert_eq!(frame.panes[1].cols, 20);
+    }
+
+    #[test]
+    fn lays_out_unframed_panes_from_rendered_content_widths() {
+        let frame = WorkspaceRenderFrame::from_active_tab_panes(
+            vec![pane(10, 0, true, "wide-left"), pane(11, 1, false, "right")],
+            None,
+        );
+
+        assert_eq!(frame.panes[0].origin_col, 0);
+        assert_eq!(frame.panes[0].cols, "wide-left".len());
+        assert_eq!(frame.panes[1].origin_col, "wide-left".len());
+        assert_eq!(frame.panes[1].cols, "right".len());
     }
 }

@@ -298,6 +298,57 @@ fn headless_mode_exports_workspace_split_render_dump() {
 
 #[test]
 #[serial]
+fn headless_mode_exports_resized_workspace_split_geometry() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-workspace-split-resize-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "raw:printf 'LEFT_RESIZED_SPLIT\\n'\\n|wait:LEFT_RESIZED_SPLIT|split|raw:printf 'RIGHT_RESIZED_SPLIT\\n'\\n|wait:RIGHT_RESIZED_SPLIT|pane:resize:0:20:81x12",
+        )
+        .env(
+            "CHELOTYPE_HEADLESS_EXPECT",
+            "LEFT_RESIZED_SPLIT|RIGHT_RESIZED_SPLIT",
+        )
+        .output()
+        .expect("run resized workspace split headless binary");
+    assert!(
+        output.status.success(),
+        "resized workspace split headless failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let render_dump = snapshot_file_ending_with(&paths, ".workspace.render.json");
+    let json = read_to_string(render_dump).expect("read workspace render dump");
+    let dump = serde_json::from_str::<serde_json::Value>(&json).expect("valid render dump");
+    let panes = dump["panes"].as_array().expect("workspace panes array");
+    assert_eq!(panes.len(), 2, "expected two split panes: {json}");
+    assert_eq!(panes[0]["origin_col"].as_u64(), Some(0));
+    assert_eq!(panes[0]["cols"].as_u64(), Some(61));
+    assert_eq!(panes[0]["rows"].as_u64(), Some(12));
+    assert_eq!(panes[1]["origin_col"].as_u64(), Some(61));
+    assert_eq!(panes[1]["cols"].as_u64(), Some(20));
+    assert_eq!(panes[1]["rows"].as_u64(), Some(12));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_replays_scripted_interaction_actions() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-scripted-{}",
