@@ -37,8 +37,8 @@ Prompt-to-artifact checklist
   - Status: partial; PRIMARY/CLIPBOARD export, current-row shell cursor placement, soft-wrapped input cursor placement, idle drag-selection rendering, and semantic prompt continuation row cursor placement are covered, but richer multi-command cursor placement is still primitive.
 - Resize/reflow
   - Evidence: `TerminalBackend::resize` updates PTY winsize and Ghostty terminal dimensions.
-  - Coverage: backend resize integration, headless resize event e2e, headless split-pane resize geometry export, real Xvfb+xdotool GTK window resize e2e that verifies changed snapshot rows, and real Xvfb+xdotool split-divider drag e2e that verifies pane geometry changes in structured workspace render state.
-  - Status: partial; split-pane geometry can be resized from headless automation and real GTK mouse drag, but scrollback reflow edge cases are weak.
+  - Coverage: backend resize integration, backend wrapped-scrollback reflow after resize, headless resize event e2e, headless wrapped-output reflow after resize event, headless split-pane resize geometry export, real Xvfb+xdotool GTK window resize e2e that verifies changed snapshot rows, real Xvfb+xdotool GTK wrapped-output reflow after window resize, and real Xvfb+xdotool split-divider drag e2e that verifies pane geometry changes in structured workspace render state.
+  - Status: partial; split-pane geometry can be resized from headless automation and real GTK mouse drag, and wrapped output is reflow-tested through backend, headless, and GTK paths, but selection preservation across resize/reflow still needs deeper coverage.
 - Colors/styles/zsh prompt fidelity
   - Evidence: Ghostty cell fg/bg/style snapshots and renderer exports.
   - Coverage: ANSI color backend test, headless Unicode/style JSON test, headless clean-zsh colored prompt cell test, Xvfb real-window smoke snapshot, GTK color e2e that verifies ANSI-colored output cells in JSON, pixel-level truecolor screenshot e2e, and a real zsh-autosuggestions fixture that asserts grey suggestion cells stay on exact grid columns across the styled space.
@@ -76,4 +76,4 @@ Current green commands
 
 Not done
 
-The milestone is not complete. The next highest-value gaps are richer non-Latin IM/preedit layout coverage, richer command-block interactions, richer selection/editing semantics, scrollback reflow edge cases, and deeper memory/allocation attribution.
+The milestone is not complete. The next highest-value gaps are richer non-Latin IM/preedit layout coverage, richer command-block interactions, richer selection/editing semantics, selection preservation across resize/reflow, and deeper memory/allocation attribution.

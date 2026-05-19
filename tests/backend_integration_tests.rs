@@ -53,6 +53,21 @@ fn snapshot_text(snapshot: &RenderableContentOwned) -> String {
     text
 }
 
+fn visible_nonblank_lines(snapshot: &RenderableContentOwned) -> Vec<String> {
+    snapshot
+        .lines
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
 #[test]
 #[serial]
 fn backend_writes_to_single_pty_and_reads_shell_output() {
@@ -209,5 +224,59 @@ fn backend_exposes_scrollback_display_offset() {
         snapshot.display_offset == 0 && snapshot_contains(snapshot, "SCROLL_24")
     });
     assert_eq!(bottom_again.display_offset, 0);
+    let _ = backend.write(b"exit\n");
+}
+
+#[test]
+#[serial]
+fn backend_reflows_wrapped_scrollback_after_resize() {
+    let mut backend = TerminalBackend::spawn(interactive_shell()).expect("spawn shell");
+    backend
+        .resize(ScreenSize::new(18, 8).expect("valid terminal size"))
+        .expect("resize backend narrow");
+    backend
+        .write(b"printf 'REFLOW_123456789_abcdefghijklmnopqrstuvwxyz\\n'\n")
+        .expect("write reflow command");
+
+    let narrow = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_contains(snapshot, "REFLOW_123456789")
+            && snapshot
+                .line_metadata
+                .iter()
+                .any(|metadata| metadata.wrapped || metadata.wrap_continuation)
+    });
+    let narrow_lines = visible_nonblank_lines(&narrow);
+    let narrow_reflow_rows = narrow_lines
+        .iter()
+        .filter(|line| {
+            line.contains("REFLOW_")
+                || line.contains("abcdefghijklmnopqrstuvwxyz")
+                || line.contains("_abcdef")
+        })
+        .count();
+    assert!(
+        narrow_reflow_rows >= 2,
+        "narrow output should visibly wrap: {narrow_lines:?}"
+    );
+
+    backend
+        .resize(ScreenSize::new(42, 8).expect("valid terminal size"))
+        .expect("resize backend wide");
+    let wide = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot.lines.len() == 8
+            && snapshot.lines.iter().all(|line| line.len() == 42)
+            && snapshot_contains(snapshot, "REFLOW_123456789_abcdefghijklmnopqrstu")
+    });
+    let wide_lines = visible_nonblank_lines(&wide);
+    assert!(
+        wide_lines
+            .iter()
+            .any(|line| line == "REFLOW_123456789_abcdefghijklmnopqrstuvwxy"),
+        "wide resize should reflow wrapped output into a wider row: {wide_lines:?}"
+    );
+    assert!(
+        wide_lines.iter().any(|line| line == "z"),
+        "wide resize should preserve the wrapped tail after reflow: {wide_lines:?}"
+    );
     let _ = backend.write(b"exit\n");
 }

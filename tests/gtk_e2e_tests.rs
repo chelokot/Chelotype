@@ -6210,3 +6210,130 @@ exit 1
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+#[serial]
+fn gtk_e2e_reflows_wrapped_output_after_window_resize_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk reflow resize e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-reflow-resize-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+target="GTK_REFLOW_$(printf 'x%.0s' {1..90})"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+xdotool windowsize "$window_id" 420 360
+for _ in {1..100}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ]; then
+        cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+        if [ -n "$cols" ] && [ "$cols" -lt "${#target}" ]; then
+            break
+        fi
+    fi
+    sleep 0.1
+done
+latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1 || true)"
+cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+if [ -z "${cols:-}" ] || [ "$cols" -ge "${#target}" ]; then
+    echo "narrow precondition did not produce a wrapped-width terminal" >&2
+    grep -R '"cols"' "$snapshot_dir" >&2 || true
+    exit 1
+fi
+xdotool type --window "$window_id" --delay 1 "python3 -c 'print(\"GTK_REFLOW_\" + \"x\" * 90)'"
+xdotool key --window "$window_id" Return
+for _ in {1..120}; do
+    if grep -R 'GTK_REFLOW_' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R 'GTK_REFLOW_' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "reflow target never appeared while narrow" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+xdotool windowsize "$window_id" 1100 500
+for _ in {1..120}; do
+    latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+    latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_txt" ] && [ -n "$latest_json" ] && grep -F "$target" "$latest_txt" >/dev/null 2>&1; then
+        cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
+        if [ -n "$cols" ] && [ "$cols" -ge "${#target}" ]; then
+            exit 0
+        fi
+    fi
+    sleep 0.1
+done
+echo "GTK resize did not reflow wrapped output into one full-width line" >&2
+echo "target length: ${#target}" >&2
+grep -R '"cols"' "$snapshot_dir" >&2 || true
+latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+[ -n "$latest_txt" ] && cat "$latest_txt" >&2
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-reflow-resize-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+        ])
+        .output()
+        .expect("run gtk reflow resize e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk reflow resize e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let text = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .map(|path| read_to_string(path).expect("read text snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.lines()
+            .any(|line| { line.trim_end() == format!("GTK_REFLOW_{}", "x".repeat(90)) })
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

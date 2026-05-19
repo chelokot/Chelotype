@@ -641,6 +641,56 @@ fn headless_mode_replays_resize_event() {
 
 #[test]
 #[serial]
+fn headless_mode_reflows_wrapped_output_after_resize_event() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-reflow-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "resize:18x8|raw:printf 'HEADLESS_REFLOW_abcdefghijklmnopqrstuvwxyz\\n'\\n|wait:HEADLESS_REFLOW_|resize:42x8",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "")
+        .output()
+        .expect("run reflow headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let text_snapshot = snapshot_file_with_extension(&paths, "txt");
+    let text = read_to_string(text_snapshot).expect("read text snapshot");
+    assert!(
+        text.lines()
+            .any(|line| line.trim_end() == "HEADLESS_REFLOW_abcdefghijklmnopqrstuvwxyz"),
+        "{text}"
+    );
+
+    let json_snapshot = snapshot_file_with_extension(&paths, "json");
+    let json: serde_json::Value =
+        serde_json::from_str(&read_to_string(json_snapshot).expect("read json snapshot"))
+            .expect("parse json snapshot");
+    assert_eq!(json["cols"], 42);
+    assert_eq!(json["rows"], 8);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_replays_scroll_event() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-scroll-{}",

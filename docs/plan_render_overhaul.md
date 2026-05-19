@@ -18,6 +18,6 @@ Next implementation order
 
 1. Add richer non-Latin IM/preedit layout and styling coverage.
 2. Add richer command-block interactions on top of OSC 133 metadata.
-3. Strengthen scrollback reflow coverage across resize, selection, and smooth-scroll states.
+3. Strengthen selection preservation across resize/reflow and smooth-scroll states.
 4. Add deeper allocation/source attribution beyond per-input and per-render counters.
 5. Keep replacing broad full-frame work with smaller dirty-region render and paint paths.
