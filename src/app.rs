@@ -112,6 +112,7 @@ fn build_ui(app: &Application) {
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
     let selection_text = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
     let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
+    let keyboard_selection = std::rc::Rc::new(std::cell::Cell::new(None::<DirectedSelectionRange>));
     let last_content = std::rc::Rc::new(std::cell::RefCell::new(None::<RenderableContentOwned>));
     let pending_input_latency =
         std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::<
@@ -126,6 +127,7 @@ fn build_ui(app: &Application) {
         selection: selection.clone(),
         selection_text: selection_text.clone(),
         selection_dirty: selection_dirty.clone(),
+        keyboard_selection: keyboard_selection.clone(),
     };
 
     configure_launch_menu(&launch_menu_button, tab_context.clone(), last_size.clone());
@@ -158,6 +160,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let pending_input_latency = pending_input_latency.clone();
         im_context.connect_commit(move |_context, committed| {
             if committed.is_empty() {
@@ -170,6 +173,7 @@ fn build_ui(app: &Application) {
                 &selection,
                 &selection_text,
                 &selection_dirty,
+                &keyboard_selection,
                 committed.as_bytes().to_vec(),
             );
         });
@@ -200,6 +204,7 @@ fn build_ui(app: &Application) {
         let tab_pages = tab_pages.clone();
         let tabs = tab_context.clone();
         let last_size = last_size.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let pending_input_latency = pending_input_latency.clone();
         key_controller.connect_key_pressed(move |_ctrl, key, _code, state| {
             if let Some(action) = key_to_action(key, state) {
@@ -215,6 +220,7 @@ fn build_ui(app: &Application) {
                                 &selection,
                                 &selection_text,
                                 &selection_dirty,
+                                &keyboard_selection,
                                 data,
                             );
                         }
@@ -231,6 +237,7 @@ fn build_ui(app: &Application) {
                             &selection,
                             &selection_text,
                             &selection_dirty,
+                            &keyboard_selection,
                             KeyboardMove {
                                 direction,
                                 unit,
@@ -245,6 +252,7 @@ fn build_ui(app: &Application) {
                             &selection,
                             &selection_text,
                             &selection_dirty,
+                            &keyboard_selection,
                         );
                     }
                     KeyAction::ScrollDisplay(lines) => {
@@ -263,6 +271,7 @@ fn build_ui(app: &Application) {
                                 &selection,
                                 &selection_text,
                                 &selection_dirty,
+                                &keyboard_selection,
                                 b"\x1b[3~".to_vec(),
                             );
                         }
@@ -270,12 +279,15 @@ fn build_ui(app: &Application) {
                     KeyAction::PasteClipboard => {
                         paste_clipboard_text(
                             &canvas_widget,
-                            workspace.clone(),
-                            content.clone(),
-                            selection.clone(),
-                            selection_text.clone(),
-                            selection_dirty.clone(),
-                            pending_input_latency.clone(),
+                            PasteClipboardContext {
+                                workspace: workspace.clone(),
+                                content: content.clone(),
+                                selection: selection.clone(),
+                                selection_text: selection_text.clone(),
+                                selection_dirty: selection_dirty.clone(),
+                                keyboard_selection: keyboard_selection.clone(),
+                                pending_input_latency: pending_input_latency.clone(),
+                            },
                         );
                     }
                     KeyAction::ZoomIn => {
@@ -321,6 +333,7 @@ fn build_ui(app: &Application) {
                                 &selection,
                                 &selection_text,
                                 &selection_dirty,
+                                &keyboard_selection,
                                 last_size.get(),
                                 &workspace,
                             );
@@ -335,6 +348,7 @@ fn build_ui(app: &Application) {
                             &selection,
                             &selection_text,
                             &selection_dirty,
+                            &keyboard_selection,
                             last_size.get(),
                             &workspace,
                         );
@@ -348,6 +362,7 @@ fn build_ui(app: &Application) {
                             &selection,
                             &selection_text,
                             &selection_dirty,
+                            &keyboard_selection,
                             last_size.get(),
                             &workspace,
                         );
@@ -372,6 +387,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
@@ -384,6 +400,7 @@ fn build_ui(app: &Application) {
             selection: selection.clone(),
             selection_text: selection_text.clone(),
             selection_dirty: selection_dirty.clone(),
+            keyboard_selection: keyboard_selection.clone(),
             pending_input_latency: pending_input_latency.clone(),
         };
         click_controller.connect_pressed(move |gesture, press_count, x, y| {
@@ -409,6 +426,7 @@ fn build_ui(app: &Application) {
                         selection: &selection,
                         selection_text: &selection_text,
                         selection_dirty: &selection_dirty,
+                        keyboard_selection: &keyboard_selection,
                     },
                 );
                 crate::logging::debug_log(&format!(
@@ -429,6 +447,7 @@ fn build_ui(app: &Application) {
                         &selection,
                         &selection_text,
                         &selection_dirty,
+                        &keyboard_selection,
                         target.position,
                         press_count,
                     )
@@ -448,6 +467,7 @@ fn build_ui(app: &Application) {
                     &selection,
                     &selection_text,
                     &selection_dirty,
+                    &keyboard_selection,
                     &content,
                 );
             }
@@ -462,6 +482,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
@@ -481,6 +502,7 @@ fn build_ui(app: &Application) {
                     &selection,
                     &selection_text,
                     &selection_dirty,
+                    &keyboard_selection,
                     &content,
                 );
                 return;
@@ -502,6 +524,7 @@ fn build_ui(app: &Application) {
                         selection: &selection,
                         selection_text: &selection_text,
                         selection_dirty: &selection_dirty,
+                        keyboard_selection: &keyboard_selection,
                     },
                 );
                 let position = if current_mode.sends_press_release() {
@@ -524,6 +547,7 @@ fn build_ui(app: &Application) {
                     &selection,
                     &selection_text,
                     &selection_dirty,
+                    &keyboard_selection,
                     &content,
                 );
             } else {
@@ -535,6 +559,7 @@ fn build_ui(app: &Application) {
                     &selection,
                     &selection_text,
                     &selection_dirty,
+                    &keyboard_selection,
                     &content,
                 );
             }
@@ -546,6 +571,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
@@ -559,6 +585,7 @@ fn build_ui(app: &Application) {
                 &selection,
                 &selection_text,
                 &selection_dirty,
+                &keyboard_selection,
                 &content,
             );
         });
@@ -578,6 +605,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
@@ -625,6 +653,7 @@ fn build_ui(app: &Application) {
                         selection: &selection,
                         selection_text: &selection_text,
                         selection_dirty: &selection_dirty,
+                        keyboard_selection: &keyboard_selection,
                     },
                 );
                 let effects = pointer_interaction.borrow_mut().press(
@@ -639,6 +668,7 @@ fn build_ui(app: &Application) {
                     &selection,
                     &selection_text,
                     &selection_dirty,
+                    &keyboard_selection,
                     &content,
                 );
             }
@@ -654,6 +684,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
@@ -743,6 +774,7 @@ fn build_ui(app: &Application) {
                     &selection,
                     &selection_text,
                     &selection_dirty,
+                    &keyboard_selection,
                     &content,
                 );
             }
@@ -756,6 +788,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
@@ -800,6 +833,7 @@ fn build_ui(app: &Application) {
                 &selection,
                 &selection_text,
                 &selection_dirty,
+                &keyboard_selection,
                 &content,
             );
             pointer_pane_capture.set(None);
@@ -810,6 +844,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
@@ -827,6 +862,7 @@ fn build_ui(app: &Application) {
                 &selection,
                 &selection_text,
                 &selection_dirty,
+                &keyboard_selection,
                 &content,
             );
         });
@@ -842,6 +878,7 @@ fn build_ui(app: &Application) {
         let selection = selection.clone();
         let selection_text = selection_text.clone();
         let selection_dirty = selection_dirty.clone();
+        let keyboard_selection = keyboard_selection.clone();
         let content = last_content.clone();
         let pointer_interaction = pointer_interaction.clone();
         let pointer_pane_capture = pointer_pane_capture.clone();
@@ -882,6 +919,7 @@ fn build_ui(app: &Application) {
                     &selection,
                     &selection_text,
                     &selection_dirty,
+                    &keyboard_selection,
                     &content,
                 );
             }
@@ -1247,6 +1285,7 @@ struct TabContext {
     selection: std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
 }
 
 #[derive(Clone)]
@@ -1362,15 +1401,7 @@ fn add_launch_target_tab(target: LaunchTarget, context: &LaunchMenuContext) {
     let page = append_tab_page(&context.tabs.tab_view, id, &title);
     context.tabs.tab_pages.borrow_mut().push(id, page.clone());
     context.tabs.tab_view.set_selected_page(&page);
-    activate_workspace_tab(
-        &context.tabs.workspace,
-        id,
-        &context.tabs.force_snapshot,
-        &context.tabs.selection,
-        &context.tabs.selection_text,
-        &context.tabs.selection_dirty,
-        context.last_size.get(),
-    );
+    activate_workspace_tab(&context.tabs, id, context.last_size.get());
 }
 
 fn add_existing_workspace_pages(
@@ -1527,15 +1558,7 @@ fn connect_native_tabs(
             let Some(id) = tabs.tab_pages.borrow().id_for_page(&page) else {
                 return;
             };
-            activate_workspace_tab(
-                &tabs.workspace,
-                id,
-                &tabs.force_snapshot,
-                &tabs.selection,
-                &tabs.selection_text,
-                &tabs.selection_dirty,
-                last_size.get(),
-            );
+            activate_workspace_tab(&tabs, id, last_size.get());
         });
     }
     {
@@ -1569,6 +1592,7 @@ fn connect_native_tabs(
                     &tabs.selection,
                     &tabs.selection_text,
                     &tabs.selection_dirty,
+                    &tabs.keyboard_selection,
                     None,
                     &tabs.workspace,
                 );
@@ -1631,15 +1655,7 @@ fn close_other_tabs(tabs: &TabContext, id: TabId, size: Option<ScreenSize>) {
         tabs.tab_view.close_page(&other_page);
     }
     tabs.tab_view.set_selected_page(&page);
-    activate_workspace_tab(
-        &tabs.workspace,
-        id,
-        &tabs.force_snapshot,
-        &tabs.selection,
-        &tabs.selection_text,
-        &tabs.selection_dirty,
-        size,
-    );
+    activate_workspace_tab(tabs, id, size);
 }
 
 fn open_rename_popover(id: TabId, parent: &gtk::Widget, tabs: &TabContext) {
@@ -1677,24 +1693,17 @@ fn open_rename_popover(id: TabId, parent: &gtk::Widget, tabs: &TabContext) {
     entry.select_region(0, -1);
 }
 
-fn activate_workspace_tab(
-    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
-    id: TabId,
-    force_snapshot: &std::rc::Rc<std::cell::Cell<bool>>,
-    selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
-    selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
-    selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
-    size: Option<ScreenSize>,
-) {
-    let activated = workspace.borrow_mut().activate(id);
+fn activate_workspace_tab(tabs: &TabContext, id: TabId, size: Option<ScreenSize>) {
+    let activated = tabs.workspace.borrow_mut().activate(id);
     if activated {
         force_active_workspace_snapshot(
-            force_snapshot,
-            selection,
-            selection_text,
-            selection_dirty,
+            &tabs.force_snapshot,
+            &tabs.selection,
+            &tabs.selection_text,
+            &tabs.selection_dirty,
+            &tabs.keyboard_selection,
             size,
-            workspace,
+            &tabs.workspace,
         );
     }
 }
@@ -1704,13 +1713,19 @@ fn force_active_workspace_snapshot(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     size: Option<ScreenSize>,
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
 ) {
     if let Some(size) = size {
         let _ = workspace.borrow_mut().resize_active_tab(size);
     }
-    clear_selection(selection, selection_text, selection_dirty);
+    clear_selection(
+        selection,
+        selection_text,
+        selection_dirty,
+        keyboard_selection,
+    );
     force_snapshot.set(true);
 }
 
@@ -1770,28 +1785,32 @@ fn copy_selection_to_clipboard(
     true
 }
 
-fn paste_clipboard_text(
-    widget: &gtk::DrawingArea,
+#[derive(Clone)]
+struct PasteClipboardContext {
     workspace: std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
     content: std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
     selection: std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     pending_input_latency: PendingInputLatency,
-) {
+}
+
+fn paste_clipboard_text(widget: &gtk::DrawingArea, context: PasteClipboardContext) {
     widget
         .clipboard()
         .read_text_async(None::<&gtk::gio::Cancellable>, move |result| {
             let Ok(Some(text)) = result else {
                 return;
             };
-            mark_pending_input_latency(&pending_input_latency);
+            mark_pending_input_latency(&context.pending_input_latency);
             write_key_with_selection(
-                &workspace,
-                &content,
-                &selection,
-                &selection_text,
-                &selection_dirty,
+                &context.workspace,
+                &context.content,
+                &context.selection,
+                &context.selection_text,
+                &context.selection_dirty,
+                &context.keyboard_selection,
                 text.as_bytes().to_vec(),
             );
         });
@@ -1804,6 +1823,7 @@ struct CanvasContextMenuContext {
     selection: std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     pending_input_latency: PendingInputLatency,
 }
 
@@ -1849,6 +1869,7 @@ fn show_canvas_context_menu(
         let selection = context.selection.clone();
         let selection_text = context.selection_text.clone();
         let selection_dirty = context.selection_dirty.clone();
+        let keyboard_selection = context.keyboard_selection.clone();
         let pending_input_latency = context.pending_input_latency.clone();
         let popover = popover.clone();
         cut.connect_clicked(move |_| {
@@ -1860,6 +1881,7 @@ fn show_canvas_context_menu(
                     &selection,
                     &selection_text,
                     &selection_dirty,
+                    &keyboard_selection,
                     b"\x1b[3~".to_vec(),
                 );
             }
@@ -1872,23 +1894,18 @@ fn show_canvas_context_menu(
     paste.add_css_class("flat");
     {
         let widget = widget.clone();
-        let workspace = context.workspace.clone();
-        let content = context.content.clone();
-        let selection = context.selection.clone();
-        let selection_text = context.selection_text.clone();
-        let selection_dirty = context.selection_dirty.clone();
-        let pending_input_latency = context.pending_input_latency.clone();
+        let context = PasteClipboardContext {
+            workspace: context.workspace.clone(),
+            content: context.content.clone(),
+            selection: context.selection.clone(),
+            selection_text: context.selection_text.clone(),
+            selection_dirty: context.selection_dirty.clone(),
+            keyboard_selection: context.keyboard_selection.clone(),
+            pending_input_latency: context.pending_input_latency.clone(),
+        };
         let popover = popover.clone();
         paste.connect_clicked(move |_| {
-            paste_clipboard_text(
-                &widget,
-                workspace.clone(),
-                content.clone(),
-                selection.clone(),
-                selection_text.clone(),
-                selection_dirty.clone(),
-                pending_input_latency.clone(),
-            );
+            paste_clipboard_text(&widget, context.clone());
             popover.popdown();
         });
     }
@@ -1901,9 +1918,16 @@ fn show_canvas_context_menu(
         let selection = context.selection.clone();
         let selection_text = context.selection_text.clone();
         let selection_dirty = context.selection_dirty.clone();
+        let keyboard_selection = context.keyboard_selection.clone();
         let popover = popover.clone();
         select_all.connect_clicked(move |_| {
-            select_active_input(&content, &selection, &selection_text, &selection_dirty);
+            select_active_input(
+                &content,
+                &selection,
+                &selection_text,
+                &selection_dirty,
+                &keyboard_selection,
+            );
             popover.popdown();
         });
     }
@@ -1968,6 +1992,7 @@ fn select_active_input(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
 ) {
     let Some(content) = content.borrow().clone() else {
         return;
@@ -1992,6 +2017,7 @@ fn select_active_input(
         selection,
         selection_text,
         selection_dirty,
+        keyboard_selection,
     );
 }
 
@@ -2000,6 +2026,7 @@ fn select_mouse_click_range(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     position: MouseGridPosition,
     press_count: i32,
 ) -> bool {
@@ -2021,7 +2048,14 @@ fn select_mouse_click_range(
     let Some(range) = range else {
         return false;
     };
-    set_viewport_selection(&content, range, selection, selection_text, selection_dirty);
+    set_viewport_selection(
+        &content,
+        range,
+        selection,
+        selection_text,
+        selection_dirty,
+        keyboard_selection,
+    );
     true
 }
 
@@ -2031,7 +2065,9 @@ fn set_viewport_selection(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
 ) {
+    keyboard_selection.set(None);
     selection.set(Some(anchor_range_to_display(range, content.display_offset)));
     *selection_text.borrow_mut() = text_for_viewport_selection(content, range);
     selection_dirty.set(true);
@@ -2054,8 +2090,10 @@ fn clear_selection(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
 ) {
     crate::logging::debug_log("clear selection");
+    keyboard_selection.set(None);
     selection.set(None);
     *selection_text.borrow_mut() = None;
     selection_dirty.set(true);
@@ -2067,6 +2105,7 @@ fn write_key_with_selection(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     data: Vec<u8>,
 ) {
     let Some(selection_range) = selection.get() else {
@@ -2074,7 +2113,12 @@ fn write_key_with_selection(
         return;
     };
     let Some(content) = content.borrow().clone() else {
-        clear_selection(selection, selection_text, selection_dirty);
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
         let _ = workspace.borrow_mut().write_active(&data);
         return;
     };
@@ -2083,12 +2127,22 @@ fn write_key_with_selection(
         Some(selection_range),
         selection_text.borrow().as_deref(),
     ) else {
-        clear_selection(selection, selection_text, selection_dirty);
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
         let _ = workspace.borrow_mut().write_active(&data);
         return;
     };
     let Some(selected) = text_for_viewport_selection(&content, viewport_selection) else {
-        clear_selection(selection, selection_text, selection_dirty);
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
         let _ = workspace.borrow_mut().write_active(&data);
         return;
     };
@@ -2096,14 +2150,28 @@ fn write_key_with_selection(
         column: viewport_selection.start.column.min(u16::MAX as usize) as u16,
         row: viewport_selection.start.row.min(u16::MAX as usize) as u16,
     };
-    let movement = if content.cursor_line == i32::from(target.row)
+    let target_point = GridPoint {
+        row: viewport_selection.start.row + content.display_offset,
+        column: viewport_selection.start.column,
+    };
+    let movement = if let Some(bytes) = keyboard_selection
+        .get()
+        .and_then(|range| cursor_movement_bytes_between_points(range.focus, target_point))
+    {
+        bytes
+    } else if content.cursor_line == i32::from(target.row)
         && content.cursor_col == i32::from(target.column)
     {
         Vec::new()
     } else if let Some(bytes) = cursor_movement_bytes_for_content(&content, target) {
         bytes
     } else {
-        clear_selection(selection, selection_text, selection_dirty);
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
         let _ = workspace.borrow_mut().write_active(&data);
         return;
     };
@@ -2115,7 +2183,12 @@ fn write_key_with_selection(
     if data.as_slice() != [0x7f] && data.as_slice() != b"\x1b[3~" {
         replacement.extend_from_slice(&data);
     }
-    clear_selection(selection, selection_text, selection_dirty);
+    clear_selection(
+        selection,
+        selection_text,
+        selection_dirty,
+        keyboard_selection,
+    );
     let _ = workspace.borrow_mut().write_active(&replacement);
 }
 
@@ -2137,12 +2210,29 @@ struct KeyboardMove {
     selecting: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectedSelectionRange {
+    anchor: GridPoint,
+    focus: GridPoint,
+}
+
+impl DirectedSelectionRange {
+    fn viewport_focus(self, display_offset: usize, viewport_rows: usize) -> Option<GridPoint> {
+        viewport_point_for_display(self.focus, display_offset, viewport_rows)
+    }
+
+    fn range(self) -> Option<SelectionRange> {
+        (self.anchor != self.focus).then_some(SelectionRange::new(self.anchor, self.focus))
+    }
+}
+
 fn move_cursor_from_keyboard(
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
     content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     cursor_move: KeyboardMove,
 ) {
     if let Some(fresh_content) = workspace.borrow_mut().snapshot_active_renderable() {
@@ -2151,8 +2241,15 @@ fn move_cursor_from_keyboard(
     let Some(content) = content.borrow().clone() else {
         return;
     };
-    let cursor = active_cursor_point(&content);
-    let current_override = if cursor_move.selecting { cursor } else { None };
+    let terminal_cursor = active_cursor_point(&content);
+    let directed_focus = keyboard_selection
+        .get()
+        .and_then(|range| range.viewport_focus(content.display_offset, content.lines.len()));
+    let current_override = if cursor_move.selecting {
+        directed_focus.or(terminal_cursor)
+    } else {
+        None
+    };
     if !cursor_move.selecting
         && let Some(target) = keyboard_selection_collapse_target(
             selection.get(),
@@ -2161,14 +2258,28 @@ fn move_cursor_from_keyboard(
             cursor_move.direction,
         )
     {
-        clear_selection(selection, selection_text, selection_dirty);
-        if let Some(bytes) = cursor_movement_bytes_for_content(
-            &content,
-            MouseGridPosition {
-                row: target.row.min(u16::MAX as usize) as u16,
-                column: target.column.min(u16::MAX as usize) as u16,
-            },
-        ) {
+        let source = directed_focus.or(terminal_cursor).map(|point| GridPoint {
+            row: point.row + content.display_offset,
+            column: point.column,
+        });
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
+        if let Some(bytes) = source
+            .and_then(|source| cursor_movement_bytes_between_points(source, target))
+            .or_else(|| {
+                cursor_movement_bytes_for_content(
+                    &content,
+                    MouseGridPosition {
+                        row: target.row.min(u16::MAX as usize) as u16,
+                        column: target.column.min(u16::MAX as usize) as u16,
+                    },
+                )
+            })
+        {
             let _ = workspace.borrow_mut().write_active(&bytes);
         }
         return;
@@ -2182,11 +2293,23 @@ fn move_cursor_from_keyboard(
         return;
     };
     if cursor_move.selecting {
-        select_keyboard_cursor_range(&content, target, selection, selection_text, selection_dirty);
+        select_keyboard_cursor_range(
+            &content,
+            target,
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
     } else if selection.get().is_some() {
-        clear_selection(selection, selection_text, selection_dirty);
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
     }
-    if let Some(bytes) = keyboard_cursor_bytes(&content, target, cursor_move) {
+    if let Some(bytes) = keyboard_cursor_bytes(&content, current_override, target, cursor_move) {
         let _ = workspace.borrow_mut().write_active(&bytes);
     }
 }
@@ -2225,6 +2348,21 @@ fn active_cursor_point(content: &RenderableContentOwned) -> Option<GridPoint> {
     })
 }
 
+fn viewport_point_for_display(
+    point: GridPoint,
+    display_offset: usize,
+    viewport_rows: usize,
+) -> Option<GridPoint> {
+    let viewport_end = display_offset + viewport_rows;
+    if point.row < display_offset || point.row >= viewport_end {
+        return None;
+    }
+    Some(GridPoint {
+        row: point.row - display_offset,
+        column: point.column,
+    })
+}
+
 fn keyboard_selection_collapse_target(
     selection: Option<SelectionRange>,
     display_offset: usize,
@@ -2254,14 +2392,42 @@ fn keyboard_selection_anchor(
 
 fn keyboard_cursor_bytes(
     content: &RenderableContentOwned,
+    current: Option<GridPoint>,
     target: MouseGridPosition,
-    cursor_move: KeyboardMove,
+    _cursor_move: KeyboardMove,
 ) -> Option<Vec<u8>> {
-    match (cursor_move.direction, cursor_move.unit) {
-        (CursorDirection::Left, CursorUnit::Cell) => Some(b"\x1b[D".to_vec()),
-        (CursorDirection::Right, CursorUnit::Cell) => Some(b"\x1b[C".to_vec()),
-        _ => cursor_movement_bytes_for_content(content, target),
+    if let Some(current) = current
+        && let Some(bytes) = cursor_movement_bytes_between_points(
+            GridPoint {
+                row: current.row + content.display_offset,
+                column: current.column,
+            },
+            GridPoint {
+                row: usize::from(target.row) + content.display_offset,
+                column: usize::from(target.column),
+            },
+        )
+    {
+        return Some(bytes);
     }
+    cursor_movement_bytes_for_content(content, target)
+}
+
+fn cursor_movement_bytes_between_points(source: GridPoint, target: GridPoint) -> Option<Vec<u8>> {
+    if source.row != target.row {
+        return None;
+    }
+    let delta = target.column as i32 - source.column as i32;
+    let mut bytes = Vec::new();
+    let step = if delta < 0 {
+        b"\x1b[D".as_slice()
+    } else {
+        b"\x1b[C".as_slice()
+    };
+    for _ in 0..delta.unsigned_abs() {
+        bytes.extend_from_slice(step);
+    }
+    Some(bytes)
 }
 
 fn select_keyboard_cursor_range(
@@ -2270,6 +2436,7 @@ fn select_keyboard_cursor_range(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
 ) {
     let Some(cursor_row) = usize::try_from(content.cursor_line).ok() else {
         return;
@@ -2285,15 +2452,30 @@ fn select_keyboard_cursor_range(
         row: usize::from(target.row) + content.display_offset,
         column: usize::from(target.column),
     };
-    let anchor = selection
+    let anchor = keyboard_selection
         .get()
-        .and_then(|range| keyboard_selection_anchor(Some(range), cursor))
+        .map(|range| range.anchor)
+        .or_else(|| {
+            selection
+                .get()
+                .and_then(|range| keyboard_selection_anchor(Some(range), cursor))
+        })
         .unwrap_or(cursor);
-    let absolute = SelectionRange::new(anchor, target);
-    selection.set(Some(absolute));
-    let visible = visible_selection_for_content(content, Some(absolute));
-    *selection_text.borrow_mut() =
-        visible.and_then(|range| text_for_viewport_selection(content, range));
+    let directed = DirectedSelectionRange {
+        anchor,
+        focus: target,
+    };
+    if let Some(absolute) = directed.range() {
+        keyboard_selection.set(Some(directed));
+        selection.set(Some(absolute));
+        let visible = visible_selection_for_content(content, Some(absolute));
+        *selection_text.borrow_mut() =
+            visible.and_then(|range| text_for_viewport_selection(content, range));
+    } else {
+        keyboard_selection.set(None);
+        selection.set(None);
+        *selection_text.borrow_mut() = None;
+    }
     selection_dirty.set(true);
 }
 
@@ -2527,6 +2709,7 @@ fn apply_interaction_effects(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
 ) {
     for effect in effects {
@@ -2536,6 +2719,7 @@ fn apply_interaction_effects(
             }
             InteractionEffect::SelectionChanged(range) => {
                 crate::logging::debug_log(&format!("selection changed {range:?}"));
+                keyboard_selection.set(None);
                 if let Some(range) = range {
                     if let Some(content) = content.borrow().as_ref() {
                         selection.set(Some(anchor_range_to_display(range, content.display_offset)));
@@ -2543,7 +2727,12 @@ fn apply_interaction_effects(
                         selection_dirty.set(true);
                     }
                 } else {
-                    clear_selection(selection, selection_text, selection_dirty);
+                    clear_selection(
+                        selection,
+                        selection_text,
+                        selection_dirty,
+                        keyboard_selection,
+                    );
                 }
             }
             InteractionEffect::MoveCursorTo(position) => {
@@ -2597,6 +2786,7 @@ struct PointerPaneActivation<'a> {
     selection: &'a std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &'a std::rc::Rc<std::cell::RefCell<Option<String>>>,
     selection_dirty: &'a std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &'a std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
 }
 
 fn terminal_metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalMetrics> {
@@ -2741,6 +2931,7 @@ fn activate_pointer_pane(target: PointerPanePosition, activation: PointerPaneAct
             activation.selection,
             activation.selection_text,
             activation.selection_dirty,
+            activation.keyboard_selection,
         );
     }
     activation.active_origin.set(pane.origin_col);
@@ -2766,6 +2957,7 @@ fn mouse_button_from_gesture(gesture: &gtk::GestureClick) -> Option<MouseButton>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal_grid::{MouseMode, TerminalCell, TerminalColors, TerminalContent};
 
     fn metrics() -> Option<CellMetrics> {
         Some(CellMetrics {
@@ -2779,6 +2971,42 @@ mod tests {
             id: PaneId::from_raw(origin_col as u64 + 1),
             origin_col,
             cols,
+        }
+    }
+
+    fn content_with_cursor(text: &str, cursor_col: i32) -> TerminalContent {
+        TerminalContent {
+            lines: vec![
+                text.chars()
+                    .map(|ch| TerminalCell {
+                        text: ch.to_string(),
+                        ..TerminalCell::blank()
+                    })
+                    .collect(),
+            ],
+            line_metadata: Vec::new(),
+            cursor_line: 0,
+            cursor_col,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        }
+    }
+
+    struct TestSelectionCells {
+        selection: std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+        selection_text: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+        selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
+        keyboard_selection: std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
+    }
+
+    fn selection_cells() -> TestSelectionCells {
+        TestSelectionCells {
+            selection: std::rc::Rc::new(std::cell::Cell::new(None)),
+            selection_text: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            selection_dirty: std::rc::Rc::new(std::cell::Cell::new(false)),
+            keyboard_selection: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
     }
 
@@ -2873,5 +3101,97 @@ mod tests {
             keyboard_selection_collapse_target(Some(range), 0, 10, CursorDirection::Right),
             Some(GridPoint { row: 4, column: 8 })
         );
+    }
+
+    #[test]
+    fn directed_keyboard_selection_shrinks_back_to_empty_without_stale_terminal_cursor() {
+        let content = content_with_cursor("❯ abcdef", 8);
+        let cells = selection_cells();
+
+        select_keyboard_cursor_range(
+            &content,
+            MouseGridPosition { column: 7, row: 0 },
+            &cells.selection,
+            &cells.selection_text,
+            &cells.selection_dirty,
+            &cells.keyboard_selection,
+        );
+        assert_eq!(
+            cells.selection.get(),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 7 },
+                GridPoint { row: 0, column: 8 }
+            ))
+        );
+        assert_eq!(cells.selection_text.borrow().as_deref(), Some("f"));
+
+        let current = cells
+            .keyboard_selection
+            .get()
+            .and_then(|range| range.viewport_focus(0, content.lines.len()));
+        let target =
+            keyboard_cursor_target(&content, CursorDirection::Right, CursorUnit::Cell, current)
+                .expect("right target from directed focus");
+        select_keyboard_cursor_range(
+            &content,
+            target,
+            &cells.selection,
+            &cells.selection_text,
+            &cells.selection_dirty,
+            &cells.keyboard_selection,
+        );
+
+        assert_eq!(cells.selection.get(), None);
+        assert_eq!(cells.selection_text.borrow().as_deref(), None);
+        assert_eq!(cells.keyboard_selection.get(), None);
+    }
+
+    #[test]
+    fn directed_ctrl_shift_word_selection_starts_from_current_position() {
+        let content = content_with_cursor("❯ abcde", 4);
+        let cells = selection_cells();
+
+        let target = keyboard_cursor_target(
+            &content,
+            CursorDirection::Right,
+            CursorUnit::Word,
+            Some(GridPoint { row: 0, column: 4 }),
+        )
+        .expect("word target from middle of word");
+        select_keyboard_cursor_range(
+            &content,
+            target,
+            &cells.selection,
+            &cells.selection_text,
+            &cells.selection_dirty,
+            &cells.keyboard_selection,
+        );
+
+        assert_eq!(
+            cells.selection.get(),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 4 },
+                GridPoint { row: 0, column: 7 }
+            ))
+        );
+        assert_eq!(cells.selection_text.borrow().as_deref(), Some("cde"));
+    }
+
+    #[test]
+    fn directed_cursor_bytes_use_logical_focus_instead_of_stale_terminal_cursor() {
+        let content = content_with_cursor("❯ abcdef", 8);
+        let bytes = keyboard_cursor_bytes(
+            &content,
+            Some(GridPoint { row: 0, column: 5 }),
+            MouseGridPosition { row: 0, column: 8 },
+            KeyboardMove {
+                direction: CursorDirection::Right,
+                unit: CursorUnit::Cell,
+                selecting: true,
+            },
+        )
+        .expect("movement bytes");
+
+        assert_eq!(bytes, b"\x1b[C\x1b[C\x1b[C");
     }
 }

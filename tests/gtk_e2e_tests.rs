@@ -3283,6 +3283,13 @@ clear_input() {
 
 xdotool type --window "$window_id" --delay 2 "abcdef"
 wait_text '❯ abcdef'
+xdotool key --window "$window_id" shift+Left
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ abcdeX'
+clear_input
+
+xdotool type --window "$window_id" --delay 2 "abcdef"
+wait_text '❯ abcdef'
 xdotool key --window "$window_id" ctrl+a
 sleep 0.1
 xdotool type --window "$window_id" --delay 2 "X"
@@ -3315,6 +3322,13 @@ xdotool key --window "$window_id" shift+Left
 sleep 0.1
 xdotool key --window "$window_id" shift+Right
 sleep 0.1
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text '❯ abcdefX'
+clear_input
+
+xdotool type --window "$window_id" --delay 2 "abcdef"
+wait_latest_text '❯ abcdef'
+xdotool key --window "$window_id" shift+Left shift+Right shift+Left shift+Right
 xdotool type --window "$window_id" --delay 2 "X"
 wait_latest_text '❯ abcdefX'
 clear_input
