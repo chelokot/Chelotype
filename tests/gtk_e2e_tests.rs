@@ -3748,6 +3748,28 @@ fi
 #[test]
 #[serial]
 fn gtk_e2e_copies_selection_to_clipboard_with_ctrl_shift_c_under_xvfb() {
+    gtk_e2e_copies_selection_to_clipboard_with_shortcut_under_xvfb(
+        "ctrl+shift+c",
+        "CLIPBOARD_COPY_OK",
+        "Ctrl+Shift+C",
+    );
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_copies_selection_to_clipboard_with_ctrl_c_under_xvfb() {
+    gtk_e2e_copies_selection_to_clipboard_with_shortcut_under_xvfb(
+        "ctrl+c",
+        "CTRL_C_COPY_OK",
+        "Ctrl+C",
+    );
+}
+
+fn gtk_e2e_copies_selection_to_clipboard_with_shortcut_under_xvfb(
+    shortcut: &str,
+    marker: &str,
+    label: &str,
+) {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk clipboard e2e because xvfb-run or xdotool is not installed");
         return;
@@ -3770,6 +3792,9 @@ bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
 geometry_trace="$4"
+shortcut="$5"
+marker="$6"
+label="$7"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
@@ -3788,21 +3813,21 @@ if [ -z "$window_id" ]; then
 fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
-xdotool type --window "$window_id" --delay 2 "printf 'CLIPBOARD_COPY_OK\n'"
+xdotool type --window "$window_id" --delay 2 "printf '$marker\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^CLIPBOARD_COPY_OK' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -R "^$marker" "$snapshot_dir"/*.txt >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^CLIPBOARD_COPY_OK' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -R "^$marker" "$snapshot_dir"/*.txt >/dev/null 2>&1; then
     echo "text for clipboard copy never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
 latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
-marker_row="$(grep -n '^CLIPBOARD_COPY_OK' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$(grep -n "^$marker" "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
 canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
@@ -3819,19 +3844,19 @@ xdotool mousemove "$end_x" "$start_y"
 sleep 0.05
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -F 'primary	CLIPBOARD_COPY_OK' "$clipboard_trace" >/dev/null 2>&1; then
+    if grep -F "primary	$marker" "$clipboard_trace" >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
-xdotool key --window "$window_id" ctrl+shift+c
+xdotool key --window "$window_id" "$shortcut"
 for _ in {1..100}; do
-    if grep -F 'clipboard	CLIPBOARD_COPY_OK' "$clipboard_trace" >/dev/null 2>&1; then
+    if grep -F "clipboard	$marker" "$clipboard_trace" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
 done
-echo "Ctrl+Shift+C did not export selected text to clipboard" >&2
+echo "$label did not export selected text to clipboard" >&2
 cat "$clipboard_trace" >&2 || true
 find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 exit 1
@@ -3850,6 +3875,9 @@ exit 1
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            shortcut,
+            marker,
+            label,
         ])
         .output()
         .expect("run gtk clipboard e2e under xvfb");
@@ -3865,7 +3893,7 @@ exit 1
 
     let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
     assert!(
-        trace.contains("clipboard\tCLIPBOARD_COPY_OK"),
+        trace.contains(&format!("clipboard\t{marker}")),
         "clipboard was not exported: {trace}"
     );
 
