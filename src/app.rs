@@ -14,7 +14,7 @@ use crate::selection::{
 };
 use crate::snapshot::write_snapshot_with_selection;
 use crate::terminal_font::metrics_for_widget;
-use crate::workspace::{PaneId, TerminalWorkspace};
+use crate::workspace::{TabId, TerminalWorkspace};
 use adw::Application;
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -131,7 +131,7 @@ fn build_ui(app: &Application) {
         let tabs = tab_context.clone();
         let last_size = last_size.clone();
         new_tab_button.connect_clicked(move |_| {
-            add_launch_target_pane(
+            add_launch_target_tab(
                 LaunchTarget::Host,
                 &LaunchMenuContext {
                     tabs: tabs.clone(),
@@ -254,8 +254,8 @@ fn build_ui(app: &Application) {
                         force_snapshot.set(true);
                         canvas_widget.queue_draw();
                     }
-                    KeyAction::NewPane => {
-                        add_launch_target_pane(
+                    KeyAction::NewTab => {
+                        add_launch_target_tab(
                             LaunchTarget::Host,
                             &LaunchMenuContext {
                                 tabs: TabContext {
@@ -272,10 +272,10 @@ fn build_ui(app: &Application) {
                             },
                         );
                     }
-                    KeyAction::NextPane => {
+                    KeyAction::NextTab => {
                         workspace.borrow_mut().activate_next();
-                        let active = workspace.borrow().active_pane_id();
-                        select_tab_for_pane(&tab_view, &tab_pages, active);
+                        let active = workspace.borrow().active_tab_id();
+                        select_page_for_tab(&tab_view, &tab_pages, active);
                         force_active_workspace_snapshot(
                             &force_snapshot,
                             &selection,
@@ -285,10 +285,10 @@ fn build_ui(app: &Application) {
                             &workspace,
                         );
                     }
-                    KeyAction::PreviousPane => {
+                    KeyAction::PreviousTab => {
                         workspace.borrow_mut().activate_previous();
-                        let active = workspace.borrow().active_pane_id();
-                        select_tab_for_pane(&tab_view, &tab_pages, active);
+                        let active = workspace.borrow().active_tab_id();
+                        select_page_for_tab(&tab_view, &tab_pages, active);
                         force_active_workspace_snapshot(
                             &force_snapshot,
                             &selection,
@@ -860,23 +860,23 @@ struct TabPages {
 }
 
 struct TabPageEntry {
-    id: PaneId,
+    id: TabId,
     page: adw::TabPage,
 }
 
 impl TabPages {
-    fn push(&mut self, id: PaneId, page: adw::TabPage) {
+    fn push(&mut self, id: TabId, page: adw::TabPage) {
         self.entries.push(TabPageEntry { id, page });
     }
 
-    fn id_for_page(&self, page: &adw::TabPage) -> Option<PaneId> {
+    fn id_for_page(&self, page: &adw::TabPage) -> Option<TabId> {
         self.entries
             .iter()
             .find(|entry| entry.page == *page)
             .map(|entry| entry.id)
     }
 
-    fn page_for_id(&self, id: PaneId) -> Option<adw::TabPage> {
+    fn page_for_id(&self, id: TabId) -> Option<adw::TabPage> {
         self.entries
             .iter()
             .find(|entry| entry.id == id)
@@ -887,11 +887,11 @@ impl TabPages {
         self.entries.retain(|entry| entry.page != *page);
     }
 
-    fn sync_title(&self, workspace: &TerminalWorkspace, id: PaneId) {
+    fn sync_title(&self, workspace: &TerminalWorkspace, id: TabId) {
         let Some(page) = self.page_for_id(id) else {
             return;
         };
-        if let Some(title) = workspace.pane_title(id) {
+        if let Some(title) = workspace.tab_title(id) {
             page.set_title(&title);
             page.set_tooltip(&title);
         }
@@ -940,27 +940,27 @@ fn rebuild_launch_list(
         let target = target.clone();
         let context = context.clone();
         row.connect_activate(move |_| {
-            add_launch_target_pane(target.clone(), &context);
+            add_launch_target_tab(target.clone(), &context);
             context.popover.popdown();
         });
         list.append(&row);
     }
 }
 
-fn add_launch_target_pane(target: LaunchTarget, context: &LaunchMenuContext) {
+fn add_launch_target_tab(target: LaunchTarget, context: &LaunchMenuContext) {
     let title = target.title();
     let Ok(id) = context
         .tabs
         .workspace
         .borrow_mut()
-        .add_titled_pane_with(&title, target.command())
+        .add_titled_tab_with(&title, target.command())
     else {
         return;
     };
     let page = append_tab_page(&context.tabs.tab_view, id, &title);
     context.tabs.tab_pages.borrow_mut().push(id, page.clone());
     context.tabs.tab_view.set_selected_page(&page);
-    activate_workspace_pane(
+    activate_workspace_tab(
         &context.tabs.workspace,
         id,
         &context.tabs.force_snapshot,
@@ -976,31 +976,31 @@ fn add_existing_workspace_pages(
     tab_pages: &std::rc::Rc<std::cell::RefCell<TabPages>>,
     workspace: &TerminalWorkspace,
 ) {
-    for pane in workspace.panes() {
+    for tab in workspace.tabs() {
         let title = workspace
-            .pane_title(pane.id)
-            .unwrap_or_else(|| format!("Terminal {}", pane.index + 1));
-        let page = append_tab_page(tab_view, pane.id, &title);
-        tab_pages.borrow_mut().push(pane.id, page.clone());
-        if pane.active {
+            .tab_title(tab.id)
+            .unwrap_or_else(|| format!("Terminal {}", tab.index + 1));
+        let page = append_tab_page(tab_view, tab.id, &title);
+        tab_pages.borrow_mut().push(tab.id, page.clone());
+        if tab.active {
             tab_view.set_selected_page(&page);
         }
     }
 }
 
-fn append_tab_page(tab_view: &adw::TabView, id: PaneId, title: &str) -> adw::TabPage {
+fn append_tab_page(tab_view: &adw::TabView, id: TabId, title: &str) -> adw::TabPage {
     let child = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    child.set_widget_name(&format!("chelotype-pane-{:?}", id));
+    child.set_widget_name(&format!("chelotype-tab-{:?}", id));
     let page = tab_view.append(&child);
     page.set_title(title);
     page.set_tooltip(title);
     page
 }
 
-fn select_tab_for_pane(
+fn select_page_for_tab(
     tab_view: &adw::TabView,
     tab_pages: &std::rc::Rc<std::cell::RefCell<TabPages>>,
-    id: PaneId,
+    id: TabId,
 ) {
     let Some(page) = tab_pages.borrow().page_for_id(id) else {
         return;
@@ -1024,7 +1024,7 @@ fn install_tab_actions(
     tabs: TabContext,
     last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
 ) {
-    let menu_target = std::rc::Rc::new(std::cell::Cell::new(None::<PaneId>));
+    let menu_target = std::rc::Rc::new(std::cell::Cell::new(None::<TabId>));
     {
         let menu_target = menu_target.clone();
         let tab_pages = tabs.tab_pages.clone();
@@ -1125,7 +1125,7 @@ fn connect_native_tabs(
             let Some(id) = tabs.tab_pages.borrow().id_for_page(&page) else {
                 return;
             };
-            activate_workspace_pane(
+            activate_workspace_tab(
                 &tabs.workspace,
                 id,
                 &tabs.force_snapshot,
@@ -1151,8 +1151,8 @@ fn connect_native_tabs(
         let tabs = tabs.clone();
         tab_view.connect_page_detached(move |_view, page, _position| {
             tabs.tab_pages.borrow_mut().remove_page(page);
-            let active = tabs.workspace.borrow().active_pane_id();
-            select_tab_for_pane(&tabs.tab_view, &tabs.tab_pages, active);
+            let active = tabs.workspace.borrow().active_tab_id();
+            select_page_for_tab(&tabs.tab_view, &tabs.tab_pages, active);
         });
     }
     {
@@ -1178,7 +1178,7 @@ fn connect_native_tabs(
     }
 }
 
-fn active_tab_id(tabs: &TabContext) -> Option<PaneId> {
+fn active_tab_id(tabs: &TabContext) -> Option<TabId> {
     let page = tabs.tab_view.selected_page()?;
     tabs.tab_pages.borrow().id_for_page(&page)
 }
@@ -1189,7 +1189,7 @@ enum TabMoveDirection {
     Right,
 }
 
-fn move_tab(tabs: &TabContext, id: PaneId, direction: TabMoveDirection) {
+fn move_tab(tabs: &TabContext, id: TabId, direction: TabMoveDirection) {
     let Some(page) = tabs.tab_pages.borrow().page_for_id(id) else {
         return;
     };
@@ -1206,14 +1206,14 @@ fn move_tab(tabs: &TabContext, id: PaneId, direction: TabMoveDirection) {
     }
 }
 
-fn close_tab(tabs: &TabContext, id: PaneId) {
+fn close_tab(tabs: &TabContext, id: TabId) {
     let Some(page) = tabs.tab_pages.borrow().page_for_id(id) else {
         return;
     };
     tabs.tab_view.close_page(&page);
 }
 
-fn close_other_tabs(tabs: &TabContext, id: PaneId, size: Option<ScreenSize>) {
+fn close_other_tabs(tabs: &TabContext, id: TabId, size: Option<ScreenSize>) {
     let Some(page) = tabs.tab_pages.borrow().page_for_id(id) else {
         return;
     };
@@ -1229,7 +1229,7 @@ fn close_other_tabs(tabs: &TabContext, id: PaneId, size: Option<ScreenSize>) {
         tabs.tab_view.close_page(&other_page);
     }
     tabs.tab_view.set_selected_page(&page);
-    activate_workspace_pane(
+    activate_workspace_tab(
         &tabs.workspace,
         id,
         &tabs.force_snapshot,
@@ -1240,14 +1240,14 @@ fn close_other_tabs(tabs: &TabContext, id: PaneId, size: Option<ScreenSize>) {
     );
 }
 
-fn open_rename_popover(id: PaneId, parent: &gtk::Widget, tabs: &TabContext) {
+fn open_rename_popover(id: TabId, parent: &gtk::Widget, tabs: &TabContext) {
     let popover = gtk::Popover::new();
     popover.set_parent(parent);
     let entry = gtk::Entry::builder()
         .text(
             tabs.workspace
                 .borrow()
-                .pane_title(id)
+                .tab_title(id)
                 .unwrap_or_else(|| "Terminal".to_string()),
         )
         .activates_default(true)
@@ -1275,9 +1275,9 @@ fn open_rename_popover(id: PaneId, parent: &gtk::Widget, tabs: &TabContext) {
     entry.select_region(0, -1);
 }
 
-fn activate_workspace_pane(
+fn activate_workspace_tab(
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
-    id: PaneId,
+    id: TabId,
     force_snapshot: &std::rc::Rc<std::cell::Cell<bool>>,
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,

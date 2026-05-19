@@ -21,5 +21,5 @@ Next implementation order
 3. Add clipboard-backed selection export.
 4. Add shell cursor placement strategy for mouse-driven command editing.
 5. Add smooth scrolling and command-block metadata.
-6. Add workspace/tab/split session model where each pane owns exactly one PTY and one `libghostty-vt` terminal.
+6. Add workspace/tab/split session model where each visible terminal pane owns exactly one PTY and one `libghostty-vt` terminal, and tabs can group one or more panes.
 7. Add GTK paint-path perf gates and allocation tracking.

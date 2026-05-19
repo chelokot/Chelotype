@@ -27,7 +27,7 @@ Current state audit
 - Partial: headless diagnostics support event-level automation for raw/text writes, key events, resize, scroll, mouse press/drag/release, click-to-cursor movement, and selection export.
 - Partial: `TerminalBackend::resize` updates both the PTY winsize and Ghostty terminal dimensions; `app.rs` derives terminal size from the GTK viewport.
 - Partial: `TerminalBackend::scroll_display` and `scroll_to_bottom` expose scrollback viewport movement from the terminal core, and snapshots export `display_offset`.
-- Partial: `src/workspace.rs` owns a typed pane list where every pane owns one `TerminalBackend`; `app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active pane; the header exposes tab buttons and a new-tab button; unit and GTK e2e tests prove pane switching and isolated terminal state across two PTYs.
+- Partial: `src/workspace.rs` owns a typed tab list where every tab owns one `TerminalBackend`; `app.rs` routes keyboard, mouse, scroll, resize, scripted input, and snapshots through the active tab; the header exposes tab buttons and a new-tab button; unit and GTK e2e tests prove tab switching and isolated terminal state across two PTYs.
 - Partial: `src/command_blocks.rs` converts semantic-prompt rows from the terminal core into prompt/output block metadata, `RenderFrame.command_blocks` exports it for renderer/diagnostic consumers, and `.render.json` headless dumps now include OSC 133-derived command blocks.
 - Partial: `src/input.rs` defines a testable keyboard-to-terminal-byte mapping used by the active GTK app.
 - Partial: `src/mouse.rs` defines testable SGR mouse event encoding, `src/interaction.rs` owns the pure pointer state machine, Ghostty exposes terminal mouse mode state, and `app.rs` forwards click press/release/drag events to the PTY only when terminal mouse reporting is enabled.
@@ -36,11 +36,11 @@ Current state audit
 - Partial: `benches/pipeline.rs` measures the active Ghostty parser/render-state/snapshot/render path; `src/perf_trace.rs` and the GTK held-key e2e measure real `gtk_render` and `gtk_paint` durations under a 10-second key hold; the app runtime uses dirty snapshots and skips identical canvas frames.
 - Weak: resize is covered at backend, headless, and GTK window-event level, but scrollback reflow edge cases are still weak.
 - Weak: first-class mouse support has mode-aware click press/release/drag plumbing, terminal mouse-reporting e2e, basic shell cursor placement on the current input row in both headless and GTK paths, headless soft-wrapped input cursor placement, semantic prompt continuation row cursor placement in unit coverage, a local grid selection model whose drag state stops on release, real GTK drag-selection e2e, and PRIMARY/CLIPBOARD export; richer multi-command cursor placement is still primitive.
-- Weak: screenshots now prove the GTK surface is nonblank, truecolor text reaches pixels, and the cursor is rendered as a blinking narrow caret that resets visible after input; GTK held-key e2e now gates visible render/paint p95/p99, but allocation tracking is still missing.
+- Weak: screenshots now prove the GTK surface is nonblank, truecolor text reaches pixels, and the cursor is rendered as a blinking narrow caret that resets visible after input; GTK held-key e2e now gates visible render/paint p95/p99 plus per-frame allocations and RSS growth, but allocation attribution per keystroke is still missing.
 
 Next implementation order
 
 1. Add advanced grapheme/IME tests.
 2. Add smooth scrolling and command-block UI.
-3. Add split-pane UI on top of the workspace model.
+3. Add split-pane UI inside the typed tab/session model.
 4. Add allocation tracking.

@@ -138,9 +138,9 @@ impl HeadlessRuntime {
                         KeyAction::CopySelection
                         | KeyAction::CutSelection
                         | KeyAction::PasteClipboard
-                        | KeyAction::NewPane
-                        | KeyAction::NextPane
-                        | KeyAction::PreviousPane
+                        | KeyAction::NewTab
+                        | KeyAction::NextTab
+                        | KeyAction::PreviousTab
                         | KeyAction::ZoomIn
                         | KeyAction::ZoomOut
                         | KeyAction::ZoomReset => Ok(()),

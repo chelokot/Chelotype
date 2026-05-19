@@ -30,4 +30,4 @@ Risks
 
 Migration Outcome
 
-The active product path has been migrated. Remaining work is no longer "choose the core"; it is improving the renderer, GTK e2e automation, clipboard/selection, workspaces, panes, command blocks, smooth scrolling, and stronger perf/memory gates on top of the chosen core.
+The active product path has been migrated. Remaining work is no longer "choose the core"; it is improving the renderer, GTK e2e automation, clipboard/selection, workspaces, tabs, split panes, command blocks, smooth scrolling, and stronger perf/memory gates on top of the chosen core.

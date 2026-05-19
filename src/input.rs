@@ -13,9 +13,9 @@ pub enum KeyAction {
     CopySelection,
     CutSelection,
     PasteClipboard,
-    NewPane,
-    NextPane,
-    PreviousPane,
+    NewTab,
+    NextTab,
+    PreviousTab,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -61,8 +61,8 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
     }
     if ctrl {
         match key {
-            gdk::Key::Page_Down => return Some(KeyAction::NextPane),
-            gdk::Key::Page_Up => return Some(KeyAction::PreviousPane),
+            gdk::Key::Page_Down => return Some(KeyAction::NextTab),
+            gdk::Key::Page_Up => return Some(KeyAction::PreviousTab),
             gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add => return Some(KeyAction::ZoomIn),
             gdk::Key::minus | gdk::Key::KP_Subtract => return Some(KeyAction::ZoomOut),
             gdk::Key::_0 | gdk::Key::KP_0 => return Some(KeyAction::ZoomReset),
@@ -83,7 +83,7 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
             .to_unicode()
             .is_some_and(|ch| ch.eq_ignore_ascii_case(&'t'))
     {
-        return Some(KeyAction::NewPane);
+        return Some(KeyAction::NewTab);
     }
     if ctrl && !shift {
         if key
@@ -298,15 +298,15 @@ mod tests {
                 gdk::Key::t,
                 gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
             ),
-            Some(KeyAction::NewPane)
+            Some(KeyAction::NewTab)
         );
         assert_eq!(
             key_to_action(gdk::Key::Page_Down, gdk::ModifierType::CONTROL_MASK),
-            Some(KeyAction::NextPane)
+            Some(KeyAction::NextTab)
         );
         assert_eq!(
             key_to_action(gdk::Key::Page_Up, gdk::ModifierType::CONTROL_MASK),
-            Some(KeyAction::PreviousPane)
+            Some(KeyAction::PreviousTab)
         );
     }
 
