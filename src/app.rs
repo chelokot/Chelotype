@@ -112,6 +112,9 @@ fn build_ui(app: &Application) {
     let geometry_trace = std::env::var("CHELOTYPE_GEOMETRY_TRACE")
         .ok()
         .map(std::path::PathBuf::from);
+    let scroll_trace = std::env::var("CHELOTYPE_SCROLL_TRACE")
+        .ok()
+        .map(std::path::PathBuf::from);
     let tab_trace = std::env::var("CHELOTYPE_TAB_TRACE")
         .ok()
         .map(std::path::PathBuf::from);
@@ -132,6 +135,10 @@ fn build_ui(app: &Application) {
     let drag_gesture_moved = std::rc::Rc::new(std::cell::Cell::new(false));
     let drag_gesture_active = std::rc::Rc::new(std::cell::Cell::new(false));
     let left_pointer_down = std::rc::Rc::new(std::cell::Cell::new(false));
+    let smooth_scroll = std::rc::Rc::new(std::cell::RefCell::new(
+        crate::smooth_scroll::SmoothScroll::default(),
+    ));
+    let smooth_scroll_timer_active = std::rc::Rc::new(std::cell::Cell::new(false));
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
     let selection_text = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
     let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -1075,6 +1082,9 @@ fn build_ui(app: &Application) {
         let force_snapshot = force_snapshot.clone();
         let last_size = last_size.clone();
         let canvas_widget = canvas.widget().clone();
+        let smooth_scroll = smooth_scroll.clone();
+        let smooth_scroll_timer_active = smooth_scroll_timer_active.clone();
+        let scroll_trace = scroll_trace.clone();
         scroll_controller.connect_scroll(move |controller, _dx, dy| {
             if controller
                 .current_event_state()
@@ -1091,7 +1101,27 @@ fn build_ui(app: &Application) {
                 return glib::Propagation::Stop;
             }
             if let Some(lines) = crate::interaction::wheel_scroll_lines(dy) {
-                let _ = workspace.borrow_mut().scroll_active(lines);
+                {
+                    let mut scroll = smooth_scroll.borrow_mut();
+                    scroll.enqueue(lines);
+                    trace_smooth_scroll(
+                        scroll_trace.as_deref(),
+                        "enqueue",
+                        lines,
+                        scroll.pending_lines(),
+                    );
+                }
+                if !smooth_scroll_timer_active.get() {
+                    smooth_scroll_timer_active.set(true);
+                    start_smooth_scroll_timer(
+                        workspace.clone(),
+                        force_snapshot.clone(),
+                        canvas_widget.clone(),
+                        smooth_scroll.clone(),
+                        smooth_scroll_timer_active.clone(),
+                        scroll_trace.clone(),
+                    );
+                }
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -1280,7 +1310,6 @@ fn build_ui(app: &Application) {
             mouse_mode.set(content.mouse);
             *last_content.borrow_mut() = Some(content);
         }
-        let selection_changed = selection_dirty.replace(false);
         let render_content = if terminal_changed || selection_changed {
             last_content.borrow().clone()
         } else {
@@ -2713,6 +2742,52 @@ fn write_trace_file(path: &std::path::Path, content: &str) {
     ));
     if std::fs::write(&tmp, content).is_ok() {
         let _ = std::fs::rename(tmp, path);
+    }
+}
+
+fn start_smooth_scroll_timer(
+    workspace: std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    canvas_widget: gtk::DrawingArea,
+    smooth_scroll: std::rc::Rc<std::cell::RefCell<crate::smooth_scroll::SmoothScroll>>,
+    timer_active: std::rc::Rc<std::cell::Cell<bool>>,
+    scroll_trace: Option<std::path::PathBuf>,
+) {
+    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        let Some(step) = smooth_scroll.borrow_mut().next_step() else {
+            timer_active.set(false);
+            trace_smooth_scroll(scroll_trace.as_deref(), "idle", 0, 0);
+            return glib::ControlFlow::Break;
+        };
+        let _ = workspace.borrow_mut().scroll_active(step);
+        force_snapshot.set(true);
+        canvas_widget.queue_draw();
+        trace_smooth_scroll(
+            scroll_trace.as_deref(),
+            "step",
+            step,
+            smooth_scroll.borrow().pending_lines(),
+        );
+        glib::ControlFlow::Continue
+    });
+}
+
+fn trace_smooth_scroll(path: Option<&std::path::Path>, event: &str, lines: i32, pending: i32) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = std::io::Write::write_all(
+            &mut file,
+            format!("{event}\t{lines}\t{pending}\n").as_bytes(),
+        );
     }
 }
 

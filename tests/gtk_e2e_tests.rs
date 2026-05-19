@@ -872,6 +872,114 @@ import -window "$window_id" "$screenshot"
 
 #[test]
 #[serial]
+fn gtk_e2e_scroll_wheel_drains_through_smooth_steps_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk smooth scroll e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-smooth-scroll-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let scroll_trace = dir.join("scroll.tsv");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+scroll_trace="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 1 "for n in \$(seq 1 60); do echo SMOOTH_SCROLL_\$n; done"
+xdotool key --window "$window_id" Return
+for _ in {1..120}; do
+    if grep -R '^SMOOTH_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '^SMOOTH_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "smooth scroll output never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+xdotool mousemove "$((X + WIDTH / 2))" "$((Y + HEIGHT / 2))"
+xdotool click 4
+for _ in {1..120}; do
+    steps="$(awk -F '\t' '$1 == "step" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
+    if [ "$steps" -ge 3 ] && grep -R '"display_offset": [1-9]' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.05
+done
+echo "smooth scroll did not drain through visible one-line steps" >&2
+cat "$scroll_trace" >&2 || true
+grep -R '"display_offset"' "$snapshot_dir"/*.json >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-smooth-scroll-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            scroll_trace.to_str().expect("scroll trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk smooth scroll e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk smooth scroll e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&scroll_trace).expect("read smooth scroll trace");
+    assert!(trace.lines().any(|line| line == "enqueue\t3\t3"));
+    assert!(
+        trace
+            .lines()
+            .filter(|line| line.starts_with("step\t1\t"))
+            .count()
+            >= 3,
+        "{trace}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_renders_narrow_cursor_pixels_under_xvfb() {
     if !has_command("xvfb-run")
         || !has_command("xdotool")
@@ -2876,6 +2984,150 @@ exit 1
         trace.lines().any(|line| line == "primary\tMOUSE_SELECT_OK"),
         "primary selection was not exported exactly: {trace}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_selects_text_with_mouse_drag_after_terminal_idle_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk idle mouse e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-idle-mouse-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+geometry_trace="$4"
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+xdotool mousemove "$((X + 100))" "$((Y + 100))"
+xdotool click 1
+sleep 0.1
+xdotool type --window "$window_id" --delay 2 "printf 'idle-selection-target\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..120}; do
+    if grep -R '^idle-selection-target' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '^idle-selection-target' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "idle selection target never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+sleep 1.3
+latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
+marker_row="$(grep -n '^idle-selection-target' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (1.5 * cell) }')"
+mid_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (10.5 * cell) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (20.8 * cell) }')"
+target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+echo "idle drag window=$window_id row=$marker_row start=$start_x,$target_y mid=$mid_x,$target_y end=$end_x,$target_y" >&2
+xdotool windowfocus "$window_id" || true
+xdotool mousemove "$start_x" "$target_y"
+xdotool mousedown 1
+sleep 0.2
+xdotool mousemove "$mid_x" "$target_y"
+sleep 0.2
+xdotool mousemove "$end_x" "$target_y"
+sleep 0.2
+xdotool mouseup 1
+for _ in {1..100}; do
+    if grep -F 'primary	idle-selection-target' "$clipboard_trace" >/dev/null 2>&1 && grep -R '"selected_text": "idle-selection-target' "$snapshot_dir" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.05
+done
+echo "idle mouse drag did not render/export selected text after terminal had gone clean" >&2
+cat "$clipboard_trace" >&2 || true
+grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+cat /tmp/chelotype.log >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-idle-mouse-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk idle mouse e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk idle mouse e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(
+        trace
+            .lines()
+            .any(|line| line == "primary\tidle-selection-target"),
+        "primary selection was not exported exactly: {trace}"
+    );
+
+    let json = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| read_to_string(path).expect("read json snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(json.contains("\"selected_text\": \"idle-selection-target"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
