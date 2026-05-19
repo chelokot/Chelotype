@@ -3,6 +3,11 @@ use crate::canvas::TerminalCanvas;
 use crate::cell_text::lines_to_text;
 use crate::containers::{LaunchTarget, available_launch_targets};
 use crate::input::{CursorDirection, CursorUnit, KeyAction, key_to_action};
+use crate::input_selection::{
+    DirectedSelectionRange, active_cursor_point, cursor_movement_bytes_between_points,
+    directed_selection_for_target, input_line_range, input_start_column, keyboard_cursor_bytes,
+    keyboard_cursor_target, keyboard_selection_collapse_target,
+};
 use crate::interaction::{
     InteractionEffect, PointerInteraction, cursor_movement_bytes_for_content,
 };
@@ -2073,19 +2078,6 @@ fn set_viewport_selection(
     selection_dirty.set(true);
 }
 
-fn input_line_range(
-    lines: &[Vec<crate::terminal_grid::TerminalCell>],
-    row: usize,
-) -> Option<SelectionRange> {
-    let line = lines.get(row)?;
-    let start = input_start_column(line);
-    let end = line_significant_len(line);
-    (end > start).then_some(SelectionRange::new(
-        GridPoint { row, column: start },
-        GridPoint { row, column: end },
-    ))
-}
-
 fn clear_selection(
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
     selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
@@ -2210,22 +2202,6 @@ struct KeyboardMove {
     selecting: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DirectedSelectionRange {
-    anchor: GridPoint,
-    focus: GridPoint,
-}
-
-impl DirectedSelectionRange {
-    fn viewport_focus(self, display_offset: usize, viewport_rows: usize) -> Option<GridPoint> {
-        viewport_point_for_display(self.focus, display_offset, viewport_rows)
-    }
-
-    fn range(self) -> Option<SelectionRange> {
-        (self.anchor != self.focus).then_some(SelectionRange::new(self.anchor, self.focus))
-    }
-}
-
 fn move_cursor_from_keyboard(
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
     content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
@@ -2309,125 +2285,9 @@ fn move_cursor_from_keyboard(
             keyboard_selection,
         );
     }
-    if let Some(bytes) = keyboard_cursor_bytes(&content, current_override, target, cursor_move) {
+    if let Some(bytes) = keyboard_cursor_bytes(&content, current_override, target) {
         let _ = workspace.borrow_mut().write_active(&bytes);
     }
-}
-
-fn keyboard_cursor_target(
-    content: &RenderableContentOwned,
-    direction: CursorDirection,
-    unit: CursorUnit,
-    current: Option<GridPoint>,
-) -> Option<MouseGridPosition> {
-    let row = current
-        .map(|point| point.row)
-        .or_else(|| usize::try_from(content.cursor_line).ok())?;
-    let cursor = current
-        .map(|point| point.column)
-        .or_else(|| usize::try_from(content.cursor_col).ok())?;
-    let line = content.lines.get(row)?;
-    let start = input_start_column(line);
-    let end = line_significant_len(line);
-    let column = match (direction, unit) {
-        (CursorDirection::Left, CursorUnit::Cell) => cursor.saturating_sub(1).max(start),
-        (CursorDirection::Right, CursorUnit::Cell) => (cursor + 1).min(end),
-        (CursorDirection::Left, CursorUnit::Word) => previous_word_boundary(line, cursor, start),
-        (CursorDirection::Right, CursorUnit::Word) => next_word_boundary(line, cursor, end),
-    };
-    Some(MouseGridPosition {
-        row: row.min(u16::MAX as usize) as u16,
-        column: column.min(u16::MAX as usize) as u16,
-    })
-}
-
-fn active_cursor_point(content: &RenderableContentOwned) -> Option<GridPoint> {
-    Some(GridPoint {
-        row: usize::try_from(content.cursor_line).ok()?,
-        column: usize::try_from(content.cursor_col).ok()?,
-    })
-}
-
-fn viewport_point_for_display(
-    point: GridPoint,
-    display_offset: usize,
-    viewport_rows: usize,
-) -> Option<GridPoint> {
-    let viewport_end = display_offset + viewport_rows;
-    if point.row < display_offset || point.row >= viewport_end {
-        return None;
-    }
-    Some(GridPoint {
-        row: point.row - display_offset,
-        column: point.column,
-    })
-}
-
-fn keyboard_selection_collapse_target(
-    selection: Option<SelectionRange>,
-    display_offset: usize,
-    viewport_rows: usize,
-    direction: CursorDirection,
-) -> Option<GridPoint> {
-    let range = viewport_range_for_display(selection?, display_offset, viewport_rows)?;
-    Some(match direction {
-        CursorDirection::Left => range.start,
-        CursorDirection::Right => range.end,
-    })
-}
-
-fn keyboard_selection_anchor(
-    selection: Option<SelectionRange>,
-    cursor: GridPoint,
-) -> Option<GridPoint> {
-    let range = selection?;
-    if cursor == range.start {
-        Some(range.end)
-    } else if cursor == range.end {
-        Some(range.start)
-    } else {
-        None
-    }
-}
-
-fn keyboard_cursor_bytes(
-    content: &RenderableContentOwned,
-    current: Option<GridPoint>,
-    target: MouseGridPosition,
-    _cursor_move: KeyboardMove,
-) -> Option<Vec<u8>> {
-    if let Some(current) = current
-        && let Some(bytes) = cursor_movement_bytes_between_points(
-            GridPoint {
-                row: current.row + content.display_offset,
-                column: current.column,
-            },
-            GridPoint {
-                row: usize::from(target.row) + content.display_offset,
-                column: usize::from(target.column),
-            },
-        )
-    {
-        return Some(bytes);
-    }
-    cursor_movement_bytes_for_content(content, target)
-}
-
-fn cursor_movement_bytes_between_points(source: GridPoint, target: GridPoint) -> Option<Vec<u8>> {
-    if source.row != target.row {
-        return None;
-    }
-    let delta = target.column as i32 - source.column as i32;
-    let mut bytes = Vec::new();
-    let step = if delta < 0 {
-        b"\x1b[D".as_slice()
-    } else {
-        b"\x1b[C".as_slice()
-    };
-    for _ in 0..delta.unsigned_abs() {
-        bytes.extend_from_slice(step);
-    }
-    Some(bytes)
 }
 
 fn select_keyboard_cursor_range(
@@ -2438,32 +2298,10 @@ fn select_keyboard_cursor_range(
     selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
     keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
 ) {
-    let Some(cursor_row) = usize::try_from(content.cursor_line).ok() else {
+    let Some(directed) =
+        directed_selection_for_target(content, target, keyboard_selection.get(), selection.get())
+    else {
         return;
-    };
-    let Some(cursor_column) = usize::try_from(content.cursor_col).ok() else {
-        return;
-    };
-    let cursor = GridPoint {
-        row: cursor_row + content.display_offset,
-        column: cursor_column,
-    };
-    let target = GridPoint {
-        row: usize::from(target.row) + content.display_offset,
-        column: usize::from(target.column),
-    };
-    let anchor = keyboard_selection
-        .get()
-        .map(|range| range.anchor)
-        .or_else(|| {
-            selection
-                .get()
-                .and_then(|range| keyboard_selection_anchor(Some(range), cursor))
-        })
-        .unwrap_or(cursor);
-    let directed = DirectedSelectionRange {
-        anchor,
-        focus: target,
     };
     if let Some(absolute) = directed.range() {
         keyboard_selection.set(Some(directed));
@@ -2477,51 +2315,6 @@ fn select_keyboard_cursor_range(
         *selection_text.borrow_mut() = None;
     }
     selection_dirty.set(true);
-}
-
-fn input_start_column(line: &[crate::terminal_grid::TerminalCell]) -> usize {
-    let significant = line_significant_len(line);
-    line.iter()
-        .take(significant)
-        .position(|cell| cell.text == " ")
-        .map(|column| column + 1)
-        .unwrap_or(0)
-}
-
-fn previous_word_boundary(
-    line: &[crate::terminal_grid::TerminalCell],
-    cursor: usize,
-    start: usize,
-) -> usize {
-    let mut column = cursor.min(line_significant_len(line));
-    while column > start && !is_word_cell(&line[column - 1]) {
-        column -= 1;
-    }
-    while column > start && is_word_cell(&line[column - 1]) {
-        column -= 1;
-    }
-    column
-}
-
-fn next_word_boundary(
-    line: &[crate::terminal_grid::TerminalCell],
-    cursor: usize,
-    end: usize,
-) -> usize {
-    let mut column = cursor.min(end);
-    while column < end && !is_word_cell(&line[column]) {
-        column += 1;
-    }
-    while column < end && is_word_cell(&line[column]) {
-        column += 1;
-    }
-    column
-}
-
-fn is_word_cell(cell: &crate::terminal_grid::TerminalCell) -> bool {
-    cell.text
-        .chars()
-        .any(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 fn trace_clipboard_export(kind: &str, text: &str) {
@@ -2957,7 +2750,6 @@ fn mouse_button_from_gesture(gesture: &gtk::GestureClick) -> Option<MouseButton>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal_grid::{MouseMode, TerminalCell, TerminalColors, TerminalContent};
 
     fn metrics() -> Option<CellMetrics> {
         Some(CellMetrics {
@@ -2971,42 +2763,6 @@ mod tests {
             id: PaneId::from_raw(origin_col as u64 + 1),
             origin_col,
             cols,
-        }
-    }
-
-    fn content_with_cursor(text: &str, cursor_col: i32) -> TerminalContent {
-        TerminalContent {
-            lines: vec![
-                text.chars()
-                    .map(|ch| TerminalCell {
-                        text: ch.to_string(),
-                        ..TerminalCell::blank()
-                    })
-                    .collect(),
-            ],
-            line_metadata: Vec::new(),
-            cursor_line: 0,
-            cursor_col,
-            cursor_visible: true,
-            display_offset: 0,
-            colors: TerminalColors::default(),
-            mouse: MouseMode::default(),
-        }
-    }
-
-    struct TestSelectionCells {
-        selection: std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
-        selection_text: std::rc::Rc<std::cell::RefCell<Option<String>>>,
-        selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
-        keyboard_selection: std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
-    }
-
-    fn selection_cells() -> TestSelectionCells {
-        TestSelectionCells {
-            selection: std::rc::Rc::new(std::cell::Cell::new(None)),
-            selection_text: std::rc::Rc::new(std::cell::RefCell::new(None)),
-            selection_dirty: std::rc::Rc::new(std::cell::Cell::new(false)),
-            keyboard_selection: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
     }
 
@@ -3067,131 +2823,5 @@ mod tests {
             split_resize_boundary_at(metrics(), &[left, right], 409.0),
             None
         );
-    }
-
-    #[test]
-    fn keyboard_selection_anchor_stays_fixed_while_focus_moves_both_directions() {
-        let range = SelectionRange::new(
-            GridPoint { row: 4, column: 5 },
-            GridPoint { row: 4, column: 6 },
-        );
-
-        assert_eq!(
-            keyboard_selection_anchor(Some(range), GridPoint { row: 4, column: 5 }),
-            Some(GridPoint { row: 4, column: 6 })
-        );
-        assert_eq!(
-            keyboard_selection_anchor(Some(range), GridPoint { row: 4, column: 6 }),
-            Some(GridPoint { row: 4, column: 5 })
-        );
-    }
-
-    #[test]
-    fn keyboard_selection_collapse_uses_requested_selection_boundary() {
-        let range = SelectionRange::new(
-            GridPoint { row: 4, column: 5 },
-            GridPoint { row: 4, column: 8 },
-        );
-
-        assert_eq!(
-            keyboard_selection_collapse_target(Some(range), 0, 10, CursorDirection::Left),
-            Some(GridPoint { row: 4, column: 5 })
-        );
-        assert_eq!(
-            keyboard_selection_collapse_target(Some(range), 0, 10, CursorDirection::Right),
-            Some(GridPoint { row: 4, column: 8 })
-        );
-    }
-
-    #[test]
-    fn directed_keyboard_selection_shrinks_back_to_empty_without_stale_terminal_cursor() {
-        let content = content_with_cursor("❯ abcdef", 8);
-        let cells = selection_cells();
-
-        select_keyboard_cursor_range(
-            &content,
-            MouseGridPosition { column: 7, row: 0 },
-            &cells.selection,
-            &cells.selection_text,
-            &cells.selection_dirty,
-            &cells.keyboard_selection,
-        );
-        assert_eq!(
-            cells.selection.get(),
-            Some(SelectionRange::new(
-                GridPoint { row: 0, column: 7 },
-                GridPoint { row: 0, column: 8 }
-            ))
-        );
-        assert_eq!(cells.selection_text.borrow().as_deref(), Some("f"));
-
-        let current = cells
-            .keyboard_selection
-            .get()
-            .and_then(|range| range.viewport_focus(0, content.lines.len()));
-        let target =
-            keyboard_cursor_target(&content, CursorDirection::Right, CursorUnit::Cell, current)
-                .expect("right target from directed focus");
-        select_keyboard_cursor_range(
-            &content,
-            target,
-            &cells.selection,
-            &cells.selection_text,
-            &cells.selection_dirty,
-            &cells.keyboard_selection,
-        );
-
-        assert_eq!(cells.selection.get(), None);
-        assert_eq!(cells.selection_text.borrow().as_deref(), None);
-        assert_eq!(cells.keyboard_selection.get(), None);
-    }
-
-    #[test]
-    fn directed_ctrl_shift_word_selection_starts_from_current_position() {
-        let content = content_with_cursor("❯ abcde", 4);
-        let cells = selection_cells();
-
-        let target = keyboard_cursor_target(
-            &content,
-            CursorDirection::Right,
-            CursorUnit::Word,
-            Some(GridPoint { row: 0, column: 4 }),
-        )
-        .expect("word target from middle of word");
-        select_keyboard_cursor_range(
-            &content,
-            target,
-            &cells.selection,
-            &cells.selection_text,
-            &cells.selection_dirty,
-            &cells.keyboard_selection,
-        );
-
-        assert_eq!(
-            cells.selection.get(),
-            Some(SelectionRange::new(
-                GridPoint { row: 0, column: 4 },
-                GridPoint { row: 0, column: 7 }
-            ))
-        );
-        assert_eq!(cells.selection_text.borrow().as_deref(), Some("cde"));
-    }
-
-    #[test]
-    fn directed_cursor_bytes_use_logical_focus_instead_of_stale_terminal_cursor() {
-        let content = content_with_cursor("❯ abcdef", 8);
-        let bytes = keyboard_cursor_bytes(
-            &content,
-            Some(GridPoint { row: 0, column: 5 }),
-            MouseGridPosition { row: 0, column: 8 },
-            KeyboardMove {
-                direction: CursorDirection::Right,
-                unit: CursorUnit::Cell,
-                selecting: true,
-            },
-        )
-        .expect("movement bytes");
-
-        assert_eq!(bytes, b"\x1b[C\x1b[C\x1b[C");
     }
 }

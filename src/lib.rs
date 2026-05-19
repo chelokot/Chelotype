@@ -8,6 +8,7 @@ pub mod containers;
 pub mod diagnostics;
 pub mod ghostty_snapshot;
 pub mod input;
+pub mod input_selection;
 pub mod interaction;
 pub mod logging;
 pub mod mouse;
