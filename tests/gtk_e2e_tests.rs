@@ -1534,6 +1534,136 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_does_not_render_selection_over_wrong_text_after_scroll_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk selection scroll e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-selection-scroll-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+geometry_trace="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "Chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 1 "for i in \$(seq 1 40); do printf 'VISUAL_FILL_%02d\n' \$i; done; printf 'VISUAL_SCROLL_TARGET\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..120}; do
+    if grep -R '^VISUAL_SCROLL_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '^VISUAL_SCROLL_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "selection scroll target never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
+marker_row="$(grep -n '^VISUAL_SCROLL_TARGET' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (1.0 * cell) }')"
+start_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (21.8 * cell) }')"
+xdotool mousemove "$start_x" "$start_y"
+xdotool mousedown 1
+sleep 0.05
+xdotool mousemove "$end_x" "$start_y"
+sleep 0.05
+xdotool mouseup 1
+for _ in {1..100}; do
+    if grep -R '"selected_text": "VISUAL_SCROLL_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '"selected_text": "VISUAL_SCROLL_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "initial target selection was not captured" >&2
+    grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+    exit 1
+fi
+before_count="$(ls "$snapshot_dir"/*.json 2>/dev/null | wc -l)"
+xdotool key --window "$window_id" shift+Page_Up
+for _ in {1..40}; do
+    after_count="$(ls "$snapshot_dir"/*.json 2>/dev/null | wc -l)"
+    if [ "$after_count" -gt "$before_count" ]; then
+        break
+    fi
+    sleep 0.1
+done
+sleep 0.2
+latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1)"
+if grep -F '"selected_text": "VISUAL_SCROLL_TARGET' "$latest_json" >/dev/null 2>&1; then
+    exit 0
+fi
+if grep -F '"selected_text": ' "$latest_json" >/dev/null 2>&1 && ! grep -F '"selected_text": null' "$latest_json" >/dev/null 2>&1; then
+    echo "selection highlight moved onto different visible text after scroll" >&2
+    grep -F '"selected_text": ' "$latest_json" >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-selection-scroll-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk selection scroll e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk selection scroll e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_copies_selection_to_clipboard_with_ctrl_shift_c_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk clipboard e2e because xvfb-run or xdotool is not installed");

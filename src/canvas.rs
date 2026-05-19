@@ -1,4 +1,4 @@
-use crate::render::{RenderCell, RenderFrame, RenderStyle};
+use crate::render::{RenderFrame, RenderRun, RenderStyle};
 use crate::terminal_font::{layout_for, metrics_for_widget};
 use gtk::cairo;
 use gtk::prelude::*;
@@ -107,17 +107,17 @@ fn draw_render_output(
     let cell_width = metrics.cell_width;
     for line in &render.lines {
         let top = line.row as f64 * line_height;
-        for cell in &line.cells {
-            draw_cell_background(context, cell, cell_width, line_height, top);
+        for run in &line.runs {
+            draw_run_background(context, run, cell_width, line_height, top);
         }
-        for cell in &line.cells {
-            if cell.text == " " {
+        for run in &line.runs {
+            if run.text.trim().is_empty() {
                 continue;
             }
-            let left = cell.column as f64 * cell_width;
-            let layout = layout_for(widget, &cell_markup(cell));
+            let left = run.start_column as f64 * cell_width;
+            let layout = layout_for(widget, &run_markup(run));
             let _ = context.save();
-            context.rectangle(left, top, cell.columns as f64 * cell_width, line_height);
+            context.rectangle(left, top, run.columns as f64 * cell_width, line_height);
             context.clip();
             gtk::render_layout(&widget.style_context(), context, left, top, &layout);
             let _ = context.restore();
@@ -186,19 +186,19 @@ impl CursorBlinkState {
     }
 }
 
-fn draw_cell_background(
+fn draw_run_background(
     context: &cairo::Context,
-    cell: &RenderCell,
+    run: &RenderRun,
     cell_width: f64,
     line_height: f64,
     top: f64,
 ) {
-    if let Some(color) = cell.style.bg.as_deref().and_then(parse_hex_color) {
+    if let Some(color) = run.style.bg.as_deref().and_then(parse_hex_color) {
         context.set_source_rgb(color.red, color.green, color.blue);
         context.rectangle(
-            cell.column as f64 * cell_width,
+            run.start_column as f64 * cell_width,
             top,
-            cell.columns as f64 * cell_width,
+            run.columns as f64 * cell_width,
             line_height,
         );
         let _ = context.fill();
@@ -213,11 +213,11 @@ fn draw_caret(context: &cairo::Context, render: &RenderFrame, line_height: f64, 
     let _ = context.fill();
 }
 
-fn cell_markup(cell: &RenderCell) -> String {
+fn run_markup(run: &RenderRun) -> String {
     let mut span = String::from("<span");
-    push_style_markup(&mut span, &cell.style);
+    push_style_markup(&mut span, &run.style);
     span.push('>');
-    for ch in cell.text.chars() {
+    for ch in run.text.chars() {
         span.push_str(&markup_escape(ch));
     }
     span.push_str("</span>");
@@ -275,12 +275,12 @@ fn markup_escape(ch: char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::RenderCell;
+    use crate::render::RenderRun;
 
     #[test]
-    fn cell_markup_escapes_text_and_preserves_style() {
-        let cell = RenderCell {
-            column: 0,
+    fn run_markup_escapes_text_and_preserves_style() {
+        let run = RenderRun {
+            start_column: 0,
             columns: 1,
             text: "<&>".to_string(),
             style: RenderStyle {
@@ -293,7 +293,7 @@ mod tests {
                 selected: false,
             },
         };
-        let markup = cell_markup(&cell);
+        let markup = run_markup(&run);
         assert!(markup.contains("foreground=\"#ff0000\""));
         assert!(markup.contains("weight=\"bold\""));
         assert!(markup.contains("style=\"italic\""));

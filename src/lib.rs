@@ -4,6 +4,7 @@ pub mod backend;
 pub mod canvas;
 pub mod cell_text;
 pub mod command_blocks;
+pub mod containers;
 pub mod diagnostics;
 pub mod ghostty_snapshot;
 pub mod input;

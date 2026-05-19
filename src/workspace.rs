@@ -9,6 +9,7 @@ pub struct PaneId(u64);
 pub struct PaneInfo {
     pub id: PaneId,
     pub active: bool,
+    pub index: usize,
 }
 
 pub struct TerminalWorkspace {
@@ -19,6 +20,7 @@ pub struct TerminalWorkspace {
 
 struct TerminalPane {
     id: PaneId,
+    title: String,
     backend: TerminalBackend,
 }
 
@@ -34,6 +36,7 @@ impl TerminalWorkspace {
         Ok(Self {
             panes: vec![TerminalPane {
                 id: first_id,
+                title: "Chelotype".to_string(),
                 backend: TerminalBackend::spawn(command)?,
             }],
             active: first_id,
@@ -50,10 +53,19 @@ impl TerminalWorkspace {
     }
 
     pub fn add_pane_with(&mut self, command: CommandBuilder) -> io::Result<PaneId> {
+        self.add_titled_pane_with("Chelotype", command)
+    }
+
+    pub fn add_titled_pane_with(
+        &mut self,
+        title: impl Into<String>,
+        command: CommandBuilder,
+    ) -> io::Result<PaneId> {
         let id = PaneId(self.next_id);
         self.next_id += 1;
         self.panes.push(TerminalPane {
             id,
+            title: title.into(),
             backend: TerminalBackend::spawn(command)?,
         });
         Ok(id)
@@ -62,6 +74,77 @@ impl TerminalWorkspace {
     pub fn add_shell_pane(&mut self) -> io::Result<PaneId> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         self.add_pane_with(CommandBuilder::new(shell))
+    }
+
+    pub fn close(&mut self, id: PaneId) -> bool {
+        if self.panes.len() <= 1 {
+            return false;
+        }
+        let Some(index) = self.panes.iter().position(|pane| pane.id == id) else {
+            return false;
+        };
+        self.panes.remove(index);
+        if self.active == id {
+            let next = index.min(self.panes.len() - 1);
+            self.active = self.panes[next].id;
+        }
+        true
+    }
+
+    pub fn close_others(&mut self, id: PaneId) -> bool {
+        if !self.panes.iter().any(|pane| pane.id == id) {
+            return false;
+        }
+        self.panes.retain(|pane| pane.id == id);
+        self.active = id;
+        true
+    }
+
+    pub fn rename(&mut self, id: PaneId, title: impl Into<String>) -> bool {
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == id) else {
+            return false;
+        };
+        let title = title.into();
+        if title.trim().is_empty() {
+            return false;
+        }
+        pane.title = title;
+        true
+    }
+
+    pub fn move_left(&mut self, id: PaneId) -> bool {
+        let Some(index) = self.panes.iter().position(|pane| pane.id == id) else {
+            return false;
+        };
+        if index == 0 {
+            return false;
+        }
+        self.panes.swap(index - 1, index);
+        true
+    }
+
+    pub fn move_right(&mut self, id: PaneId) -> bool {
+        let Some(index) = self.panes.iter().position(|pane| pane.id == id) else {
+            return false;
+        };
+        if index + 1 >= self.panes.len() {
+            return false;
+        }
+        self.panes.swap(index, index + 1);
+        true
+    }
+
+    pub fn reorder(&mut self, id: PaneId, position: usize) -> bool {
+        let Some(index) = self.panes.iter().position(|pane| pane.id == id) else {
+            return false;
+        };
+        let position = position.min(self.panes.len() - 1);
+        if index == position {
+            return false;
+        }
+        let pane = self.panes.remove(index);
+        self.panes.insert(position, pane);
+        true
     }
 
     pub fn activate(&mut self, id: PaneId) -> bool {
@@ -84,11 +167,24 @@ impl TerminalWorkspace {
     pub fn panes(&self) -> Vec<PaneInfo> {
         self.panes
             .iter()
-            .map(|pane| PaneInfo {
+            .enumerate()
+            .map(|(index, pane)| PaneInfo {
                 id: pane.id,
                 active: pane.id == self.active,
+                index,
             })
             .collect()
+    }
+
+    pub fn pane_title(&self, id: PaneId) -> Option<String> {
+        self.panes
+            .iter()
+            .find(|pane| pane.id == id)
+            .map(|pane| pane.title.clone())
+    }
+
+    pub fn pane_index(&self, id: PaneId) -> Option<usize> {
+        self.panes.iter().position(|pane| pane.id == id)
     }
 
     pub fn write_active(&mut self, data: &[u8]) -> io::Result<()> {
@@ -207,14 +303,17 @@ mod tests {
                 PaneInfo {
                     id: first,
                     active: false,
+                    index: 0,
                 },
                 PaneInfo {
                     id: second,
                     active: false,
+                    index: 1,
                 },
                 PaneInfo {
                     id: third,
                     active: true,
+                    index: 2,
                 },
             ]
         );
@@ -250,5 +349,43 @@ mod tests {
         let _ = workspace.write_active(b"exit\n");
         assert!(workspace.activate(second));
         let _ = workspace.write_active(b"exit\n");
+    }
+
+    #[test]
+    fn workspace_renames_reorders_and_closes_panes() {
+        let mut workspace = TerminalWorkspace::spawn_with(shell_command()).expect("spawn pane");
+        let first = workspace.active_pane_id();
+        assert!(workspace.rename(first, "Host"));
+        assert_eq!(workspace.pane_title(first).as_deref(), Some("Host"));
+
+        let second = workspace
+            .add_titled_pane_with("Toolbox", shell_command())
+            .expect("spawn pane");
+        let third = workspace
+            .add_titled_pane_with("Container", shell_command())
+            .expect("spawn pane");
+
+        assert!(workspace.move_left(third));
+        assert_eq!(
+            workspace
+                .panes()
+                .into_iter()
+                .map(|pane| pane.id)
+                .collect::<Vec<_>>(),
+            vec![first, third, second]
+        );
+        assert!(workspace.reorder(second, 0));
+        assert_eq!(
+            workspace
+                .panes()
+                .into_iter()
+                .map(|pane| pane.id)
+                .collect::<Vec<_>>(),
+            vec![second, first, third]
+        );
+        assert!(workspace.close_others(third));
+        assert_eq!(workspace.pane_count(), 1);
+        assert_eq!(workspace.active_pane_id(), third);
+        assert!(!workspace.close(third));
     }
 }
