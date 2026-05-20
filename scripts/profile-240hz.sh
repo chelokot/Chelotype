@@ -10,6 +10,7 @@ allow_live=0
 display_backend="x11"
 frame_budget_us=4167
 target_refresh_millihz=240000
+gsk_renderer="${CHELOTYPE_GSK_RENDERER:-gl}"
 
 usage() {
   cat <<'EOF'
@@ -187,7 +188,7 @@ EOF
   app_env+=(
     "GDK_BACKEND=wayland"
     "WAYLAND_DISPLAY=$weston_socket"
-    "GSK_RENDERER=gl"
+    "GSK_RENDERER=$gsk_renderer"
   )
   if [[ "$scenario" == "scroll-burst" ]]; then
     app_env+=("CHELOTYPE_PROFILE_SCROLL_BURST=1")
@@ -201,7 +202,7 @@ EOF
 elif [[ "$display_backend" == "native-wayland" ]]; then
   app_env+=(
     "GDK_BACKEND=wayland"
-    "GSK_RENDERER=${GSK_RENDERER:-gl}"
+    "GSK_RENDERER=$gsk_renderer"
   )
   if [[ "$scenario" == "scroll-burst" ]]; then
     app_env+=("CHELOTYPE_PROFILE_SCROLL_BURST=1")
@@ -214,6 +215,7 @@ elif [[ "$display_backend" == "native-wayland" ]]; then
   fi
 else
   app_env+=("GDK_BACKEND=${GDK_BACKEND:-x11}")
+  app_env+=("GSK_RENDERER=$gsk_renderer")
 fi
 
 env "${app_env[@]}" "$target_dir/chelotype" &
@@ -433,9 +435,9 @@ summarize_frame_buckets() {
 echo "profile root: $profile_root"
 profile_mode="$([[ "$release" -eq 1 ]] && echo release || echo debug)"
 if [[ "$display_backend" == "weston-headless" ]]; then
-  echo "scenario: $scenario duration=${duration_seconds}s backend=$display_backend renderer=$weston_renderer repaint_window=${weston_repaint_window}ms profile=$profile_mode"
+  echo "scenario: $scenario duration=${duration_seconds}s backend=$display_backend weston_renderer=$weston_renderer gsk_renderer=$gsk_renderer repaint_window=${weston_repaint_window}ms profile=$profile_mode"
 else
-  echo "scenario: $scenario duration=${duration_seconds}s backend=$display_backend profile=$profile_mode"
+  echo "scenario: $scenario duration=${duration_seconds}s backend=$display_backend gsk_renderer=$gsk_renderer profile=$profile_mode"
 fi
 echo
 summarize_refresh_gate
