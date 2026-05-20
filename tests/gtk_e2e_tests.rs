@@ -2187,6 +2187,206 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_remembers_single_toolbox_tab_after_window_close_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!(
+            "skipping gtk container persistence e2e because xvfb-run or xdotool is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-container-persistence-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("container persistence dir");
+    let fake_bin = dir.join("bin");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    let toolbox_log = dir.join("toolbox.tsv");
+    write_fake_toolbox(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
+
+    let first_snapshot_dir = dir.join("first-snapshots");
+    let second_snapshot_dir = dir.join("second-snapshots");
+    std::fs::create_dir_all(&first_snapshot_dir).expect("first snapshot dir");
+    std::fs::create_dir_all(&second_snapshot_dir).expect("second snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+    let first_tab_trace = dir.join("first-tabs.env");
+    let second_tab_trace = dir.join("second-tabs.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+first_snapshot_dir="$2"
+second_snapshot_dir="$3"
+first_tab_trace="$4"
+second_tab_trace="$5"
+config_dir="$6"
+fake_bin="$7"
+toolbox_log="$8"
+
+start_app() {
+    local snapshot_dir="$1"
+    local tab_trace="$2"
+    PATH="$fake_bin:$PATH" GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_TAB_TRACE="$tab_trace" "$bin" &
+    app_pid="$!"
+}
+
+wait_window() {
+    local tab_trace="$1"
+    window_id=""
+    for _ in {1..100}; do
+        window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+        if [ -n "$window_id" ] && [ -f "$tab_trace" ]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "chelotype window did not appear" >&2
+    return 1
+}
+
+trace_value() {
+    local tab_trace="$1"
+    local key="$2"
+    sed -n "s/^${key}=\\([0-9][0-9]*\\)$/\\1/p" "$tab_trace"
+}
+
+wait_trace_contains() {
+    local tab_trace="$1"
+    shift
+    for _ in {1..120}; do
+        local ok=1
+        for expected in "$@"; do
+            if ! grep -F "$expected" "$tab_trace" >/dev/null 2>&1; then
+                ok=0
+                break
+            fi
+        done
+        if [ "$ok" = 1 ]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "tab trace did not reach expected state" >&2
+    cat "$tab_trace" >&2 || true
+    return 1
+}
+
+open_toolbox_from_launcher() {
+    local tab_trace="$1"
+    eval "$(xdotool getwindowgeometry --shell "$window_id")"
+    launch_x="$(trace_value "$tab_trace" launch_menu_x)"
+    launch_y="$(trace_value "$tab_trace" launch_menu_y)"
+    launch_width="$(trace_value "$tab_trace" launch_menu_width)"
+    launch_height="$(trace_value "$tab_trace" launch_menu_height)"
+    button_x="$(awk -v left="$X" -v x="$launch_x" -v width="$launch_width" 'BEGIN { printf "%d", left + x + (width / 2) }')"
+    button_y="$(awk -v top="$Y" -v y="$launch_y" -v height="$launch_height" 'BEGIN { printf "%d", top + y + (height / 2) }')"
+    xdotool mousemove "$button_x" "$button_y"
+    xdotool click 1
+    sleep 0.3
+    search_x="$(awk -v left="$X" -v x="$launch_x" 'BEGIN { printf "%d", left + x + 24 }')"
+    search_y="$(awk -v top="$Y" -v y="$launch_y" -v height="$launch_height" 'BEGIN { printf "%d", top + y + height + 32 }')"
+    xdotool mousemove "$search_x" "$search_y"
+    xdotool click 1
+    xdotool type --delay 2 "fedora-toolbox-latest"
+    sleep 0.2
+    row_x="$(awk -v x="$search_x" 'BEGIN { printf "%d", x + 20 }')"
+    row_y="$(awk -v y="$search_y" 'BEGIN { printf "%d", y + 96 }')"
+    xdotool mousemove "$row_x" "$row_y"
+    xdotool click 1
+    xdotool key Return
+}
+
+start_app "$first_snapshot_dir" "$first_tab_trace"
+trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+wait_window "$first_tab_trace"
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+wait_trace_contains "$first_tab_trace" 'tab_count=1' 'tab_0_launch_target=host'
+open_toolbox_from_launcher "$first_tab_trace"
+wait_trace_contains "$first_tab_trace" 'tab_count=2' 'selected_index=1' 'tab_1_launch_target=toolbox:fedora-toolbox-latest'
+grep -F 'enter	fedora-toolbox-latest' "$toolbox_log" >/dev/null 2>&1
+
+xdotool key --window "$window_id" ctrl+Page_Up
+wait_trace_contains "$first_tab_trace" 'tab_count=2' 'selected_index=0'
+xdotool key --window "$window_id" ctrl+shift+w
+wait_trace_contains "$first_tab_trace" 'tab_count=1' 'selected_index=0' 'tab_0_launch_target=toolbox:fedora-toolbox-latest'
+
+xdotool windowclose "$window_id"
+for _ in {1..100}; do
+    if ! kill -0 "$app_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+wait "$app_pid" 2>/dev/null || true
+if kill -0 "$app_pid" 2>/dev/null; then
+    echo "first app did not exit after window close" >&2
+    exit 1
+fi
+if ! grep -F 'startup_launch_target=toolbox:fedora-toolbox-latest' "$config_dir/config" >/dev/null 2>&1; then
+    echo "single toolbox tab was not remembered on window close" >&2
+    cat "$config_dir/config" >&2 || true
+    exit 1
+fi
+
+start_app "$second_snapshot_dir" "$second_tab_trace"
+trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+wait_window "$second_tab_trace"
+wait_trace_contains "$second_tab_trace" 'tab_count=1' 'selected_index=0' 'tab_0_launch_target=toolbox:fedora-toolbox-latest'
+xdotool windowclose "$window_id"
+wait "$app_pid" 2>/dev/null || true
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-container-persistence-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            first_snapshot_dir
+                .to_str()
+                .expect("first snapshot dir utf8"),
+            second_snapshot_dir
+                .to_str()
+                .expect("second snapshot dir utf8"),
+            first_tab_trace.to_str().expect("first tab trace utf8"),
+            second_tab_trace.to_str().expect("second tab trace utf8"),
+            config_dir.to_str().expect("config dir utf8"),
+            fake_bin.to_str().expect("fake bin dir utf8"),
+            toolbox_log.to_str().expect("toolbox log path utf8"),
+        ])
+        .output()
+        .expect("run gtk container persistence e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk container persistence e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let config = read_to_string(config_dir.join("config")).expect("read config");
+    assert!(config.contains("startup_launch_target=toolbox:fedora-toolbox-latest"));
+    let trace = read_to_string(&second_tab_trace).expect("read second tab trace");
+    assert!(trace.contains("tab_0_launch_target=toolbox:fedora-toolbox-latest"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_closes_terminal_tab_with_middle_click_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!(

@@ -1863,6 +1863,7 @@ fn connect_native_tabs(
                 return glib::Propagation::Stop;
             };
             if tabs.workspace.borrow_mut().close(id) {
+                remember_single_tab_launch_target(&tabs);
                 force_active_workspace_snapshot(
                     &tabs.force_snapshot,
                     &tabs.selection,
