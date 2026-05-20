@@ -1651,6 +1651,140 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_replays_non_latin_key_event_through_input_mapping_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk non-Latin key e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-non-latin-key-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+config_dir="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+latest_render() {
+    ls -t "$snapshot_dir"/*.render.json 2>/dev/null | head -n 1
+}
+wait_latest_text() {
+    local text="$1"
+    for _ in {1..120}; do
+        latest="$(latest_txt || true)"
+        if [ -n "$latest" ] && grep -F "$text" "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text did not become: $text" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    return 1
+}
+wait_render_cell() {
+    for _ in {1..120}; do
+        latest="$(latest_render || true)"
+        if [ -n "$latest" ] && grep -F '"text": "я"' "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "render dump never contained Cyrillic key cell" >&2
+    latest="$(latest_render || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    return 1
+}
+xdotool type --window "$window_id" --delay 2 "read value"
+xdotool key --window "$window_id" Return
+wait_latest_text 'read value'
+xdotool key --window "$window_id" Cyrillic_ya
+wait_latest_text 'я'
+xdotool key --window "$window_id" Return
+xdotool type --window "$window_id" --delay 2 "printf 'GTK_NON_LATIN_KEY=%s\n' \"\$value\""
+xdotool key --window "$window_id" Return
+wait_latest_text 'GTK_NON_LATIN_KEY=я'
+wait_render_cell
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-non-latin-key-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
+        ])
+        .output()
+        .expect("run gtk non-Latin key e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk non-Latin key e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let text = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .map(|path| read_to_string(path).expect("read text snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("GTK_NON_LATIN_KEY=я"), "{text}");
+
+    let render = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".render.json"))
+        })
+        .map(|path| read_to_string(path).expect("read render snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(render.contains("\"text\": \"я\""), "{render}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_commits_composed_input_text_through_im_context_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk IM compose e2e because xvfb-run or xdotool is not installed");
