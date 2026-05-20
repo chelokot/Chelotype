@@ -1266,6 +1266,11 @@ fn build_ui(app: &Application) {
         .ok()
         .as_deref()
         == Some("1");
+    let profile_updating_baseline = std::env::var("CHELOTYPE_PROFILE_UPDATING_BASELINE")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let started_frame_updating = std::rc::Rc::new(std::cell::Cell::new(false));
     if profile_timer_baseline {
         let timer_canvas = canvas.clone();
         let last_timer_tick = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
@@ -1284,6 +1289,13 @@ fn build_ui(app: &Application) {
     let tick_canvas = canvas.clone();
     canvas.widget().add_tick_callback(move |_, frame_clock| {
         let tick_wall_started = std::time::Instant::now();
+        if profile_updating_baseline && !started_frame_updating.replace(true) {
+            frame_clock.begin_updating();
+            crate::perf_trace::record_counter("gdk_frame_clock_begin_updating", 1);
+        }
+        if profile_updating_baseline {
+            crate::perf_trace::record_counter("gdk_frame_clock_updating_active", 1);
+        }
         if let Some(previous) = last_wall_tick.replace(Some(tick_wall_started)) {
             crate::perf_trace::record_duration(
                 "gtk_tick_wall_interval",
@@ -1301,7 +1313,7 @@ fn build_ui(app: &Application) {
             crate::perf_trace::record_duration("gtk_frame_interval", elapsed_frame);
         }
         record_frame_clock_diagnostics(tick_canvas.widget(), frame_clock, tick_started);
-        if profile_frame_baseline || profile_timer_baseline {
+        if profile_frame_baseline || profile_timer_baseline || profile_updating_baseline {
             tick_canvas.widget().queue_draw();
             if profile_frame_baseline {
                 frame_clock.request_phase(gtk::gdk::FrameClockPhase::UPDATE);
