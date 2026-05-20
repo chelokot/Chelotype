@@ -572,6 +572,7 @@ if [[ "$strict" -eq 1 || "$strict_cpu" -eq 1 ]]; then
     $1 == "gtk_paint" { paint[++paint_count] = $2 }
     $1 == "gtk_render" { render[++render_count] = $2 }
     $1 == "gdk_monitor_refresh_millihz" { monitor[++monitor_count] = $2 }
+    $1 == "gdk_timings_presentation_interval" { presentation[++presentation_count] = $2 }
     END {
       if (require_cadence_gate == 1 && require_monitor_refresh == 1) {
         if (monitor_count == 0) {
@@ -582,6 +583,18 @@ if [[ "$strict" -eq 1 || "$strict_cpu" -eq 1 ]]; then
         monitor_max = monitor[monitor_count]
         if (monitor_max < target_refresh_millihz) {
           printf "strict profile failed: monitor refresh %.1fHz below required %.1fHz\n", monitor_max / 1000.0, target_refresh_millihz / 1000.0 > "/dev/stderr"
+          exit 1
+        }
+      }
+      if (require_cadence_gate == 1 && require_monitor_refresh == 1 && presentation_count == 0) {
+        print "strict profile failed: no gdk_timings_presentation_interval samples" > "/dev/stderr"
+        exit 1
+      }
+      if (require_cadence_gate == 1 && presentation_count > 0) {
+        asort(presentation)
+        presentation_p50 = presentation[int((presentation_count - 1) * 0.50) + 1]
+        if (presentation_p50 > frame_budget_us) {
+          printf "strict profile failed: gdk_timings_presentation_interval p50 %dus exceeds 240Hz budget %dus\n", presentation_p50, frame_budget_us > "/dev/stderr"
           exit 1
         }
       }
