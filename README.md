@@ -21,6 +21,16 @@ bash scripts/with-zig.sh cargo test -- --test-threads=1
 bash scripts/with-zig.sh cargo bench --bench pipeline -- --sample-size 10
 ```
 
+## 240 Hz Runtime Profile
+
+```sh
+scripts/profile-240hz.sh --scenario held-key --duration 10
+scripts/profile-240hz.sh --scenario scroll --duration 6
+scripts/profile-240hz.sh --display-backend weston-headless --scenario frame-baseline --duration 1 --release
+```
+
+Use `--strict` to fail when `gtk_frame_interval`, real wall-clock tick cadence, smooth-scroll frame cadence, or `gtk_paint` p50 exceeds the 4.166 ms 240 Hz budget on the current compositor. Use `frame-baseline` to separate compositor/GDK pacing from terminal render work.
+
 ## Headless Diagnostics
 
 ```sh

@@ -40,6 +40,33 @@ impl WorkspaceRenderFrame {
         active_selection: Option<SelectionRange>,
         layout: Option<WorkspaceRenderLayout>,
     ) -> Self {
+        Self::from_active_tab_panes_with_layout_and_detail(
+            panes,
+            active_selection,
+            layout,
+            RenderFrameDetail::Full,
+        )
+    }
+
+    pub fn from_active_tab_panes_for_paint_with_layout(
+        panes: Vec<PaneRenderable>,
+        active_selection: Option<SelectionRange>,
+        layout: Option<WorkspaceRenderLayout>,
+    ) -> Self {
+        Self::from_active_tab_panes_with_layout_and_detail(
+            panes,
+            active_selection,
+            layout,
+            RenderFrameDetail::Paint,
+        )
+    }
+
+    fn from_active_tab_panes_with_layout_and_detail(
+        panes: Vec<PaneRenderable>,
+        active_selection: Option<SelectionRange>,
+        layout: Option<WorkspaceRenderLayout>,
+        detail: RenderFrameDetail,
+    ) -> Self {
         let pane_count = panes.len();
         Self {
             panes: panes
@@ -63,7 +90,7 @@ impl WorkspaceRenderFrame {
                         origin_row: pane_layout.origin_row,
                         cols: pane_layout.cols,
                         rows: pane_layout.rows,
-                        frame: Renderer::render_frame_with_selection(pane.content, selection),
+                        frame: detail.render(&pane.content, selection),
                     })
                 })
                 .collect(),
@@ -82,6 +109,25 @@ impl WorkspaceRenderFrame {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RenderFrameDetail {
+    Full,
+    Paint,
+}
+
+impl RenderFrameDetail {
+    fn render(
+        self,
+        content: &crate::backend::RenderableContentOwned,
+        selection: Option<SelectionRange>,
+    ) -> RenderFrame {
+        match self {
+            Self::Full => Renderer::render_frame_with_selection(content, selection),
+            Self::Paint => Renderer::render_frame_for_paint(content, selection),
+        }
     }
 }
 
@@ -141,7 +187,7 @@ mod tests {
                 lines: vec![
                     text.chars()
                         .map(|ch| TerminalCell {
-                            text: ch.to_string(),
+                            text: ch.to_string().into(),
                             ..TerminalCell::blank()
                         })
                         .collect(),

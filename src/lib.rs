@@ -6,7 +6,9 @@ pub mod cell_text;
 pub mod command_blocks;
 pub mod config;
 pub mod containers;
+pub mod cursor_preview;
 pub mod diagnostics;
+pub mod frame_timing;
 pub mod ghostty_snapshot;
 pub mod input;
 pub mod input_selection;
@@ -23,6 +25,7 @@ pub mod snapshot;
 pub mod terminal_font;
 pub mod terminal_grid;
 pub mod text_width;
+pub mod trace_sink;
 pub mod workspace;
 pub mod workspace_render;
 

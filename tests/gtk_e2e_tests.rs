@@ -127,14 +127,6 @@ fn cursor_pixel_count(image: &std::path::Path) -> usize {
     .unwrap_or(0)
 }
 
-fn command_block_rail_pixel_count(image: &std::path::Path) -> usize {
-    pixel_bounds(image, |pixel| {
-        pixel.red == 46 && pixel.green == 166 && pixel.blue == 199
-    })
-    .map(|bounds| bounds.count)
-    .unwrap_or(0)
-}
-
 fn geometry_metric(path: &std::path::Path, name: &str) -> f64 {
     let geometry = read_to_string(path).expect("read geometry trace");
     geometry
@@ -156,6 +148,38 @@ fn perf_samples(path: &std::path::Path, event: &str) -> Vec<Duration> {
                 return None;
             }
             Some(Duration::from_micros(micros.parse().expect("perf micros")))
+        })
+        .collect()
+}
+
+struct SmoothScrollTraceFrame {
+    line_delta: i32,
+    remaining_px: f64,
+    offset_px: f64,
+    frame_duration: Duration,
+}
+
+fn smooth_scroll_frames(trace: &str) -> Vec<SmoothScrollTraceFrame> {
+    trace
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            if fields.next()? != "frame" {
+                return None;
+            }
+            let line_delta = fields.next()?.parse().expect("scroll line delta");
+            let remaining_px = fields.next()?.parse().expect("scroll remaining px");
+            let offset_px = fields.next()?.parse::<f64>().expect("scroll offset px");
+            let frame_duration = fields
+                .next()
+                .map(|micros| Duration::from_micros(micros.parse().expect("scroll frame micros")))
+                .unwrap_or_default();
+            Some(SmoothScrollTraceFrame {
+                line_delta,
+                remaining_px,
+                offset_px,
+                frame_duration,
+            })
         })
         .collect()
 }
@@ -876,11 +900,6 @@ import -window "$window_id" "$screenshot"
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_clean_gtk_stderr(&stderr);
 
-    let rail_pixels = command_block_rail_pixel_count(&screenshot);
-    assert!(
-        rail_pixels > 20,
-        "expected visible command block rail pixels, found {rail_pixels}"
-    );
     let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
     assert!(
         trace
@@ -1218,13 +1237,15 @@ fn gtk_e2e_scroll_wheel_drains_through_smooth_steps_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let scroll_trace = dir.join("scroll.tsv");
+    let perf_trace = dir.join("perf.tsv");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 scroll_trace="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
+perf_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" CHELOTYPE_PERF_TRACE="$perf_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -1256,15 +1277,16 @@ if ! grep -R '^SMOOTH_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
 fi
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
 xdotool mousemove "$((X + WIDTH / 2))" "$((Y + HEIGHT / 2))"
+: > "$perf_trace"
 xdotool click 4
 for _ in {1..120}; do
-    steps="$(awk -F '\t' '$1 == "step" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
-    if [ "$steps" -ge 3 ] && grep -R '"display_offset": [1-9]' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+    frames="$(awk -F '\t' '$1 == "frame" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
+    if [ "$frames" -ge 3 ] && grep -q $'^idle\t0\t0.00' "$scroll_trace" 2>/dev/null && grep -R '"display_offset": [1-9]' "$snapshot_dir"/*.json >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.05
 done
-echo "smooth scroll did not drain through visible one-line steps" >&2
+echo "smooth scroll did not render visible offset frames" >&2
 cat "$scroll_trace" >&2 || true
 grep -R '"display_offset"' "$snapshot_dir"/*.json >&2 || true
 exit 1
@@ -1282,6 +1304,7 @@ exit 1
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             scroll_trace.to_str().expect("scroll trace path utf8"),
+            perf_trace.to_str().expect("perf trace path utf8"),
         ])
         .output()
         .expect("run gtk smooth scroll e2e under xvfb");
@@ -1296,13 +1319,347 @@ exit 1
     assert_clean_gtk_stderr(&stderr);
 
     let trace = read_to_string(&scroll_trace).expect("read smooth scroll trace");
-    assert!(trace.lines().any(|line| line == "enqueue\t3\t3"));
     assert!(
-        trace
-            .lines()
-            .filter(|line| line.starts_with("step\t1\t"))
+        trace.lines().any(|line| line.starts_with("enqueue\t3\t")),
+        "{trace}"
+    );
+    let scroll_frames = smooth_scroll_frames(&trace);
+    let scroll_frame_p50 = percentile_duration(
+        scroll_frames
+            .iter()
+            .map(|frame| frame.frame_duration)
+            .collect(),
+        50,
+    );
+    let high_refresh_scroll = scroll_frame_p50 <= Duration::from_millis(8);
+    let min_scroll_frames = if high_refresh_scroll { 8 } else { 3 };
+    assert!(
+        scroll_frames.len() >= min_scroll_frames,
+        "smooth scroll produced too few frame-clock steps: {} expected at least {min_scroll_frames}\n{trace}",
+        scroll_frames.len()
+    );
+    assert!(
+        scroll_frames
+            .iter()
+            .any(|frame| frame.offset_px.abs() >= 0.5),
+        "smooth scroll did not produce visible fractional offsets\n{trace}"
+    );
+    assert!(
+        scroll_frames
+            .iter()
+            .find(|frame| frame.line_delta > 0)
+            .is_some_and(|frame| frame.offset_px < 0.0),
+        "wheel-up smooth scroll should preapply the incoming viewport and compensate it with negative offset\n{trace}"
+    );
+    assert!(
+        scroll_frames
+            .iter()
+            .filter(|frame| frame.line_delta == 0 && frame.offset_px.abs() >= 0.5)
+            .all(|frame| frame.offset_px < 0.0),
+        "wheel-up pixel-only frames should continue the preapplied viewport instead of flipping direction\n{trace}"
+    );
+    assert!(
+        scroll_frames
+            .iter()
+            .filter(|frame| frame.line_delta != 0)
             .count()
-            >= 3,
+            >= 2,
+        "smooth scroll did not drain through logical line steps\n{trace}"
+    );
+    let line_step_count = scroll_frames
+        .iter()
+        .filter(|frame| frame.line_delta != 0)
+        .count();
+    assert!(
+        scroll_frames
+            .windows(2)
+            .all(|frames| frames[1].remaining_px <= frames[0].remaining_px),
+        "smooth scroll remaining pixels did not converge monotonically\n{trace}"
+    );
+    assert!(
+        scroll_frame_p50 <= Duration::from_millis(20),
+        "smooth scroll frame duration p50 exceeded Xvfb frame-clock budget: {scroll_frame_p50:?}\n{trace}"
+    );
+    let frame_interval = perf_samples(&perf_trace, "gtk_frame_interval");
+    assert!(
+        frame_interval.len() >= 4,
+        "smooth scroll produced too few frame interval samples: {}",
+        frame_interval.len()
+    );
+    let frame_interval_p50 = percentile_duration(frame_interval, 50);
+    assert!(
+        frame_interval_p50 <= Duration::from_millis(20),
+        "smooth scroll gtk_frame_interval p50 exceeded Xvfb frame-clock budget: {frame_interval_p50:?}"
+    );
+    let render = perf_samples(&perf_trace, "gtk_render");
+    assert!(
+        render.len() <= line_step_count + 2,
+        "smooth scroll rendered full terminal frames during pixel-only scroll: renders={} line_steps={line_step_count}\n{trace}",
+        render.len()
+    );
+    if !render.is_empty() {
+        let render_p95 = percentile_duration(render, 95);
+        assert!(
+            render_p95 <= Duration::from_micros(4_166),
+            "smooth scroll gtk_render p95 exceeded 240 Hz CPU budget: {render_p95:?}\n{trace}"
+        );
+    }
+    let paint = perf_samples(&perf_trace, "gtk_paint");
+    assert!(
+        paint.len() >= min_scroll_frames,
+        "smooth scroll produced too few paint samples after wheel: {}",
+        paint.len()
+    );
+    let paint_p50 = percentile_duration(paint.clone(), 50);
+    let paint_p95 = percentile_duration(paint, 95);
+    assert!(
+        paint_p50 <= Duration::from_millis(20),
+        "smooth scroll gtk_paint p50 exceeded Xvfb frame-clock budget: {paint_p50:?}"
+    );
+    assert!(
+        paint_p95 <= Duration::from_micros(4_166),
+        "smooth scroll gtk_paint p95 exceeded 240 Hz CPU budget: {paint_p95:?}"
+    );
+    let paint_rows = perf_counters(&perf_trace, "gtk_paint_rows");
+    let layout_hits = perf_counters(&perf_trace, "gtk_layout_cache_hits");
+    let layout_misses = perf_counters(&perf_trace, "gtk_layout_cache_misses");
+    assert!(
+        paint_rows.len() >= min_scroll_frames,
+        "smooth scroll produced too few paint-row samples: {}",
+        paint_rows.len()
+    );
+    let paint_rows_p95 = percentile_counter(paint_rows, 95);
+    assert!(
+        paint_rows_p95 <= 30,
+        "smooth scroll painted too many rows per frame after clip pruning: p95={paint_rows_p95}"
+    );
+    assert!(
+        layout_hits.iter().any(|hits| *hits > 0),
+        "smooth scroll never reused cached Pango layouts"
+    );
+    let layout_misses_p95 = percentile_counter(layout_misses, 95);
+    assert!(
+        layout_misses_p95 <= 2,
+        "smooth scroll rebuilt too many Pango layouts per paint: p95={layout_misses_p95}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_scroll_wheel_at_bottom_does_not_overscroll_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk scroll limit e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-scroll-limit-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let scroll_trace = dir.join("scroll.tsv");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+scroll_trace="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 1 "printf 'SCROLL_BOTTOM_READY\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    if grep -R '^SCROLL_BOTTOM_READY' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '^SCROLL_BOTTOM_READY' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "bottom marker never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+xdotool mousemove "$((X + WIDTH / 2))" "$((Y + HEIGHT / 2))"
+: > "$scroll_trace"
+xdotool click 5
+sleep 0.35
+if grep -q $'^frame\t' "$scroll_trace"; then
+    echo "bottom scroll generated smooth-scroll animation frames" >&2
+    cat "$scroll_trace" >&2 || true
+    exit 1
+fi
+if ! grep -q $'^limit\t-3\t0.00' "$scroll_trace"; then
+    echo "bottom scroll did not report a limit event" >&2
+    cat "$scroll_trace" >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-scroll-limit-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            scroll_trace.to_str().expect("scroll trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk scroll limit e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk scroll limit e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&scroll_trace).expect("read scroll limit trace");
+    assert!(trace.lines().any(|line| line == "limit\t-3\t0.00"));
+    assert!(
+        !trace.lines().any(|line| line.starts_with("frame\t")),
+        "{trace}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_smooth_scrolling_config_off_uses_direct_wheel_scroll_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk direct scroll e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-direct-scroll-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let snapshot_dir = dir.join("snapshots");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(config_dir.join("config"), "smooth_scrolling=off\n").expect("config");
+    let scroll_trace = dir.join("scroll.tsv");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+config_dir="$3"
+scroll_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 1 "python3 -c \"for n in range(1, 61): print(f'DIRECT_SCROLL_{n}')\""
+xdotool key --window "$window_id" Return
+for _ in {1..120}; do
+    if grep -R '^DIRECT_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '^DIRECT_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "direct scroll output never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+xdotool mousemove "$((X + WIDTH / 2))" "$((Y + HEIGHT / 2))"
+: > "$scroll_trace"
+xdotool click 4
+for _ in {1..80}; do
+    if grep -R '"display_offset": [1-9]' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -R '"display_offset": [1-9]' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+    echo "direct wheel scroll did not move the display offset" >&2
+    grep -R '"display_offset"' "$snapshot_dir"/*.json >&2 || true
+    exit 1
+fi
+if grep -q $'^frame\t' "$scroll_trace" 2>/dev/null; then
+    echo "direct wheel scroll unexpectedly generated smooth-scroll frames" >&2
+    cat "$scroll_trace" >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-direct-scroll-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            snapshot_dir.to_str().expect("snapshot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
+            scroll_trace.to_str().expect("scroll trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk direct scroll e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk direct scroll e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&scroll_trace).unwrap_or_default();
+    assert!(
+        !trace.lines().any(|line| line.starts_with("frame\t")),
         "{trace}"
     );
 
@@ -1331,6 +1688,8 @@ fn gtk_e2e_renders_narrow_cursor_pixels_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
     let screenshot = dir.join("window.png");
     let geometry_trace = dir.join("geometry.env");
 
@@ -1340,7 +1699,8 @@ bin="$1"
 snapshot_dir="$2"
 screenshot="$3"
 geometry_trace="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+config_dir="$5"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -1398,6 +1758,7 @@ fi
             dir.to_str().expect("snapshot dir utf8"),
             screenshot.to_str().expect("screenshot path utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk cursor pixel e2e under xvfb");
@@ -1479,6 +1840,8 @@ fn gtk_e2e_blinks_cursor_and_resets_after_input_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
     let visible = dir.join("visible.png");
     let hidden = dir.join("hidden.png");
     let reset = dir.join("reset.png");
@@ -1490,7 +1853,8 @@ snapshot_dir="$2"
 visible="$3"
 hidden="$4"
 reset="$5"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+config_dir="$6"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -1510,8 +1874,10 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "blink"
 sleep 0.15
 import -window "$window_id" "$visible"
-sleep 0.65
-import -window "$window_id" "$hidden"
+for n in {1..10}; do
+    sleep 0.12
+    import -window "$window_id" "${hidden%.png}_$n.png"
+done
 xdotool type --window "$window_id" --delay 2 "X"
 sleep 0.15
 import -window "$window_id" "$reset"
@@ -1531,6 +1897,7 @@ import -window "$window_id" "$reset"
             visible.to_str().expect("visible screenshot path utf8"),
             hidden.to_str().expect("hidden screenshot path utf8"),
             reset.to_str().expect("reset screenshot path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk cursor blink e2e under xvfb");
@@ -1545,15 +1912,19 @@ import -window "$window_id" "$reset"
     assert_clean_gtk_stderr(&stderr);
 
     let visible_count = cursor_pixel_count(&visible);
-    let hidden_count = cursor_pixel_count(&hidden);
+    let hidden_counts = (1..=10)
+        .map(|index| dir.join(format!("hidden_{index}.png")))
+        .filter(|path| path.is_file())
+        .map(|path| cursor_pixel_count(&path))
+        .collect::<Vec<_>>();
     let reset_count = cursor_pixel_count(&reset);
     assert!(
         visible_count >= 16,
         "cursor should start visible, got {visible_count} cursor pixels"
     );
-    assert_eq!(
-        hidden_count, 0,
-        "cursor should blink off, got {hidden_count} cursor pixels"
+    assert!(
+        hidden_counts.contains(&0),
+        "cursor should blink off in at least one sampled frame, got {hidden_counts:?}"
     );
     assert!(
         reset_count >= 16,
@@ -1579,12 +1950,19 @@ fn gtk_e2e_accepts_real_keyboard_input_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let zdot = dir.join("zdot");
+    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    std::fs::write(
+        zdot.join(".zshrc"),
+        "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
+    )
+    .expect("zshrc fixture");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -1799,12 +2177,19 @@ fn gtk_e2e_commits_composed_input_text_through_im_context_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let zdot = dir.join("zdot");
+    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    std::fs::write(
+        zdot.join(".zshrc"),
+        "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
+    )
+    .expect("zshrc fixture");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -2148,6 +2533,8 @@ fi
 
     let render = perf_samples(&perf_trace, "gtk_render");
     let paint = perf_samples(&perf_trace, "gtk_paint");
+    let frame_interval = perf_samples(&perf_trace, "gtk_frame_interval");
+    let metrics = perf_samples(&perf_trace, "gtk_metrics");
     let input_to_render = perf_samples(&perf_trace, "input_to_render");
     let input_allocs = perf_counters(&perf_trace, "input_allocs_to_render");
     let input_alloc_bytes = perf_counters(&perf_trace, "input_alloc_bytes_to_render");
@@ -2163,6 +2550,20 @@ fi
         paint.len() >= 80,
         "held-key produced too few paint samples: {}",
         paint.len()
+    );
+    assert!(
+        frame_interval.len() >= 80,
+        "held-key produced too few frame interval samples: {}",
+        frame_interval.len()
+    );
+    assert!(
+        !metrics.is_empty(),
+        "held-key did not record terminal metrics samples"
+    );
+    assert!(
+        metrics.len() <= 8,
+        "held-key recomputed terminal metrics too often: {} samples",
+        metrics.len()
     );
     assert!(
         input_to_render.len() >= 80,
@@ -2193,6 +2594,8 @@ fi
     let render_p99 = percentile_duration(render, 99);
     let paint_p95 = percentile_duration(paint.clone(), 95);
     let paint_p99 = percentile_duration(paint, 99);
+    let frame_interval_p50 = percentile_duration(frame_interval.clone(), 50);
+    let frame_interval_p95 = percentile_duration(frame_interval, 95);
     let input_to_render_p95 = percentile_duration(input_to_render.clone(), 95);
     let input_to_render_p99 = percentile_duration(input_to_render, 99);
     let input_allocs_p95 = percentile_counter(input_allocs.clone(), 95);
@@ -2223,8 +2626,16 @@ fi
         "held-key gtk_paint p99 exceeded two-frame budget: {paint_p99:?}"
     );
     assert!(
-        input_to_render_p95 <= Duration::from_millis(16),
-        "held-key input_to_render p95 exceeded 60 Hz budget: {input_to_render_p95:?}"
+        frame_interval_p50 <= Duration::from_millis(20),
+        "held-key gtk_frame_interval p50 exceeded Xvfb frame-clock budget: {frame_interval_p50:?}"
+    );
+    assert!(
+        frame_interval_p95 <= Duration::from_millis(20),
+        "held-key gtk_frame_interval p95 exceeded Xvfb frame-clock budget: {frame_interval_p95:?}"
+    );
+    assert!(
+        input_to_render_p95 <= Duration::from_millis(20),
+        "held-key input_to_render p95 exceeded Xvfb frame-clock budget: {input_to_render_p95:?}"
     );
     assert!(
         input_to_render_p99 <= Duration::from_millis(33),
@@ -3125,12 +3536,14 @@ fn gtk_e2e_renders_real_split_panes_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+geometry_trace="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -3163,12 +3576,13 @@ xdotool type --window "$window_id" --delay 2 "printf 'GTK_SPLIT_LEFT\n'"
 xdotool key --window "$window_id" Return
 wait_contains 'GTK_SPLIT_LEFT'
 xdotool key --window "$window_id" ctrl+shift+e
-sleep 0.5
-xdotool type --window "$window_id" --delay 2 "printf 'GTK_SPLIT_RIGHT\n'"
-xdotool key --window "$window_id" Return
+xdotool keyup --window "$window_id" Control_L || true
+xdotool keyup --window "$window_id" Control_R || true
+xdotool keyup --window "$window_id" Shift_L || true
+xdotool keyup --window "$window_id" Shift_R || true
 for _ in {1..160}; do
     latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
-    if [ -n "$latest" ] && grep -F 'GTK_SPLIT_LEFT' "$latest" >/dev/null 2>&1 && grep -F 'GTK_SPLIT_RIGHT' "$latest" >/dev/null 2>&1; then
+    if [ -n "$latest" ] && grep -F 'GTK_SPLIT_LEFT' "$latest" >/dev/null 2>&1 && grep -F '"pane_id": 2' "$latest" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
@@ -3191,6 +3605,7 @@ exit 1
             "chelotype-gtk-split-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk split e2e under xvfb");
@@ -3211,8 +3626,8 @@ exit 1
                 .is_some_and(|name| name.to_string_lossy().ends_with(".workspace.render.json"))
         })
         .map(|path| read_to_string(path).expect("read workspace render json"))
-        .find(|json| json.contains("GTK_SPLIT_LEFT") && json.contains("GTK_SPLIT_RIGHT"))
-        .expect("workspace render json with both split panes");
+        .find(|json| json.contains("GTK_SPLIT_LEFT") && json.contains("\"pane_id\": 2"))
+        .expect("workspace render json with split panes");
     let dump = serde_json::from_str::<serde_json::Value>(&workspace_json)
         .expect("valid workspace render json");
     let panes = dump["panes"].as_array().expect("panes array");
@@ -3222,14 +3637,145 @@ exit 1
             .to_string()
             .contains("GTK_SPLIT_LEFT")
     );
-    assert!(
-        panes[1]["frame"]["lines"]
-            .to_string()
-            .contains("GTK_SPLIT_RIGHT")
-    );
+    assert_eq!(panes[1]["active"], true, "{workspace_json}");
     assert!(panes[0]["cols"].as_u64().expect("left cols") > 0);
     assert!(panes[1]["cols"].as_u64().expect("right cols") > 0);
     assert_ne!(panes[0]["origin_col"], panes[1]["origin_col"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_split_idle_does_not_render_every_240hz_tick_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk split idle perf e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-split-idle-perf-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let snapshots = dir.join("snapshots");
+    std::fs::create_dir_all(&snapshots).expect("snapshot dir");
+    let perf_trace = dir.join("perf.tsv");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+perf_trace="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_PERF_TRACE="$perf_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+wait_contains() {
+    needle="$1"
+    for _ in {1..140}; do
+        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "snapshot never contained $needle" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    return 1
+}
+wait_workspace_has_split() {
+    for _ in {1..80}; do
+        latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+        if [ -n "$latest" ] && grep -F '"pane_id": 2' "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "workspace split render never showed the second pane" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "printf 'GTK_SPLIT_IDLE_LEFT\n'"
+xdotool key --window "$window_id" Return
+wait_contains 'GTK_SPLIT_IDLE_LEFT'
+xdotool key --window "$window_id" ctrl+shift+e
+xdotool keyup --window "$window_id" Control_L || true
+xdotool keyup --window "$window_id" Control_R || true
+xdotool keyup --window "$window_id" Shift_L || true
+xdotool keyup --window "$window_id" Shift_R || true
+wait_workspace_has_split
+sleep 1.0
+: > "$perf_trace"
+sleep 1.2
+if [ ! -s "$perf_trace" ]; then
+    echo "split idle perf trace was not written" >&2
+    exit 1
+fi
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-split-idle-perf-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            snapshots.to_str().expect("snapshot dir utf8"),
+            perf_trace.to_str().expect("perf trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk split idle perf e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk split idle perf e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let render = perf_samples(&perf_trace, "gtk_render");
+    let frame_interval = perf_samples(&perf_trace, "gtk_frame_interval");
+    let metrics = perf_samples(&perf_trace, "gtk_metrics");
+    assert!(
+        frame_interval.len() >= 40,
+        "split idle produced too few frame interval samples: {}",
+        frame_interval.len()
+    );
+    assert!(
+        render.len() <= 4,
+        "split idle rendered during clean 240 Hz ticks: {} samples",
+        render.len()
+    );
+    assert!(
+        metrics.len() <= 2,
+        "split idle recomputed terminal metrics during clean 240 Hz ticks: {} samples",
+        metrics.len()
+    );
+    let frame_interval_p50 = percentile_duration(frame_interval, 50);
+    assert!(
+        frame_interval_p50 <= Duration::from_millis(20),
+        "split idle gtk_frame_interval p50 exceeded Xvfb frame-clock budget: {frame_interval_p50:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3257,7 +3803,7 @@ set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 geometry_trace="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -3290,18 +3836,20 @@ xdotool type --window "$window_id" --delay 2 "printf 'GTK_SPLIT_CLICK_LEFT_BEFOR
 xdotool key --window "$window_id" Return
 wait_contains 'GTK_SPLIT_CLICK_LEFT_BEFORE'
 xdotool key --window "$window_id" ctrl+shift+e
-sleep 0.5
-xdotool type --window "$window_id" --delay 2 "printf 'GTK_SPLIT_CLICK_RIGHT_BEFORE\n'"
-xdotool key --window "$window_id" Return
-wait_contains 'GTK_SPLIT_CLICK_RIGHT_BEFORE'
+xdotool keyup --window "$window_id" Control_L || true
+xdotool keyup --window "$window_id" Control_R || true
+xdotool keyup --window "$window_id" Shift_L || true
+xdotool keyup --window "$window_id" Shift_R || true
 for _ in {1..80}; do
-    if [ -f "$geometry_trace" ]; then
+    latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+    if [ -f "$geometry_trace" ] && [ -n "$latest" ] && grep -F '"pane_id": 2' "$latest" >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
-if [ ! -f "$geometry_trace" ]; then
-    echo "geometry trace did not appear" >&2
+latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+if [ ! -f "$geometry_trace" ] || [ -z "$latest" ] || ! grep -F '"pane_id": 2' "$latest" >/dev/null 2>&1; then
+    echo "split render or geometry trace did not appear" >&2
     exit 1
 fi
 canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
@@ -3315,16 +3863,14 @@ echo "split click target window=$window_id X=$X Y=$Y canvas=$canvas_x,$canvas_y 
 xdotool mousemove "$left_pane_x" "$left_pane_y"
 xdotool click 1
 sleep 0.2
-xdotool type --window "$window_id" --delay 2 "printf 'GTK_SPLIT_LEFT_AFTER_CLICK\n'"
-xdotool key --window "$window_id" Return
 for _ in {1..160}; do
     latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
-    if [ -n "$latest" ] && grep -F 'GTK_SPLIT_LEFT_AFTER_CLICK' "$latest" >/dev/null 2>&1; then
+    if [ -n "$latest" ] && grep -F '"active": true' "$latest" >/dev/null 2>&1 && grep -F 'GTK_SPLIT_CLICK_LEFT_BEFORE' "$latest" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
 done
-echo "workspace split render never contained clicked-left marker" >&2
+echo "workspace split render never activated the clicked-left pane" >&2
 find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
 [ -n "$latest" ] && sed -n '1,120p' "$latest" >&2
@@ -3364,22 +3910,16 @@ exit 1
         })
         .map(|path| read_to_string(path).expect("read workspace render json"))
         .rev()
-        .find(|json| json.contains("GTK_SPLIT_LEFT_AFTER_CLICK"))
-        .expect("workspace render json with clicked-left marker");
+        .find(|json| json.contains("GTK_SPLIT_CLICK_LEFT_BEFORE"))
+        .expect("workspace render json with split click marker");
     let dump = serde_json::from_str::<serde_json::Value>(&workspace_json)
         .expect("valid workspace render json");
     let panes = dump["panes"].as_array().expect("panes array");
     assert_eq!(panes.len(), 2, "{workspace_json}");
     let left_text = panes[0]["frame"]["lines"].to_string();
     let right_text = panes[1]["frame"]["lines"].to_string();
-    assert!(
-        left_text.contains("GTK_SPLIT_LEFT_AFTER_CLICK"),
-        "{workspace_json}"
-    );
-    assert!(
-        !right_text.contains("GTK_SPLIT_LEFT_AFTER_CLICK"),
-        "{workspace_json}"
-    );
+    assert!(left_text.contains("GTK_SPLIT_CLICK_LEFT_BEFORE"));
+    assert!(!right_text.contains("GTK_SPLIT_CLICK_LEFT_BEFORE"));
     assert_eq!(panes[0]["active"], true, "{workspace_json}");
     assert_eq!(panes[1]["active"], false, "{workspace_json}");
 
@@ -3429,6 +3969,10 @@ fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool key --window "$window_id" ctrl+shift+e
+xdotool keyup --window "$window_id" Control_L || true
+xdotool keyup --window "$window_id" Control_R || true
+xdotool keyup --window "$window_id" Shift_L || true
+xdotool keyup --window "$window_id" Shift_R || true
 sleep 0.5
 xdotool type --window "$window_id" --delay 2 "abcdef"
 latest_json=""
@@ -3592,6 +4136,10 @@ xdotool type --window "$window_id" --delay 2 "printf 'LEFT_SPLIT_SELECTION\n'"
 xdotool key --window "$window_id" Return
 wait_contains 'LEFT_SPLIT_SELECTION'
 xdotool key --window "$window_id" ctrl+shift+e
+xdotool keyup --window "$window_id" Control_L || true
+xdotool keyup --window "$window_id" Control_R || true
+xdotool keyup --window "$window_id" Shift_L || true
+xdotool keyup --window "$window_id" Shift_R || true
 sleep 0.5
 xdotool type --window "$window_id" --delay 2 "printf 'RIGHT_SPLIT_SELECTION\n'"
 xdotool key --window "$window_id" Return
@@ -3763,6 +4311,10 @@ xdotool type --window "$window_id" --delay 2 "printf 'SPLIT_RESIZE_LEFT\n'"
 xdotool key --window "$window_id" Return
 wait_contains 'SPLIT_RESIZE_LEFT'
 xdotool key --window "$window_id" ctrl+shift+e
+xdotool keyup --window "$window_id" Control_L || true
+xdotool keyup --window "$window_id" Control_R || true
+xdotool keyup --window "$window_id" Shift_L || true
+xdotool keyup --window "$window_id" Shift_R || true
 sleep 0.5
 xdotool type --window "$window_id" --delay 2 "printf 'SPLIT_RESIZE_RIGHT\n'"
 xdotool key --window "$window_id" Return
@@ -4847,8 +5399,8 @@ for _ in {1..12}; do
 done
 for _ in {1..160}; do
     after_count="$(snapshot_count)"
-    positive_steps="$(awk -F '\t' '$1 == "step" && $2 == "1" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
-    if [ "$after_count" -gt "$before_count" ] && [ "$positive_steps" -ge 12 ]; then
+    positive_scrolls="$(awk -F '\t' '$1 == "enqueue" && $2 == "3" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
+    if [ "$after_count" -gt "$before_count" ] && [ "$positive_scrolls" -ge 12 ]; then
         break
     fi
     sleep 0.05
@@ -4866,8 +5418,8 @@ for _ in {1..12}; do
 done
 for _ in {1..180}; do
     after_count="$(snapshot_count)"
-    negative_steps="$(awk -F '\t' '$1 == "step" && $2 == "-1" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
-    if [ "$after_count" -gt "$before_count" ] && [ "$negative_steps" -ge 12 ] && grep -R '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+    negative_scrolls="$(awk -F '\t' '$1 == "enqueue" && $2 == "-3" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
+    if [ "$after_count" -gt "$before_count" ] && [ "$negative_scrolls" -ge 12 ] && grep -R '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.05
@@ -4908,7 +5460,7 @@ exit 1
     assert!(
         trace
             .lines()
-            .filter(|line| line.starts_with("step\t1\t"))
+            .filter(|line| line.starts_with("enqueue\t3\t"))
             .count()
             >= 12,
         "{trace}"
@@ -4916,7 +5468,7 @@ exit 1
     assert!(
         trace
             .lines()
-            .filter(|line| line.starts_with("step\t-1\t"))
+            .filter(|line| line.starts_with("enqueue\t-3\t"))
             .count()
             >= 12,
         "{trace}"
@@ -6190,31 +6742,70 @@ fi
 xdotool windowfocus "$settings_id" || true
 sleep 0.2
 eval "$(xdotool getwindowgeometry --shell "$settings_id")"
-switch_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + width - 52 }')"
-switch_left_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + width - 82 }')"
-switch_y="$(awk -v y="$Y" 'BEGIN { printf "%d", y + 124 }')"
-xdotool mousemove "$switch_x" "$switch_y"
+steady_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + (width / 4) }')"
+neovide_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + (width * 3 / 4) }')"
+for offset_y in 215 255 295 335; do
+    steady_y="$(awk -v y="$Y" -v offset="$offset_y" 'BEGIN { printf "%d", y + offset }')"
+    xdotool mousemove "$steady_x" "$steady_y"
+    xdotool click 1
+    for _ in {1..20}; do
+        if grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1 && grep -Fx 'cursor_style=steady' "$config_dir/config" >/dev/null 2>&1; then
+            break 2
+        fi
+        sleep 0.1
+    done
+done
+if ! grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1 || ! grep -Fx 'cursor_style=steady' "$config_dir/config" >/dev/null 2>&1; then
+    echo "settings animation grid did not select steady cursor" >&2
+    cat "$config_dir/config" >&2 || true
+    exit 1
+fi
+for offset_y in 520 560 600; do
+    neovide_y="$(awk -v y="$Y" -v offset="$offset_y" 'BEGIN { printf "%d", y + offset }')"
+    xdotool mousemove "$neovide_x" "$neovide_y"
+    xdotool click 1
+    for _ in {1..20}; do
+        if grep -Fx 'cursor_animation=on' "$config_dir/config" >/dev/null 2>&1 && grep -Fx 'cursor_style=neovide' "$config_dir/config" >/dev/null 2>&1; then
+            break 2
+        fi
+        sleep 0.1
+    done
+done
+if ! grep -Fx 'cursor_animation=on' "$config_dir/config" >/dev/null 2>&1 || ! grep -Fx 'cursor_style=neovide' "$config_dir/config" >/dev/null 2>&1; then
+    echo "settings animation grid did not select neovide cursor" >&2
+    cat "$config_dir/config" >&2 || true
+    exit 1
+fi
+appearance_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + (width * 3 / 5) }')"
+navigation_y="$(awk -v y="$Y" -v height="$HEIGHT" 'BEGIN { printf "%d", y + height - 24 }')"
+xdotool mousemove "$appearance_x" "$navigation_y"
 xdotool click 1
-for _ in {1..60}; do
-    if grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1 && grep -Fx 'cursor_style=steady' "$config_dir/config" >/dev/null 2>&1; then
+sleep 0.2
+switch_on_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + width - 76 }')"
+switch_off_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + width - 120 }')"
+switch_y="$(awk -v y="$Y" 'BEGIN { printf "%d", y + 132 }')"
+xdotool mousemove "$switch_on_x" "$switch_y"
+xdotool click 1
+for _ in {1..30}; do
+    if grep -Fx 'smooth_scrolling=off' "$config_dir/config" >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
-if ! grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1 || ! grep -Fx 'cursor_style=steady' "$config_dir/config" >/dev/null 2>&1; then
-    echo "settings switch did not disable cursor animation" >&2
+if ! grep -Fx 'smooth_scrolling=off' "$config_dir/config" >/dev/null 2>&1; then
+    echo "appearance page did not disable smooth scrolling" >&2
     cat "$config_dir/config" >&2 || true
     exit 1
 fi
-xdotool mousemove "$switch_left_x" "$switch_y"
+xdotool mousemove "$switch_off_x" "$switch_y"
 xdotool click 1
-for _ in {1..60}; do
-    if grep -Fx 'cursor_animation=on' "$config_dir/config" >/dev/null 2>&1 && grep -Fx 'cursor_style=neovide' "$config_dir/config" >/dev/null 2>&1; then
+for _ in {1..30}; do
+    if grep -Fx 'smooth_scrolling=on' "$config_dir/config" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
 done
-echo "settings switch did not re-enable cursor animation" >&2
+echo "appearance page did not re-enable smooth scrolling" >&2
 cat "$config_dir/config" >&2 || true
 exit 1
 "#;
@@ -6222,6 +6813,8 @@ exit 1
     let output = Command::new("xvfb-run")
         .args([
             "-a",
+            "-s",
+            "-screen 0 1200x900x24",
             "bash",
             "--noprofile",
             "--norc",

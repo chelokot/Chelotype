@@ -112,7 +112,7 @@ pub fn runtime_text_scale(xft_dpi: i32) -> f64 {
         .unwrap_or_else(|| text_scale_for_xft_dpi(xft_dpi))
 }
 
-fn text_scale_for_widget(widget: &gtk::DrawingArea) -> f64 {
+pub fn text_scale_for_widget(widget: &gtk::DrawingArea) -> f64 {
     runtime_text_scale(widget.settings().property::<i32>("gtk-xft-dpi"))
 }
 

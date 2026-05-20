@@ -12,6 +12,13 @@ pub enum CursorShape {
     Block,
 }
 
+pub const DEFAULT_CURSOR_ANIMATION_DURATION_MS: u32 = 150;
+pub const DEFAULT_NEOVIDE_TRAIL_SIZE: f64 = 0.65;
+pub const DEFAULT_SMEAR_STIFFNESS: f64 = 0.78;
+pub const DEFAULT_SMEAR_TRAILING_STIFFNESS: f64 = 0.62;
+pub const DEFAULT_SMEAR_DAMPING: f64 = 0.92;
+pub const DEFAULT_SMOOTH_SCROLLING: bool = true;
+
 impl CursorStyle {
     pub const ALL: [Self; 4] = [Self::Steady, Self::Smooth, Self::Smear, Self::Neovide];
 
@@ -141,6 +148,10 @@ pub fn cursor_animation_enabled() -> bool {
     cursor_style() != CursorStyle::Steady
 }
 
+pub fn smooth_scrolling_enabled() -> bool {
+    read_bool("smooth_scrolling", DEFAULT_SMOOTH_SCROLLING)
+}
+
 pub fn cursor_style() -> CursorStyle {
     if let Some(style) =
         read_value("cursor_style").and_then(|value| CursorStyle::from_config_value(&value))
@@ -160,16 +171,81 @@ pub fn cursor_shape() -> CursorShape {
         .unwrap_or(CursorShape::Bar)
 }
 
+pub fn cursor_animation_duration_ms() -> u32 {
+    read_u32(
+        "cursor_animation_duration_ms",
+        DEFAULT_CURSOR_ANIMATION_DURATION_MS,
+        40,
+        500,
+    )
+}
+
+pub fn cursor_neovide_trail_size() -> f64 {
+    read_f64(
+        "cursor_neovide_trail_size",
+        DEFAULT_NEOVIDE_TRAIL_SIZE,
+        0.0,
+        1.0,
+    )
+}
+
+pub fn cursor_smear_stiffness() -> f64 {
+    read_f64("cursor_smear_stiffness", DEFAULT_SMEAR_STIFFNESS, 0.05, 1.0)
+}
+
+pub fn cursor_smear_trailing_stiffness() -> f64 {
+    read_f64(
+        "cursor_smear_trailing_stiffness",
+        DEFAULT_SMEAR_TRAILING_STIFFNESS,
+        0.05,
+        1.0,
+    )
+}
+
+pub fn cursor_smear_damping() -> f64 {
+    read_f64("cursor_smear_damping", DEFAULT_SMEAR_DAMPING, 0.0, 0.99)
+}
+
+fn read_u32(key: &str, default: u32, min: u32, max: u32) -> u32 {
+    read_value(key)
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn read_f64(key: &str, default: f64, min: f64, max: f64) -> f64 {
+    read_value(key)
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn read_bool(key: &str, default: bool) -> bool {
+    match read_value(key).as_deref() {
+        Some("on" | "true" | "1") => true,
+        Some("off" | "false" | "0") => false,
+        Some(_) | None => default,
+    }
+}
+
 fn config_path() -> Option<std::path::PathBuf> {
+    config_dir().map(|dir| dir.join("config"))
+}
+
+pub fn wheel_profile_path() -> Option<std::path::PathBuf> {
+    config_dir().map(|dir| dir.join("wheel-profile.tsv"))
+}
+
+fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(path) = std::env::var("CHELOTYPE_CONFIG_DIR") {
-        return Some(std::path::PathBuf::from(path).join("config"));
+        return Some(std::path::PathBuf::from(path));
     }
     if let Ok(path) = std::env::var("XDG_CONFIG_HOME") {
-        return Some(std::path::PathBuf::from(path).join("chelotype/config"));
+        return Some(std::path::PathBuf::from(path).join("chelotype"));
     }
     std::env::var("HOME")
         .ok()
-        .map(|home| std::path::PathBuf::from(home).join(".config/chelotype/config"))
+        .map(|home| std::path::PathBuf::from(home).join(".config/chelotype"))
 }
 
 #[cfg(test)]
@@ -266,6 +342,67 @@ mod tests {
         assert_eq!(cursor_shape(), CursorShape::Bar);
         write_value("cursor_shape", "unknown");
         assert_eq!(cursor_shape(), CursorShape::Bar);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn smooth_scrolling_defaults_to_enabled_and_reads_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-smooth-scrolling-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert!(smooth_scrolling_enabled());
+        write_value("smooth_scrolling", "off");
+        assert!(!smooth_scrolling_enabled());
+        write_value("smooth_scrolling", "on");
+        assert!(smooth_scrolling_enabled());
+        write_value("smooth_scrolling", "unexpected");
+        assert!(smooth_scrolling_enabled());
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn cursor_animation_parameters_clamp_config_values() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-cursor-animation-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert_eq!(
+            cursor_animation_duration_ms(),
+            DEFAULT_CURSOR_ANIMATION_DURATION_MS
+        );
+        write_value("cursor_animation_duration_ms", "15");
+        assert_eq!(cursor_animation_duration_ms(), 40);
+        write_value("cursor_animation_duration_ms", "900");
+        assert_eq!(cursor_animation_duration_ms(), 500);
+        write_value("cursor_neovide_trail_size", "2");
+        assert_eq!(cursor_neovide_trail_size(), 1.0);
+        write_value("cursor_smear_damping", "-1");
+        assert_eq!(cursor_smear_damping(), 0.0);
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");

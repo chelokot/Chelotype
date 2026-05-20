@@ -30,7 +30,7 @@ fn bench_full_pipeline_keyrepeat(c: &mut Criterion) {
                     terminal.vt_write(b"a");
                     snapshotter.invalidate();
                     let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
-                    let _ = Renderer::render(snapshot);
+                    let _ = Renderer::render(&snapshot);
                 }
             },
             BatchSize::SmallInput,
@@ -44,7 +44,7 @@ fn bench_full_pipeline_keyrepeat(c: &mut Criterion) {
                     terminal.vt_write(b"a");
                     snapshotter.invalidate();
                     let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
-                    let _ = Renderer::render_frame_with_selection(snapshot, None);
+                    let _ = Renderer::render_frame_with_selection(&snapshot, None);
                 }
             },
             BatchSize::SmallInput,
@@ -64,7 +64,7 @@ fn bench_full_pipeline_latency_guard(c: &mut Criterion) {
                 terminal.vt_write(b"x");
                 snapshotter.invalidate();
                 let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
-                let _ = Renderer::render_frame_with_selection(snapshot, None);
+                let _ = Renderer::render_frame_with_selection(&snapshot, None);
                 let elapsed = frame_start.elapsed();
                 if elapsed > worst {
                     worst = elapsed;
@@ -88,6 +88,9 @@ fn bench_frame_budget_gates(c: &mut Criterion) {
     group.bench_function("frame_budget_120hz_gate", |b| {
         b.iter_custom(|iters| run_frame_budget_gate(iters, Duration::from_micros(8_333)));
     });
+    group.bench_function("frame_budget_240hz_gate", |b| {
+        b.iter_custom(|iters| run_frame_budget_gate(iters, Duration::from_micros(4_166)));
+    });
     group.finish();
 }
 
@@ -100,7 +103,7 @@ fn run_frame_budget_gate(iters: u64, budget: Duration) -> Duration {
         terminal.vt_write(b"x");
         snapshotter.invalidate();
         let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
-        let _ = Renderer::render_frame_with_selection(snapshot, None);
+        let _ = Renderer::render_frame_with_selection(&snapshot, None);
         let elapsed = frame_start.elapsed();
         if elapsed > worst {
             worst = elapsed;
@@ -133,7 +136,7 @@ fn bench_held_key_10s_latency_gate(c: &mut Criterion) {
                 terminal.vt_write(b"a");
                 snapshotter.invalidate();
                 let snapshot = snapshotter.snapshot(&terminal).expect("snapshot terminal");
-                let _ = Renderer::render_frame_with_selection(snapshot, None);
+                let _ = Renderer::render_frame_with_selection(&snapshot, None);
                 samples.push(frame_start.elapsed());
             }
             samples.sort_unstable();

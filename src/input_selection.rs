@@ -265,7 +265,7 @@ mod tests {
             lines: vec![
                 text.chars()
                     .map(|ch| TerminalCell {
-                        text: ch.to_string(),
+                        text: ch.to_string().into(),
                         ..TerminalCell::blank()
                     })
                     .collect(),
@@ -282,7 +282,7 @@ mod tests {
 
     fn colored_cell(text: &str, fg: &str) -> TerminalCell {
         TerminalCell {
-            text: text.to_string(),
+            text: text.to_string().into(),
             fg: Some(fg.to_string()),
             ..TerminalCell::blank()
         }

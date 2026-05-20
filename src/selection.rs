@@ -360,7 +360,7 @@ mod tests {
     fn line(text: &str) -> Vec<TerminalCell> {
         text.chars()
             .map(|ch| TerminalCell {
-                text: ch.to_string(),
+                text: ch.to_string().into(),
                 ..TerminalCell::blank()
             })
             .collect()
@@ -508,11 +508,11 @@ mod tests {
     #[test]
     fn selected_text_preserves_grapheme_cells_and_skips_wide_spacers() {
         let composed = TerminalCell {
-            text: "e\u{0301}".to_string(),
+            text: "e\u{0301}".to_string().into(),
             ..TerminalCell::blank()
         };
         let mut wide = TerminalCell {
-            text: "中".to_string(),
+            text: "中".to_string().into(),
             ..TerminalCell::blank()
         };
         wide.wide = true;

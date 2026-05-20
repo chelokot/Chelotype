@@ -1,8 +1,9 @@
 use serde::Serialize;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalCell {
-    pub text: String,
+    pub text: Cow<'static, str>,
     pub fg: Option<String>,
     pub bg: Option<String>,
     pub bold: bool,
@@ -17,7 +18,7 @@ pub struct TerminalCell {
 impl TerminalCell {
     pub fn blank() -> Self {
         Self {
-            text: " ".to_string(),
+            text: Cow::Borrowed(" "),
             fg: None,
             bg: None,
             bold: false,

@@ -93,7 +93,7 @@ pub fn write_snapshot_with_selection(
                 cells: line
                     .iter()
                     .map(|cell| CellJson {
-                        text: cell.text.clone(),
+                        text: cell.text.to_string(),
                         fg: cell
                             .fg
                             .clone()
@@ -326,7 +326,7 @@ mod tests {
 
     fn cell(text: &str) -> TerminalCell {
         TerminalCell {
-            text: text.to_string(),
+            text: text.to_string().into(),
             ..TerminalCell::blank()
         }
     }

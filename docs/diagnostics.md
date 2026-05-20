@@ -18,9 +18,11 @@ Live snapshots
 - Product runs prefer `fish` when it is installed. Set `CHELOTYPE_SHELL=/path/to/shell` when a test or manual run must force zsh/bash.
 - Set `CHELOTYPE_RENDER_SNAPSHOT=1` with live snapshots to also emit `.render.json`/`.render.html` files for the active rendered frame. These include transient UI overlays such as IM preedit text at the terminal cursor, which are not part of the PTY-backed terminal grid until committed.
 - Set `CHELOTYPE_GEOMETRY_TRACE=/path/to/file.env` to write canvas geometry, grid size, cell width, and line height for real-window automation.
-- Set `CHELOTYPE_SCROLL_TRACE=/path/to/file.tsv` to write GTK wheel-scroll enqueue/step/idle events for smooth-scroll automation.
+- Set `CHELOTYPE_SCROLL_TRACE=/path/to/file.tsv` to write GTK wheel-scroll enqueue/frame/idle/limit events for smooth-scroll automation.
 - Set `CHELOTYPE_CLIPBOARD_TRACE=/path/to/file.tsv` to write PRIMARY/CLIPBOARD selection exports.
 - Set `CHELOTYPE_PERF_TRACE=/path/to/file.tsv` to write `input_to_render`, per-input allocation-to-render, GTK render/paint, per-render allocation, and RSS samples.
+- Run `scripts/profile-240hz.sh --scenario held-key|scroll|scroll-burst|idle|frame-baseline` to collect and summarize those perf samples from a nested run. `scroll-burst` sends wheel events without spacing so accumulated target distance must accelerate. `frame-baseline` keeps a minimal animation loop active and isolates compositor/GDK frame-callback cadence from terminal snapshot/render work. Use `--strict` when you want the command to fail if p50 frame interval, scroll-frame interval, or paint time misses the 4.166 ms 240 Hz budget.
+- Run `scripts/record-wheel-profile.sh`, scroll naturally over the opened `wev` window, then press Ctrl+C to save a real wheel timing profile to `~/.config/chelotype/wheel-profile.tsv`. The Appearance settings preview replays this profile through the same smooth-scroll integrator used by the terminal.
 
 Usage tips
 - Inspect `markup.html` for GTK markup fidelity and color mismatches.

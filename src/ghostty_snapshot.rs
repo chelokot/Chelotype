@@ -7,6 +7,7 @@ use libghostty_vt::screen::{CellWide, RowSemanticPrompt};
 use libghostty_vt::style::{RgbColor, Underline};
 use libghostty_vt::terminal::Mode;
 use libghostty_vt::{RenderState, Terminal};
+use std::borrow::Cow;
 
 pub struct GhosttySnapshotter {
     render_state: RenderState<'static>,
@@ -106,9 +107,14 @@ fn terminal_cell_from_ghostty(
 ) -> libghostty_vt::error::Result<TerminalCell> {
     let raw = cell.raw_cell()?;
     let wide = raw.wide()?;
+    if !raw.has_text()? && !raw.has_styling()? {
+        let mut cell = TerminalCell::blank();
+        cell.wide_spacer = matches!(wide, CellWide::SpacerTail | CellWide::SpacerHead);
+        return Ok(cell);
+    }
     let text = match cell.graphemes()?.into_iter().collect::<String>() {
-        text if text.is_empty() => " ".to_string(),
-        text => text,
+        text if text.is_empty() => Cow::Borrowed(" "),
+        text => Cow::Owned(text),
     };
     let style = cell.style()?;
     Ok(TerminalCell {

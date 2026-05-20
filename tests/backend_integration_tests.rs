@@ -66,7 +66,7 @@ fn visible_nonblank_lines(snapshot: &RenderableContentOwned) -> Vec<String> {
         .iter()
         .map(|line| {
             line.iter()
-                .map(|cell| cell.text.as_str())
+                .map(|cell| cell.text.as_ref())
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -171,10 +171,18 @@ fn backend_dirty_snapshot_only_emits_after_state_changes() {
         backend.snapshot_renderable_if_dirty().is_none(),
         "unchanged terminal should not emit a dirty snapshot"
     );
+    assert!(
+        !backend.refresh_dirty(),
+        "unchanged terminal should not stay dirty after a clean snapshot"
+    );
 
     backend
         .resize(ScreenSize::new(90, 20).expect("valid terminal size"))
         .expect("resize backend");
+    assert!(
+        backend.refresh_dirty(),
+        "resize should be observable before taking a new snapshot"
+    );
     assert!(
         backend.snapshot_renderable_if_dirty().is_some(),
         "resize should mark the render state dirty"
@@ -182,6 +190,10 @@ fn backend_dirty_snapshot_only_emits_after_state_changes() {
     assert!(
         backend.snapshot_renderable_if_dirty().is_none(),
         "dirty snapshot should be consumed after emission"
+    );
+    assert!(
+        !backend.refresh_dirty(),
+        "dirty probe should be clean after the dirty snapshot is consumed"
     );
     let _ = backend.write(b"\x15exit\n");
 }
@@ -241,12 +253,54 @@ fn backend_exposes_scrollback_display_offset() {
     });
     assert_eq!(bottom.display_offset, 0);
     assert!(snapshot_contains(&bottom, "SCROLL_24"));
+    assert!(
+        backend.can_scroll_display(10).expect("can scroll up"),
+        "scrollback should be reachable from bottom"
+    );
+    assert!(
+        backend.available_scroll_lines(10).expect("up distance") > 0,
+        "scrollback should report available lines above bottom"
+    );
+    assert_eq!(
+        backend
+            .available_scroll_lines(-10)
+            .expect("bottom distance"),
+        0
+    );
+    assert!(
+        !backend
+            .can_scroll_display(-10)
+            .expect("cannot scroll below bottom"),
+        "bottom should not allow scrolling further down"
+    );
+    assert!(
+        !backend
+            .scroll_display_changed(-10)
+            .expect("scroll bottom limit"),
+        "scrolling down at bottom should not report viewport movement"
+    );
 
-    backend.scroll_display(10).expect("scroll up");
+    assert!(
+        backend.scroll_display_changed(10).expect("scroll up"),
+        "scrolling up into scrollback should report viewport movement"
+    );
     let scrolled = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot.display_offset > 0 && snapshot_contains(snapshot, "SCROLL_")
     });
     assert!(scrolled.display_offset > 0);
+    assert!(
+        backend
+            .can_scroll_display(-10)
+            .expect("can scroll back toward bottom"),
+        "scrolled viewport should be able to return toward bottom"
+    );
+    assert!(
+        backend
+            .available_scroll_lines(-10)
+            .expect("distance back toward bottom")
+            > 0,
+        "scrolled viewport should report available lines back toward bottom"
+    );
     assert!(!snapshot_contains(&scrolled, "SCROLL_24"));
 
     backend.scroll_to_bottom().expect("scroll bottom");

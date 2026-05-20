@@ -312,6 +312,10 @@ impl TerminalWorkspace {
             .collect()
     }
 
+    pub fn active_tab_pane_count(&self) -> usize {
+        self.active_tab().panes.len()
+    }
+
     pub fn tab_title(&self, id: TabId) -> Option<String> {
         self.tabs
             .iter()
@@ -340,14 +344,7 @@ impl TerminalWorkspace {
 
     pub fn resize_active_tab(&mut self, size: ScreenSize) -> io::Result<()> {
         let tab = self.active_tab_mut();
-        let cols = pane_columns_for_weights(
-            tab.panes
-                .iter()
-                .map(|pane| pane.width_weight)
-                .collect::<Vec<_>>()
-                .as_slice(),
-            usize::from(size.cols),
-        );
+        let cols = pane_columns_for_panes(&tab.panes, usize::from(size.cols));
         for (pane, cols) in tab.panes.iter_mut().zip(cols) {
             pane.backend.resize(ScreenSize::new(cols, size.rows)?)?;
         }
@@ -355,15 +352,7 @@ impl TerminalWorkspace {
     }
 
     pub fn active_tab_pane_columns(&self, total_cols: u16) -> Vec<u16> {
-        pane_columns_for_weights(
-            &self
-                .active_tab()
-                .panes
-                .iter()
-                .map(|pane| pane.width_weight)
-                .collect::<Vec<_>>(),
-            usize::from(total_cols),
-        )
+        pane_columns_for_panes(&self.active_tab().panes, usize::from(total_cols))
     }
 
     pub fn resize_active_tab_split(
@@ -376,13 +365,7 @@ impl TerminalWorkspace {
         if boundary_index + 1 >= tab.panes.len() || delta_cols == 0 {
             return Ok(false);
         }
-        let mut cols = pane_columns_for_weights(
-            &tab.panes
-                .iter()
-                .map(|pane| pane.width_weight)
-                .collect::<Vec<_>>(),
-            usize::from(size.cols),
-        );
+        let mut cols = pane_columns_for_panes(&tab.panes, usize::from(size.cols));
         let min_cols = minimum_pane_columns(usize::from(size.cols), tab.panes.len()) as i32;
         let left = i32::from(cols[boundary_index]);
         let right = i32::from(cols[boundary_index + 1]);
@@ -403,12 +386,32 @@ impl TerminalWorkspace {
         self.active_pane_mut().scroll_display(lines)
     }
 
+    pub fn scroll_active_changed(&mut self, lines: i32) -> io::Result<bool> {
+        self.active_pane_mut().scroll_display_changed(lines)
+    }
+
+    pub fn can_scroll_active(&self, lines: i32) -> io::Result<bool> {
+        self.active_pane().can_scroll_display(lines)
+    }
+
+    pub fn available_active_scroll_lines(&self, lines: i32) -> io::Result<usize> {
+        self.active_pane().available_scroll_lines(lines)
+    }
+
     pub fn snapshot_active_renderable(&mut self) -> Option<RenderableContentOwned> {
         self.active_pane_mut().snapshot_renderable()
     }
 
     pub fn snapshot_active_renderable_if_dirty(&mut self) -> Option<RenderableContentOwned> {
         self.active_pane_mut().snapshot_renderable_if_dirty()
+    }
+
+    pub fn active_tab_has_dirty_renderable(&mut self) -> bool {
+        let mut dirty = false;
+        for pane in &mut self.active_tab_mut().panes {
+            dirty = pane.backend.refresh_dirty() || dirty;
+        }
+        dirty
     }
 
     pub fn snapshot_active_tab_renderables(&mut self) -> Vec<PaneRenderable> {
@@ -442,6 +445,16 @@ impl TerminalWorkspace {
             .iter_mut()
             .find(|tab| tab.id == active)
             .expect("active tab must exist")
+    }
+
+    fn active_pane(&self) -> &TerminalBackend {
+        let tab = self.active_tab();
+        let active_pane = tab.active_pane;
+        tab.panes
+            .iter()
+            .find(|pane| pane.id == active_pane)
+            .map(|pane| &pane.backend)
+            .expect("active pane must exist")
     }
 
     fn active_pane_mut(&mut self) -> &mut TerminalBackend {
@@ -484,28 +497,34 @@ impl TerminalWorkspace {
     }
 }
 
-fn pane_columns_for_weights(weights: &[u32], total_cols: usize) -> Vec<u16> {
-    if weights.is_empty() {
+fn pane_columns_for_panes(panes: &[TerminalPane], total_cols: usize) -> Vec<u16> {
+    pane_columns_for_weight_values(panes.iter().map(|pane| pane.width_weight), total_cols)
+}
+
+fn pane_columns_for_weight_values<I>(weights: I, total_cols: usize) -> Vec<u16>
+where
+    I: Clone + ExactSizeIterator<Item = u32>,
+{
+    if weights.len() == 0 {
         return Vec::new();
     }
     let total_weight = weights
-        .iter()
-        .map(|weight| usize::try_from(*weight).expect("pane weight"))
+        .clone()
+        .map(|weight| usize::try_from(weight).expect("pane weight"))
         .sum::<usize>()
         .max(1);
     let mut columns = weights
-        .iter()
-        .map(|weight| total_cols * usize::try_from(*weight).expect("pane weight") / total_weight)
+        .clone()
+        .map(|weight| total_cols * usize::try_from(weight).expect("pane weight") / total_weight)
         .collect::<Vec<_>>();
     let assigned = columns.iter().sum::<usize>();
     let mut remaining = total_cols.saturating_sub(assigned);
     let mut remainders = weights
-        .iter()
         .enumerate()
         .map(|(index, weight)| {
             (
                 index,
-                total_cols * usize::try_from(*weight).expect("pane weight") % total_weight,
+                total_cols * usize::try_from(weight).expect("pane weight") % total_weight,
             )
         })
         .collect::<Vec<_>>();
@@ -750,6 +769,7 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(workspace.active_tab_pane_count(), 2);
 
         workspace
             .write_active(b"printf 'SECOND_SPLIT_ONLY\\n'\n")
@@ -806,6 +826,17 @@ mod tests {
         let renderables = workspace.snapshot_active_tab_renderables();
         assert!(renderables[0].active);
         assert!(!renderables[1].active);
+        assert!(
+            !workspace.active_tab_has_dirty_renderable(),
+            "workspace renderables should be clean after a full split snapshot"
+        );
+        workspace
+            .resize_active_tab(ScreenSize::new(82, 12).expect("valid size"))
+            .expect("resize split tab");
+        assert!(
+            workspace.active_tab_has_dirty_renderable(),
+            "split resize should mark at least one pane renderable dirty"
+        );
 
         let _ = workspace.write_active(b"exit\n");
         assert!(workspace.activate_pane(second_pane));

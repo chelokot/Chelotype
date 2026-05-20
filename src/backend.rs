@@ -16,6 +16,12 @@ pub struct ScreenSize {
     pub rows: u16,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DisplayLimits {
+    offset: usize,
+    max_offset: usize,
+}
+
 impl Default for ScreenSize {
     fn default() -> Self {
         Self {
@@ -162,11 +168,34 @@ impl TerminalBackend {
     }
 
     pub fn scroll_display(&mut self, lines: i32) -> std::io::Result<()> {
+        self.scroll_display_changed(lines).map(|_| ())
+    }
+
+    pub fn scroll_display_changed(&mut self, lines: i32) -> std::io::Result<bool> {
+        let before = self.display_offset()?;
         self.terminal
             .scroll_viewport(ScrollViewport::Delta(-(lines as isize)));
+        let after = self.display_offset()?;
+        let changed = before != after;
         self.snapshotter.invalidate();
-        self.dirty = true;
-        Ok(())
+        self.dirty = changed || self.dirty;
+        Ok(changed)
+    }
+
+    pub fn can_scroll_display(&self, lines: i32) -> std::io::Result<bool> {
+        Ok(self.available_scroll_lines(lines)? > 0)
+    }
+
+    pub fn available_scroll_lines(&self, lines: i32) -> std::io::Result<usize> {
+        let limits = self.display_limits()?;
+        let available = if lines > 0 {
+            limits.max_offset.saturating_sub(limits.offset)
+        } else if lines < 0 {
+            limits.offset
+        } else {
+            0
+        };
+        Ok(available)
     }
 
     pub fn scroll_to_bottom(&mut self) -> std::io::Result<()> {
@@ -176,6 +205,23 @@ impl TerminalBackend {
         Ok(())
     }
 
+    fn display_offset(&self) -> std::io::Result<usize> {
+        Ok(self.display_limits()?.offset)
+    }
+
+    fn display_limits(&self) -> std::io::Result<DisplayLimits> {
+        let scrollbar = self
+            .terminal
+            .scrollbar()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let max_offset = scrollbar.total.saturating_sub(scrollbar.len) as usize;
+        let offset = scrollbar
+            .total
+            .saturating_sub(scrollbar.len)
+            .saturating_sub(scrollbar.offset) as usize;
+        Ok(DisplayLimits { offset, max_offset })
+    }
+
     pub fn snapshot_renderable(&mut self) -> Option<RenderableContentOwned> {
         if self.process_pending().ok()? {
             self.dirty = true;
@@ -183,6 +229,13 @@ impl TerminalBackend {
         let snapshot = self.snapshotter.snapshot(&self.terminal).ok()?;
         self.dirty = false;
         Some(snapshot)
+    }
+
+    pub fn refresh_dirty(&mut self) -> bool {
+        if self.process_pending().unwrap_or(false) {
+            self.dirty = true;
+        }
+        self.dirty
     }
 
     pub fn snapshot_renderable_if_dirty(&mut self) -> Option<RenderableContentOwned> {

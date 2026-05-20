@@ -131,6 +131,8 @@ fn build_ui(app: &Application) {
     let geometry_trace = std::env::var("CHELOTYPE_GEOMETRY_TRACE")
         .ok()
         .map(std::path::PathBuf::from);
+    let cached_terminal_metrics =
+        std::rc::Rc::new(std::cell::Cell::new(None::<CachedTerminalMetrics>));
     let scroll_trace = std::env::var("CHELOTYPE_SCROLL_TRACE")
         .ok()
         .map(std::path::PathBuf::from);
@@ -157,7 +159,6 @@ fn build_ui(app: &Application) {
     let smooth_scroll = std::rc::Rc::new(std::cell::RefCell::new(
         crate::smooth_scroll::SmoothScroll::default(),
     ));
-    let smooth_scroll_timer_active = std::rc::Rc::new(std::cell::Cell::new(false));
     let selection = std::rc::Rc::new(std::cell::Cell::new(None::<SelectionRange>));
     let selection_text = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
     let selection_dirty = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -428,6 +429,8 @@ fn build_ui(app: &Application) {
                     }
                     KeyAction::SplitPane => {
                         if workspace.borrow_mut().split_shell_active().is_ok() {
+                            *content.borrow_mut() = None;
+                            canvas_widget.grab_focus();
                             force_active_workspace_snapshot(
                                 &force_snapshot,
                                 &selection,
@@ -1147,15 +1150,17 @@ fn build_ui(app: &Application) {
     }
     canvas.widget().add_controller(motion_controller);
 
-    let scroll_controller =
-        gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    let scroll_controller = gtk::EventControllerScroll::new(
+        gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC,
+    );
     {
         let workspace = workspace_rc.clone();
         let force_snapshot = force_snapshot.clone();
         let last_size = last_size.clone();
+        let cell_metrics = cell_metrics.clone();
+        let canvas = canvas.clone();
         let canvas_widget = canvas.widget().clone();
         let smooth_scroll = smooth_scroll.clone();
-        let smooth_scroll_timer_active = smooth_scroll_timer_active.clone();
         let scroll_trace = scroll_trace.clone();
         scroll_controller.connect_scroll(move |controller, _dx, dy| {
             if controller
@@ -1173,27 +1178,59 @@ fn build_ui(app: &Application) {
                 return glib::Propagation::Stop;
             }
             if let Some(lines) = crate::interaction::wheel_scroll_lines(dy) {
+                if !crate::config::smooth_scrolling_enabled() {
+                    smooth_scroll.borrow_mut().cancel();
+                    canvas.set_scroll_visual_offset_px(0.0);
+                    if workspace
+                        .borrow_mut()
+                        .scroll_active_changed(lines)
+                        .unwrap_or(false)
+                    {
+                        force_snapshot.set(true);
+                        canvas.widget().queue_draw();
+                    } else {
+                        trace_smooth_scroll(scroll_trace.as_deref(), "limit", lines, 0.0);
+                    }
+                    return glib::Propagation::Stop;
+                }
+                let Some(metrics) = cell_metrics.get() else {
+                    if workspace
+                        .borrow_mut()
+                        .scroll_active_changed(lines)
+                        .unwrap_or(false)
+                    {
+                        force_snapshot.set(true);
+                    }
+                    canvas_widget.queue_draw();
+                    return glib::Propagation::Stop;
+                };
+                if let Some(delta_px) = crate::interaction::scroll_delta_pixels(dy, metrics.height)
                 {
+                    let available_lines = workspace
+                        .borrow()
+                        .available_active_scroll_lines(lines)
+                        .unwrap_or(0);
+                    if available_lines == 0 {
+                        smooth_scroll.borrow_mut().cancel();
+                        canvas.set_scroll_visual_offset_px(0.0);
+                        trace_smooth_scroll(scroll_trace.as_deref(), "limit", lines, 0.0);
+                        return glib::Propagation::Stop;
+                    }
                     let mut scroll = smooth_scroll.borrow_mut();
-                    scroll.enqueue(lines);
+                    let enqueued_px =
+                        scroll.enqueue_pixels_clamped(delta_px, metrics.height, available_lines);
+                    if enqueued_px.abs() < 0.5 {
+                        trace_smooth_scroll(scroll_trace.as_deref(), "limit", lines, 0.0);
+                        return glib::Propagation::Stop;
+                    }
                     trace_smooth_scroll(
                         scroll_trace.as_deref(),
                         "enqueue",
                         lines,
-                        scroll.pending_lines(),
+                        scroll.remaining_px(),
                     );
                 }
-                if !smooth_scroll_timer_active.get() {
-                    smooth_scroll_timer_active.set(true);
-                    start_smooth_scroll_timer(
-                        workspace.clone(),
-                        force_snapshot.clone(),
-                        canvas_widget.clone(),
-                        smooth_scroll.clone(),
-                        smooth_scroll_timer_active.clone(),
-                        scroll_trace.clone(),
-                    );
-                }
+                canvas.widget().queue_draw();
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -1210,21 +1247,56 @@ fn build_ui(app: &Application) {
                 .write_active(scenario.input.as_bytes());
         });
     }
-
-    {
-        let canvas = canvas.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
-            canvas.tick_cursor_blink();
-            glib::ControlFlow::Continue
-        });
-    }
+    configure_profile_scroll_burst(
+        &workspace_rc,
+        &canvas,
+        &cell_metrics,
+        &smooth_scroll,
+        scroll_trace.as_deref(),
+    );
 
     let app_for_tick = app.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(4), move || {
-        let measured_metrics = terminal_metrics_for_widget(canvas.widget());
+    let last_frame_tick = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
+    let last_wall_tick = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+    let profile_frame_baseline = std::env::var("CHELOTYPE_PROFILE_FRAME_BASELINE")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let tick_canvas = canvas.clone();
+    canvas.widget().add_tick_callback(move |_, frame_clock| {
+        let tick_wall_started = std::time::Instant::now();
+        if let Some(previous) = last_wall_tick.replace(Some(tick_wall_started)) {
+            crate::perf_trace::record_duration(
+                "gtk_tick_wall_interval",
+                tick_wall_started.duration_since(previous),
+            );
+        }
+        let tick_started = frame_clock.frame_time();
+        let elapsed_frame = last_frame_tick
+            .replace(Some(tick_started))
+            .and_then(|previous| {
+                (tick_started >= previous)
+                    .then(|| std::time::Duration::from_micros((tick_started - previous) as u64))
+            });
+        if let Some(elapsed_frame) = elapsed_frame {
+            crate::perf_trace::record_duration("gtk_frame_interval", elapsed_frame);
+        }
+        record_frame_clock_diagnostics(tick_canvas.widget(), frame_clock, tick_started);
+        if profile_frame_baseline {
+            tick_canvas.widget().queue_draw();
+            frame_clock.request_phase(gtk::gdk::FrameClockPhase::UPDATE);
+            frame_clock.request_phase(gtk::gdk::FrameClockPhase::PAINT);
+            record_tick_work(tick_wall_started);
+            return glib::ControlFlow::Continue;
+        }
+        let measured_metrics = terminal_metrics_for_widget_cached(
+            tick_canvas.widget(),
+            &cached_terminal_metrics,
+            last_size.get().is_none(),
+        );
         cell_metrics.set(measured_metrics.map(|metrics| metrics.cell));
         if let (Some(path), Some(metrics)) = (&geometry_trace, measured_metrics) {
-            trace_geometry(path, canvas.widget(), metrics);
+            trace_geometry(path, tick_canvas.widget(), metrics);
         }
         if let Some(path) = &tab_trace {
             trace_tabs(path, &tab_bar, &launch_menu_button, &workspace_rc.borrow());
@@ -1235,28 +1307,49 @@ fn build_ui(app: &Application) {
         {
             last_size.set(Some(size));
         }
-        let force = force_snapshot.replace(false);
+        let cursor_tick_started = std::time::Instant::now();
+        tick_canvas.tick_cursor_visual();
+        crate::perf_trace::record_duration("gtk_cursor_tick", cursor_tick_started.elapsed());
+        let scroll_tick_started = std::time::Instant::now();
+        let scroll_changed = measured_metrics.is_some_and(|metrics| {
+            advance_smooth_scroll_frame(
+                &workspace_rc,
+                &tick_canvas,
+                metrics.cell,
+                &smooth_scroll,
+                crate::frame_timing::animation_frame_duration(elapsed_frame),
+                scroll_trace.as_deref(),
+            )
+        });
+        crate::perf_trace::record_duration("gtk_smooth_scroll_tick", scroll_tick_started.elapsed());
+        if smooth_scroll.borrow().is_active() {
+            frame_clock.request_phase(gtk::gdk::FrameClockPhase::UPDATE);
+            frame_clock.request_phase(gtk::gdk::FrameClockPhase::PAINT);
+        }
+        let force = force_snapshot.replace(false) || scroll_changed;
         let selection_changed = selection_dirty.replace(false);
         let preedit_state = preedit.borrow().clone();
-        let pane_count = workspace_rc.borrow().active_tab_panes().len();
-        let layout = measured_metrics.map(|metrics| WorkspaceRenderLayout {
-            cols: usize::from(metrics.size.cols),
-            rows: usize::from(metrics.size.rows),
-            pane_cols: workspace_rc
-                .borrow()
-                .active_tab_pane_columns(metrics.size.cols)
-                .into_iter()
-                .map(usize::from)
-                .collect(),
-        });
+        let pane_count = workspace_rc.borrow().active_tab_pane_count();
 
         if pane_count > 1 {
+            let terminal_changed =
+                force || workspace_rc.borrow_mut().active_tab_has_dirty_renderable();
+            if !terminal_changed
+                && !selection_changed
+                && preedit_state.is_none()
+                && !scroll_changed
+                && ui_e2e.is_none()
+            {
+                record_tick_work(tick_wall_started);
+                return glib::ControlFlow::Continue;
+            }
             let panes = workspace_rc.borrow_mut().snapshot_active_tab_renderables();
             let Some(active_content) = panes
                 .iter()
                 .find(|pane| pane.active)
                 .map(|pane| pane.content.clone())
             else {
+                record_tick_work(tick_wall_started);
                 return glib::ControlFlow::Continue;
             };
             mouse_mode.set(active_content.mouse);
@@ -1275,11 +1368,33 @@ fn build_ui(app: &Application) {
             }
             let allocations_before = crate::allocation_trace::snapshot();
             let render_started = std::time::Instant::now();
-            let rendered = WorkspaceRenderFrame::from_active_tab_panes_with_layout(
-                panes,
-                visible_selection,
-                layout,
-            );
+            let layout = measured_metrics.map(|metrics| WorkspaceRenderLayout {
+                cols: usize::from(metrics.size.cols),
+                rows: usize::from(metrics.size.rows),
+                pane_cols: workspace_rc
+                    .borrow()
+                    .active_tab_pane_columns(metrics.size.cols)
+                    .into_iter()
+                    .map(usize::from)
+                    .collect(),
+            });
+            let snapshot_due = snapshot_enabled
+                && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+                    || selection_changed
+                    || force);
+            let rendered = if snapshot_due || render_snapshot_enabled {
+                WorkspaceRenderFrame::from_active_tab_panes_with_layout(
+                    panes,
+                    visible_selection,
+                    layout,
+                )
+            } else {
+                WorkspaceRenderFrame::from_active_tab_panes_for_paint_with_layout(
+                    panes,
+                    visible_selection,
+                    layout,
+                )
+            };
             let mut rendered = rendered;
             apply_preedit_to_workspace_render(&mut rendered, preedit_state.as_ref());
             crate::perf_trace::record_duration("gtk_render", render_started.elapsed());
@@ -1318,29 +1433,39 @@ fn build_ui(app: &Application) {
             {
                 crate::perf_trace::record_counter("process_rss_kib", rss_kib);
             }
-            canvas.set_workspace_render(rendered.clone());
-            record_pending_input_latency(&pending_input_latency);
-            if selection_changed {
-                copy_selection_to_primary(canvas.widget(), &selection_text);
-            }
-            if let Some(scenario) = &ui_e2e {
-                let text = rendered
+            let e2e_text = ui_e2e.as_ref().map(|_| {
+                rendered
                     .panes
                     .iter()
                     .flat_map(|pane| pane.frame.lines.iter())
                     .map(|line| line.text.as_str())
                     .collect::<Vec<_>>()
-                    .join("\n");
+                    .join("\n")
+            });
+            let rendered_snapshot = if snapshot_due || e2e_text.is_some() {
+                Some(rendered.clone())
+            } else {
+                None
+            };
+            tick_canvas.set_workspace_render(rendered);
+            record_pending_input_latency(&pending_input_latency);
+            if selection_changed {
+                copy_selection_to_primary(tick_canvas.widget(), &selection_text);
+            }
+            if let (Some(scenario), Some(text)) = (&ui_e2e, e2e_text.as_deref()) {
                 if scenario
                     .expected
                     .iter()
                     .all(|expected| text.contains(expected))
                 {
-                    gtk::test_widget_wait_for_draw(canvas.widget());
+                    gtk::test_widget_wait_for_draw(tick_canvas.widget());
                     let _ =
                         write_snapshot_with_selection(active_content, "gtk_e2e", visible_selection);
-                    let _ = write_workspace_render_snapshot(&rendered, "gtk_e2e_workspace");
+                    if let Some(rendered) = &rendered_snapshot {
+                        let _ = write_workspace_render_snapshot(rendered, "gtk_e2e_workspace");
+                    }
                     app_for_tick.quit();
+                    record_tick_work(tick_wall_started);
                     return glib::ControlFlow::Break;
                 }
                 if ui_e2e_deadline.is_some_and(|deadline| std::time::Instant::now() > deadline) {
@@ -1348,13 +1473,11 @@ fn build_ui(app: &Application) {
                     std::process::exit(1);
                 }
             }
-            if snapshot_enabled
-                && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
-                    || selection_changed
-                    || force)
-            {
+            if snapshot_due {
                 *last_snapshot.borrow_mut() = std::time::Instant::now();
-                let _ = write_workspace_render_snapshot(&rendered, "workspace_frame");
+                if let Some(rendered) = &rendered_snapshot {
+                    let _ = write_workspace_render_snapshot(rendered, "workspace_frame");
+                }
                 if selection_text.borrow().is_none()
                     && let Some(visible_selection) = visible_selection
                 {
@@ -1363,20 +1486,27 @@ fn build_ui(app: &Application) {
                 }
                 let _ = write_snapshot_with_selection(active_content, "frame", visible_selection);
                 if selection.get().is_some() {
-                    copy_selection_to_primary(canvas.widget(), &selection_text);
+                    copy_selection_to_primary(tick_canvas.widget(), &selection_text);
                 }
             }
+            record_tick_work(tick_wall_started);
             return glib::ControlFlow::Continue;
         }
 
         active_pane_origin_col.set(0);
         pane_hits.borrow_mut().clear();
         let terminal_content = if force {
-            workspace_rc.borrow_mut().snapshot_active_renderable()
+            let snapshot_started = std::time::Instant::now();
+            let content = workspace_rc.borrow_mut().snapshot_active_renderable();
+            crate::perf_trace::record_duration("gtk_snapshot_forced", snapshot_started.elapsed());
+            content
         } else {
-            workspace_rc
+            let snapshot_started = std::time::Instant::now();
+            let content = workspace_rc
                 .borrow_mut()
-                .snapshot_active_renderable_if_dirty()
+                .snapshot_active_renderable_if_dirty();
+            crate::perf_trace::record_duration("gtk_snapshot_dirty", snapshot_started.elapsed());
+            content
         };
         let terminal_changed = terminal_content.is_some();
         if let Some(content) = terminal_content {
@@ -1403,8 +1533,11 @@ fn build_ui(app: &Application) {
             }
             let allocations_before = crate::allocation_trace::snapshot();
             let render_started = std::time::Instant::now();
-            let rendered =
-                Renderer::render_frame_with_selection(content.clone(), visible_selection);
+            let rendered = if render_snapshot_enabled {
+                Renderer::render_frame_with_selection(&content, visible_selection)
+            } else {
+                Renderer::render_frame_for_paint(&content, visible_selection)
+            };
             let mut rendered = rendered;
             apply_preedit_to_render_frame(&mut rendered, preedit_state.as_ref());
             crate::perf_trace::record_duration("gtk_render", render_started.elapsed());
@@ -1426,10 +1559,15 @@ fn build_ui(app: &Application) {
             {
                 crate::perf_trace::record_counter("process_rss_kib", rss_kib);
             }
-            canvas.set_render(rendered.clone());
+            let e2e_render_snapshot = if ui_e2e.is_some() && render_snapshot_enabled {
+                Some(rendered.clone())
+            } else {
+                None
+            };
+            tick_canvas.set_render(rendered);
             record_pending_input_latency(&pending_input_latency);
             if selection_changed {
-                copy_selection_to_primary(canvas.widget(), &selection_text);
+                copy_selection_to_primary(tick_canvas.widget(), &selection_text);
             }
             if let Some(scenario) = &ui_e2e {
                 let text = lines_to_text(&content.lines);
@@ -1438,12 +1576,13 @@ fn build_ui(app: &Application) {
                     .iter()
                     .all(|expected| text.contains(expected))
                 {
-                    gtk::test_widget_wait_for_draw(canvas.widget());
-                    if render_snapshot_enabled {
-                        let _ = write_render_frame_snapshot(&rendered, "gtk_e2e_render");
+                    gtk::test_widget_wait_for_draw(tick_canvas.widget());
+                    if let Some(rendered) = &e2e_render_snapshot {
+                        let _ = write_render_frame_snapshot(rendered, "gtk_e2e_render");
                     }
                     let _ = write_snapshot_with_selection(content, "gtk_e2e", visible_selection);
                     app_for_tick.quit();
+                    record_tick_work(tick_wall_started);
                     return glib::ControlFlow::Break;
                 }
                 if ui_e2e_deadline.is_some_and(|deadline| std::time::Instant::now() > deadline) {
@@ -1472,8 +1611,7 @@ fn build_ui(app: &Application) {
                 *selection_text.borrow_mut() =
                     text_for_viewport_selection(&content, visible_selection);
             }
-            let rendered =
-                Renderer::render_frame_with_selection(content.clone(), visible_selection);
+            let rendered = Renderer::render_frame_with_selection(&content, visible_selection);
             let mut rendered = rendered;
             apply_preedit_to_render_frame(&mut rendered, preedit.borrow().as_ref());
             if render_snapshot_enabled {
@@ -1481,9 +1619,10 @@ fn build_ui(app: &Application) {
             }
             let _ = write_snapshot_with_selection(content, "frame", visible_selection);
             if selection.get().is_some() {
-                copy_selection_to_primary(canvas.widget(), &selection_text);
+                copy_selection_to_primary(tick_canvas.widget(), &selection_text);
             }
         }
+        record_tick_work(tick_wall_started);
         glib::ControlFlow::Continue
     });
 
@@ -2288,113 +2427,1084 @@ fn show_canvas_context_menu(
 }
 
 fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCanvas) {
-    let window = adw::PreferencesWindow::builder()
+    let window = adw::Window::builder()
         .title("Settings")
-        .default_width(420)
-        .default_height(280)
+        .default_width(760)
+        .default_height(760)
         .transient_for(parent)
         .modal(true)
         .build();
+    let root = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .build();
+    let header = adw::HeaderBar::builder().build();
+    let title = gtk::Label::builder()
+        .label("Preferences")
+        .css_classes(["title"])
+        .build();
+    header.set_title_widget(Some(&title));
+    root.append(&header);
+
+    let stack = gtk::Stack::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .build();
+    let cursor_page = cursor_preferences_page(canvas);
+    let appearance_page = appearance_preferences_page(canvas);
+    stack.add_named(&cursor_page, Some("cursor"));
+    stack.add_named(&appearance_page, Some("appearance"));
+    stack.set_visible_child_name("cursor");
+    root.append(&stack);
+
+    let navigation = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .halign(gtk::Align::Fill)
+        .css_classes(["settings-bottom-navigation"])
+        .build();
+    let cursor_button = settings_navigation_button("input-keyboard-symbolic", "Cursor");
+    let appearance_button =
+        settings_navigation_button("applications-graphics-symbolic", "Appearance");
+    appearance_button.set_group(Some(&cursor_button));
+    cursor_button.set_active(true);
+    {
+        let stack = stack.clone();
+        cursor_button.connect_toggled(move |button| {
+            if button.is_active() {
+                stack.set_visible_child_name("cursor");
+            }
+        });
+    }
+    {
+        let stack = stack.clone();
+        appearance_button.connect_toggled(move |button| {
+            if button.is_active() {
+                stack.set_visible_child_name("appearance");
+            }
+        });
+    }
+    navigation.append(&cursor_button);
+    navigation.append(&appearance_button);
+    root.append(&navigation);
+    window.set_content(Some(&root));
+    window.present();
+}
+
+fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().title("General").build();
     let group = adw::PreferencesGroup::builder().title("Cursor").build();
+    let cursor_shape_grid = gtk::Grid::builder()
+        .column_spacing(10)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+    let cursor_animation_grid = gtk::Grid::builder()
+        .column_spacing(10)
+        .row_spacing(10)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+    let animation_settings = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    populate_cursor_animation_grid(
+        &cursor_animation_grid,
+        crate::config::cursor_shape(),
+        canvas.clone(),
+        animation_settings.clone(),
+    );
+    populate_animation_settings(
+        &animation_settings,
+        crate::config::cursor_style(),
+        canvas.clone(),
+    );
+    populate_cursor_shape_grid(
+        &cursor_shape_grid,
+        canvas.clone(),
+        cursor_animation_grid.clone(),
+        animation_settings.clone(),
+    );
 
-    let cursor_animation = gtk::Switch::builder()
-        .active(crate::config::cursor_animation_enabled())
+    let shape_group = adw::PreferencesGroup::builder()
+        .title("Cursor shape")
+        .build();
+    shape_group.add(&cursor_shape_grid);
+    page.add(&shape_group);
+
+    group.add(&cursor_animation_grid);
+    page.add(&group);
+
+    let animation_settings_group = adw::PreferencesGroup::builder()
+        .title("Animation settings")
+        .build();
+    animation_settings_group.add(&animation_settings);
+    page.add(&animation_settings_group);
+    page
+}
+
+fn appearance_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::builder().title("Appearance").build();
+    let group = adw::PreferencesGroup::builder().title("Scrolling").build();
+    let grid = gtk::Grid::builder()
+        .column_spacing(10)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+    let off_tile = scrolling_preview_tile(false, canvas.clone());
+    let smooth_tile = scrolling_preview_tile(true, canvas.clone());
+    smooth_tile.set_group(Some(&off_tile));
+    off_tile.set_active(!crate::config::smooth_scrolling_enabled());
+    smooth_tile.set_active(crate::config::smooth_scrolling_enabled());
+    grid.attach(&off_tile, 0, 0, 1, 1);
+    grid.attach(&smooth_tile, 1, 0, 1, 1);
+    group.add(&grid);
+    page.add(&group);
+    page
+}
+
+fn settings_navigation_button(icon_name: &str, label: &str) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::builder()
+        .hexpand(true)
+        .css_classes(["settings-bottom-navigation-button", "flat"])
+        .build();
+    set_pointer_cursor(&button);
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
         .build();
-    let cursor_row = adw::ActionRow::builder()
-        .title("Animated cursor")
-        .subtitle("Smooth cursor movement while editing")
+    content.set_can_target(false);
+    let icon = gtk::Image::builder()
+        .icon_name(icon_name)
+        .pixel_size(18)
         .build();
-    cursor_row.add_suffix(&cursor_animation);
-    cursor_row.set_activatable_widget(Some(&cursor_animation));
-    let cursor_style_labels = crate::config::CursorStyle::ALL
-        .iter()
-        .map(|style| style.label())
-        .collect::<Vec<_>>();
-    let cursor_style_model = gtk::StringList::new(&cursor_style_labels);
-    let cursor_style_row = adw::ComboRow::builder()
-        .title("Cursor style")
-        .subtitle("Steady, smooth, smear, or Neovide-inspired trail")
-        .model(&cursor_style_model)
-        .selected(crate::config::cursor_style().selected_index())
-        .build();
-    let cursor_shape_labels = crate::config::CursorShape::ALL
-        .iter()
-        .map(|shape| shape.label())
-        .collect::<Vec<_>>();
-    let cursor_shape_model = gtk::StringList::new(&cursor_shape_labels);
-    let cursor_shape_row = adw::ComboRow::builder()
-        .title("Cursor shape")
-        .subtitle("Vertical bar or block cursor")
-        .model(&cursor_shape_model)
-        .selected(crate::config::cursor_shape().selected_index())
-        .build();
-    let syncing_cursor_controls = std::rc::Rc::new(std::cell::Cell::new(false));
-    {
-        let canvas = canvas.clone();
-        let cursor_style_row = cursor_style_row.clone();
-        let syncing_cursor_controls = syncing_cursor_controls.clone();
-        cursor_animation.connect_active_notify(move |switch| {
-            if syncing_cursor_controls.get() {
-                return;
-            }
-            let style = if switch.is_active() {
-                crate::config::CursorStyle::Neovide
-            } else {
-                crate::config::CursorStyle::Steady
-            };
-            syncing_cursor_controls.set(true);
-            cursor_style_row.set_selected(style.selected_index());
-            syncing_cursor_controls.set(false);
-            crate::config::write_value(
-                "cursor_animation",
-                if switch.is_active() { "on" } else { "off" },
-            );
-            crate::config::write_value("cursor_style", style.config_value());
-            canvas.widget().queue_draw();
-        });
-    }
-    {
-        let canvas = canvas.clone();
-        cursor_shape_row.connect_selected_notify(move |row| {
-            let shape = crate::config::CursorShape::from_selected_index(row.selected());
-            crate::config::write_value("cursor_shape", shape.config_value());
-            canvas.widget().queue_draw();
-        });
-    }
+    icon.set_can_target(false);
+    let label = gtk::Label::builder().label(label).build();
+    label.set_can_target(false);
+    content.append(&icon);
+    content.append(&label);
+    button.set_child(Some(&content));
+    button
+}
 
+fn set_pointer_cursor(widget: &impl IsA<gtk::Widget>) {
+    widget.set_cursor_from_name(Some("pointer"));
+}
+
+fn populate_cursor_shape_grid(
+    grid: &gtk::Grid,
+    canvas: TerminalCanvas,
+    cursor_animation_grid: gtk::Grid,
+    animation_settings: gtk::Box,
+) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+    let mut first_button = None::<gtk::ToggleButton>;
+    for (index, shape) in crate::config::CursorShape::ALL.iter().copied().enumerate() {
+        let button = cursor_shape_tile(shape);
+        if let Some(first_button) = &first_button {
+            button.set_group(Some(first_button));
+        } else {
+            first_button = Some(button.clone());
+        }
+        button.set_active(shape == crate::config::cursor_shape());
+        {
+            let canvas = canvas.clone();
+            let cursor_animation_grid = cursor_animation_grid.clone();
+            let animation_settings = animation_settings.clone();
+            button.connect_toggled(move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                crate::config::write_value("cursor_shape", shape.config_value());
+                populate_cursor_animation_grid(
+                    &cursor_animation_grid,
+                    shape,
+                    canvas.clone(),
+                    animation_settings.clone(),
+                );
+                canvas.widget().queue_draw();
+            });
+        }
+        grid.attach(&button, index as i32, 0, 1, 1);
+    }
+}
+
+fn populate_cursor_animation_grid(
+    grid: &gtk::Grid,
+    shape: crate::config::CursorShape,
+    canvas: TerminalCanvas,
+    animation_settings: gtk::Box,
+) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+    let mut first_button = None::<gtk::ToggleButton>;
+    for (index, style) in crate::config::CursorStyle::ALL.iter().copied().enumerate() {
+        let button = cursor_animation_tile(shape, style);
+        if let Some(first_button) = &first_button {
+            button.set_group(Some(first_button));
+        } else {
+            first_button = Some(button.clone());
+        }
+        button.set_active(style == crate::config::cursor_style());
+        {
+            let canvas = canvas.clone();
+            let animation_settings = animation_settings.clone();
+            button.connect_toggled(move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                crate::config::write_value("cursor_style", style.config_value());
+                crate::config::write_value(
+                    "cursor_animation",
+                    if style == crate::config::CursorStyle::Steady {
+                        "off"
+                    } else {
+                        "on"
+                    },
+                );
+                populate_animation_settings(&animation_settings, style, canvas.clone());
+                canvas.widget().queue_draw();
+            });
+        }
+        grid.attach(&button, (index % 2) as i32, (index / 2) as i32, 1, 1);
+    }
+}
+
+fn cursor_shape_tile(shape: crate::config::CursorShape) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::builder()
+        .hexpand(true)
+        .vexpand(false)
+        .build();
+    set_pointer_cursor(&button);
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(5)
+        .margin_top(7)
+        .margin_bottom(7)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+    content.set_can_target(false);
+    content.append(&cursor_shape_preview(shape));
+    let label = gtk::Label::builder()
+        .label(shape.label())
+        .halign(gtk::Align::Center)
+        .build();
+    label.set_can_target(false);
+    content.append(&label);
+    button.set_child(Some(&content));
+    button
+}
+
+fn cursor_animation_tile(
+    shape: crate::config::CursorShape,
+    style: crate::config::CursorStyle,
+) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::builder()
+        .hexpand(true)
+        .vexpand(false)
+        .build();
+    set_pointer_cursor(&button);
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(7)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+    content.set_can_target(false);
+    content.append(&cursor_animation_preview(shape, style));
+    let label = gtk::Label::builder()
+        .label(style.label())
+        .halign(gtk::Align::Center)
+        .build();
+    label.set_can_target(false);
+    content.append(&label);
+    button.set_child(Some(&content));
+    button
+}
+
+fn cursor_animation_preview(
+    shape: crate::config::CursorShape,
+    style: crate::config::CursorStyle,
+) -> gtk::DrawingArea {
+    let frame = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let preview = gtk::DrawingArea::builder()
+        .width_request(290)
+        .height_request(163)
+        .build();
+    preview.set_can_target(false);
     {
-        let canvas = canvas.clone();
-        let cursor_animation = cursor_animation.clone();
-        let syncing_cursor_controls = syncing_cursor_controls.clone();
-        cursor_style_row.connect_selected_notify(move |row| {
-            if syncing_cursor_controls.get() {
-                return;
-            }
-            let style = crate::config::CursorStyle::from_selected_index(row.selected());
-            syncing_cursor_controls.set(true);
-            cursor_animation.set_active(style != crate::config::CursorStyle::Steady);
-            syncing_cursor_controls.set(false);
-            crate::config::write_value("cursor_style", style.config_value());
-            crate::config::write_value(
-                "cursor_animation",
-                if style == crate::config::CursorStyle::Steady {
-                    "off"
-                } else {
-                    "on"
+        let frame = frame.clone();
+        preview.set_draw_func(move |_, context, width, height| {
+            let scale_x = f64::from(width) / f64::from(crate::cursor_preview::PREVIEW_WIDTH);
+            let scale_y = f64::from(height) / f64::from(crate::cursor_preview::PREVIEW_HEIGHT);
+            let scale = scale_x.min(scale_y);
+            let offset_x = (f64::from(width)
+                - (f64::from(crate::cursor_preview::PREVIEW_WIDTH) * scale))
+                * 0.5;
+            let offset_y = (f64::from(height)
+                - (f64::from(crate::cursor_preview::PREVIEW_HEIGHT) * scale))
+                * 0.5;
+            let _ = context.save();
+            context.translate(offset_x, offset_y);
+            context.scale(scale, scale);
+            crate::cursor_preview::draw_preview_frame(context, shape, style, frame.get());
+            let _ = context.restore();
+        });
+    }
+    {
+        let started_at = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
+        preview.add_tick_callback(move |preview, frame_clock| {
+            let now = frame_clock.frame_time();
+            let start = started_at.get().unwrap_or(now);
+            started_at.set(Some(start));
+            let elapsed = now - start;
+            let preview_frame = elapsed as usize * crate::cursor_preview::PREVIEW_FRAME_RATE
+                / 1_000_000
+                % crate::cursor_preview::PREVIEW_FRAMES;
+            frame.set(preview_frame);
+            preview.queue_draw();
+            gtk::glib::ControlFlow::Continue
+        });
+    }
+    preview
+}
+
+fn scrolling_preview_tile(enabled: bool, canvas: TerminalCanvas) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::builder()
+        .hexpand(true)
+        .vexpand(false)
+        .build();
+    set_pointer_cursor(&button);
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(7)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+    content.set_can_target(false);
+    content.append(&scrolling_preview_panel(enabled));
+    let label = gtk::Label::builder()
+        .label(if enabled { "Smooth" } else { "Off" })
+        .halign(gtk::Align::Center)
+        .build();
+    label.set_can_target(false);
+    content.append(&label);
+    button.set_child(Some(&content));
+    button.connect_toggled(move |button| {
+        if !button.is_active() {
+            return;
+        }
+        crate::config::write_value("smooth_scrolling", if enabled { "on" } else { "off" });
+        canvas.widget().queue_draw();
+    });
+    button
+}
+
+fn scrolling_preview_panel(smooth: bool) -> gtk::DrawingArea {
+    let state = std::rc::Rc::new(std::cell::RefCell::new(ScrollingPreviewState::new()));
+    let preview = gtk::DrawingArea::builder()
+        .width_request(290)
+        .height_request(135)
+        .build();
+    {
+        let state = state.clone();
+        preview.set_draw_func(move |_, context, width, height| {
+            let state = state.borrow();
+            draw_scrolling_preview_panel(
+                context,
+                PreviewScrollPanel {
+                    x: 0.0,
+                    y: 0.0,
+                    width: f64::from(width),
+                    height: f64::from(height),
+                    scroll_lines: if smooth {
+                        state.smooth_lines()
+                    } else {
+                        state.direct_lines()
+                    },
                 },
             );
+        });
+    }
+    {
+        let state = state.clone();
+        let last_tick = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
+        preview.add_tick_callback(move |preview, frame_clock| {
+            let now = frame_clock.frame_time();
+            let elapsed = last_tick
+                .replace(Some(now))
+                .and_then(|previous| {
+                    (now >= previous)
+                        .then(|| std::time::Duration::from_micros((now - previous) as u64))
+                })
+                .unwrap_or(crate::frame_timing::TARGET_FRAME_DURATION);
+            state.borrow_mut().advance(elapsed);
+            preview.queue_draw();
+            gtk::glib::ControlFlow::Continue
+        });
+    }
+    preview
+}
+
+struct PreviewScrollPanel {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    scroll_lines: f64,
+}
+
+fn draw_scrolling_preview_panel(context: &gtk::cairo::Context, panel: PreviewScrollPanel) {
+    let line_height = 17.0;
+    let cell_width = 8.0;
+    let terminal_padding_y = 8.0;
+    let available_terminal_height = panel.height.max(line_height);
+    let visible_rows = ((available_terminal_height - terminal_padding_y * 2.0) / line_height)
+        .floor()
+        .max(1.0);
+    let visible_height = visible_rows * line_height + terminal_padding_y * 2.0;
+    context.set_source_rgb(15.0 / 255.0, 17.0 / 255.0, 21.0 / 255.0);
+    context.rectangle(panel.x, panel.y, panel.width, visible_height);
+    let _ = context.fill();
+
+    let max_scroll_lines = (PREVIEW_SCROLL_LINES.len() as f64 - visible_rows).max(0.0);
+    let scroll_lines = panel.scroll_lines.clamp(0.0, max_scroll_lines);
+    let scroll_offset = scroll_lines * line_height;
+    let _ = context.save();
+    context.rectangle(panel.x, panel.y, panel.width, visible_height);
+    context.clip();
+    context.translate(panel.x + 12.0, panel.y + terminal_padding_y - scroll_offset);
+    context.select_font_face(
+        "monospace",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Normal,
+    );
+    context.set_font_size(13.0);
+    for (index, line) in PREVIEW_SCROLL_LINES.iter().enumerate() {
+        let baseline = (index as f64 + 0.78) * line_height;
+        let visible_baseline = baseline - scroll_offset;
+        if visible_baseline < 0.0 || visible_baseline > visible_height - terminal_padding_y {
+            continue;
+        }
+        match *line {
+            PreviewScrollLine::Prompt(text) => {
+                context.set_source_rgb(181.0 / 255.0, 189.0 / 255.0, 104.0 / 255.0);
+                context.move_to(0.0, baseline);
+                let _ = context.show_text("$");
+                context.set_source_rgb(218.0 / 255.0, 225.0 / 255.0, 232.0 / 255.0);
+                context.move_to(cell_width * 2.0, baseline);
+                let _ = context.show_text(text);
+            }
+            PreviewScrollLine::Output(text) => {
+                context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
+                context.move_to(0.0, baseline);
+                let _ = context.show_text(text);
+            }
+            PreviewScrollLine::Dim(text) => {
+                context.set_source_rgb(148.0 / 255.0, 163.0 / 255.0, 184.0 / 255.0);
+                context.move_to(0.0, baseline);
+                let _ = context.show_text(text);
+            }
+        }
+    }
+    let _ = context.restore();
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollingPreviewPhase {
+    InitialPause,
+    Forward,
+    BottomPause,
+    Reverse,
+    TopPause,
+}
+
+struct ScrollingPreviewState {
+    profile: Vec<WheelProfileEvent>,
+    phase: ScrollingPreviewPhase,
+    phase_elapsed_ms: f64,
+    event_index: usize,
+    direct_lines: f64,
+    smooth_base_lines: f64,
+    smooth_offset_lines: f64,
+    smooth_scroll: crate::smooth_scroll::SmoothScroll,
+}
+
+impl ScrollingPreviewState {
+    fn new() -> Self {
+        Self::with_profile(preview_wheel_profile_events())
+    }
+
+    fn with_profile(profile: Vec<WheelProfileEvent>) -> Self {
+        Self {
+            profile,
+            phase: ScrollingPreviewPhase::InitialPause,
+            phase_elapsed_ms: 0.0,
+            event_index: 0,
+            direct_lines: 0.0,
+            smooth_base_lines: 0.0,
+            smooth_offset_lines: 0.0,
+            smooth_scroll: crate::smooth_scroll::SmoothScroll::default(),
+        }
+    }
+
+    fn advance(&mut self, elapsed: std::time::Duration) {
+        let frame_duration = crate::frame_timing::animation_frame_duration(Some(elapsed));
+        self.phase_elapsed_ms += frame_duration.as_secs_f64() * 1000.0;
+        match self.phase {
+            ScrollingPreviewPhase::InitialPause => {
+                if self.phase_elapsed_ms >= SCROLLING_PREVIEW_INITIAL_PAUSE_MS {
+                    self.phase = ScrollingPreviewPhase::Forward;
+                    self.phase_elapsed_ms = 0.0;
+                    self.event_index = 0;
+                }
+            }
+            ScrollingPreviewPhase::Forward => {
+                while self.event_index < self.profile.len()
+                    && self.profile[self.event_index].elapsed_ms <= self.phase_elapsed_ms
+                {
+                    let lines = self.profile[self.event_index].lines;
+                    self.direct_lines += lines;
+                    self.smooth_scroll.enqueue_pixels(lines);
+                    self.event_index += 1;
+                }
+                if self.event_index == self.profile.len() {
+                    self.phase = ScrollingPreviewPhase::BottomPause;
+                    self.phase_elapsed_ms = 0.0;
+                    self.event_index = 0;
+                }
+            }
+            ScrollingPreviewPhase::BottomPause => {
+                if self.phase_elapsed_ms >= SCROLLING_PREVIEW_PAUSE_MS
+                    && !self.smooth_scroll.is_active()
+                {
+                    self.phase = ScrollingPreviewPhase::Reverse;
+                    self.phase_elapsed_ms = 0.0;
+                    self.event_index = 0;
+                }
+            }
+            ScrollingPreviewPhase::Reverse => {
+                while self.event_index < self.profile.len()
+                    && self.profile[self.event_index].elapsed_ms <= self.phase_elapsed_ms
+                {
+                    let lines = self.profile[self.event_index].lines;
+                    self.direct_lines = (self.direct_lines - lines).max(0.0);
+                    self.smooth_scroll.enqueue_pixels(-lines);
+                    self.event_index += 1;
+                }
+                if self.event_index == self.profile.len() {
+                    self.phase = ScrollingPreviewPhase::TopPause;
+                    self.phase_elapsed_ms = 0.0;
+                    self.event_index = 0;
+                }
+            }
+            ScrollingPreviewPhase::TopPause => {
+                if self.phase_elapsed_ms >= SCROLLING_PREVIEW_PAUSE_MS
+                    && !self.smooth_scroll.is_active()
+                {
+                    self.profile = preview_wheel_profile_events();
+                    self.phase = ScrollingPreviewPhase::Forward;
+                    self.phase_elapsed_ms = 0.0;
+                    self.event_index = 0;
+                    self.direct_lines = 0.0;
+                    self.smooth_base_lines = 0.0;
+                    self.smooth_offset_lines = 0.0;
+                    self.smooth_scroll.cancel();
+                }
+            }
+        }
+        if let Some(frame) = self.smooth_scroll.advance(frame_duration, 1.0) {
+            self.smooth_base_lines += f64::from(frame.line_delta);
+            self.smooth_offset_lines = frame.offset_px;
+            if !self.smooth_scroll.is_active() {
+                self.smooth_offset_lines = 0.0;
+            }
+        }
+    }
+
+    fn direct_lines(&self) -> f64 {
+        self.direct_lines
+    }
+
+    fn smooth_lines(&self) -> f64 {
+        (self.smooth_base_lines + self.smooth_offset_lines).max(0.0)
+    }
+}
+
+const SCROLLING_PREVIEW_INITIAL_PAUSE_MS: f64 = 500.0;
+const SCROLLING_PREVIEW_PAUSE_MS: f64 = 700.0;
+
+fn preview_wheel_profile_events() -> Vec<WheelProfileEvent> {
+    let events = wheel_profile_events()
+        .into_iter()
+        .map(|event| WheelProfileEvent {
+            elapsed_ms: event.elapsed_ms,
+            lines: event.lines.abs(),
+        })
+        .filter(|event| event.lines != 0.0)
+        .collect();
+    normalize_preview_wheel_profile(events)
+}
+
+fn normalize_preview_wheel_profile(events: Vec<WheelProfileEvent>) -> Vec<WheelProfileEvent> {
+    let total_lines = events.iter().map(|event| event.lines).sum::<f64>();
+    if total_lines == 0.0 {
+        return events;
+    }
+    let target_lines = total_lines.round().max(1.0);
+    let scale = target_lines / total_lines;
+    events
+        .into_iter()
+        .map(|event| WheelProfileEvent {
+            elapsed_ms: event.elapsed_ms,
+            lines: event.lines * scale,
+        })
+        .collect()
+}
+
+fn wheel_profile_events() -> Vec<WheelProfileEvent> {
+    static PROFILE: std::sync::OnceLock<std::sync::Mutex<WheelProfileCache>> =
+        std::sync::OnceLock::new();
+    let path = crate::config::wheel_profile_path();
+    let modified = path
+        .as_ref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok());
+    let cache = PROFILE.get_or_init(|| {
+        std::sync::Mutex::new(WheelProfileCache {
+            path: None,
+            modified: None,
+            events: default_wheel_profile(),
+        })
+    });
+    let mut cache = cache.lock().expect("wheel profile cache lock");
+    if cache.path == path && cache.modified == modified {
+        return cache.events.clone();
+    }
+    let events = path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|content| parse_wheel_profile(&content))
+        .filter(|events| !events.is_empty())
+        .unwrap_or_else(default_wheel_profile);
+    cache.path = path;
+    cache.modified = modified;
+    cache.events = events.clone();
+    events
+}
+
+fn parse_wheel_profile(content: &str) -> Vec<WheelProfileEvent> {
+    content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| {
+            let (elapsed_ms, lines) = line.split_once('\t')?;
+            Some(WheelProfileEvent {
+                elapsed_ms: elapsed_ms.parse::<f64>().ok()?,
+                lines: lines.parse::<f64>().ok()?,
+            })
+        })
+        .filter(|event| event.elapsed_ms >= 0.0 && event.lines != 0.0)
+        .take(128)
+        .collect()
+}
+
+fn default_wheel_profile() -> Vec<WheelProfileEvent> {
+    vec![
+        WheelProfileEvent {
+            elapsed_ms: 0.0,
+            lines: 3.0,
+        },
+        WheelProfileEvent {
+            elapsed_ms: 18.0,
+            lines: 3.0,
+        },
+        WheelProfileEvent {
+            elapsed_ms: 43.0,
+            lines: 3.0,
+        },
+        WheelProfileEvent {
+            elapsed_ms: 76.0,
+            lines: 3.0,
+        },
+    ]
+}
+
+#[derive(Clone, Copy)]
+struct WheelProfileEvent {
+    elapsed_ms: f64,
+    lines: f64,
+}
+
+struct WheelProfileCache {
+    path: Option<std::path::PathBuf>,
+    modified: Option<std::time::SystemTime>,
+    events: Vec<WheelProfileEvent>,
+}
+
+enum PreviewScrollLine {
+    Prompt(&'static str),
+    Output(&'static str),
+    Dim(&'static str),
+}
+
+const PREVIEW_SCROLL_LINES: &[PreviewScrollLine] = &[
+    PreviewScrollLine::Prompt("git log --oneline"),
+    PreviewScrollLine::Output("a31c7e9 tune smooth scroll"),
+    PreviewScrollLine::Output("91e02aa render cursor previews"),
+    PreviewScrollLine::Output("6bd7a13 add settings panel"),
+    PreviewScrollLine::Output("5ed4f20 profile wheel timing"),
+    PreviewScrollLine::Output("472da8b remove fake mp4 previews"),
+    PreviewScrollLine::Output("21c9aae clamp scroll limits"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("cargo test smooth_scroll"),
+    PreviewScrollLine::Output("running 17 tests"),
+    PreviewScrollLine::Output("test first_active_frame ... ok"),
+    PreviewScrollLine::Output("test accelerates_backlog ... ok"),
+    PreviewScrollLine::Output("test clamps_limits ... ok"),
+    PreviewScrollLine::Output("test scroll_burst ... ok"),
+    PreviewScrollLine::Output("test direct_scroll_config ... ok"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("scripts/record-wheel-profile.sh"),
+    PreviewScrollLine::Output("Recording wheel profile."),
+    PreviewScrollLine::Output("axis_value120 120 -> 3.0000 lines"),
+    PreviewScrollLine::Output("axis_value120 120 -> 3.0000 lines"),
+    PreviewScrollLine::Output("axis_value120 120 -> 3.0000 lines"),
+    PreviewScrollLine::Output("Saved 18 events over 1042ms"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("cargo run"),
+    PreviewScrollLine::Output("Compiling chelotype v0.1.0"),
+    PreviewScrollLine::Output("Finished dev profile"),
+    PreviewScrollLine::Output("Launching chelotype"),
+    PreviewScrollLine::Output("Loaded wheel-profile.tsv"),
+    PreviewScrollLine::Output("Using smooth scroll integrator"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("git status --short"),
+    PreviewScrollLine::Output(" M src/app.rs"),
+    PreviewScrollLine::Output(" M src/smooth_scroll.rs"),
+    PreviewScrollLine::Output("?? scripts/record-wheel-profile.sh"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("tail -f perf.log"),
+    PreviewScrollLine::Output("gtk_frame_interval p50 4166us"),
+    PreviewScrollLine::Output("gtk_paint p95 380us"),
+    PreviewScrollLine::Output("scroll frame offset stable"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("journalctl --user -f"),
+    PreviewScrollLine::Output("chelotype[4211]: frame clock tick"),
+    PreviewScrollLine::Output("chelotype[4211]: redraw dirty rows"),
+    PreviewScrollLine::Output("chelotype[4211]: cursor visual stable"),
+    PreviewScrollLine::Output("chelotype[4211]: smooth target updated"),
+    PreviewScrollLine::Output("chelotype[4211]: scrollback viewport 15"),
+    PreviewScrollLine::Output("chelotype[4211]: scrollback viewport 21"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("rg -n smooth_scroll src"),
+    PreviewScrollLine::Output("src/app.rs: enqueue wheel pixels"),
+    PreviewScrollLine::Output("src/app.rs: advance animation frame"),
+    PreviewScrollLine::Output("src/canvas.rs: draw visual offset"),
+    PreviewScrollLine::Output("src/smooth_scroll.rs: clamp target"),
+    PreviewScrollLine::Output("src/smooth_scroll.rs: apply line delta"),
+    PreviewScrollLine::Output("src/smooth_scroll.rs: settle subpixel"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("git diff --stat"),
+    PreviewScrollLine::Output("src/app.rs              | 120 +++++"),
+    PreviewScrollLine::Output("src/smooth_scroll.rs    | 210 ++++++++"),
+    PreviewScrollLine::Output("src/canvas.rs           |  52 ++"),
+    PreviewScrollLine::Output("tests/gtk_e2e_tests.rs  |  88 ++++"),
+    PreviewScrollLine::Output("scripts/profile-240hz.sh| 160 +++++++"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("cargo test --test gtk_e2e_tests"),
+    PreviewScrollLine::Output("running 62 tests"),
+    PreviewScrollLine::Output("gtk_e2e_opens_settings ... ok"),
+    PreviewScrollLine::Output("gtk_e2e_smooth_scroll ... ok"),
+    PreviewScrollLine::Output("gtk_e2e_cursor_preview ... ok"),
+    PreviewScrollLine::Output("gtk_e2e_split_panes ... ok"),
+    PreviewScrollLine::Output("test result: ok"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("scripts/profile-240hz.sh --release"),
+    PreviewScrollLine::Output("scenario: scroll-burst"),
+    PreviewScrollLine::Output("backend: weston-headless"),
+    PreviewScrollLine::Output("gtk_render p95 57us"),
+    PreviewScrollLine::Output("gtk_paint p95 383us"),
+    PreviewScrollLine::Output("scroll_frames count 30"),
+    PreviewScrollLine::Output("scroll_burst enqueues 8"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("printf '%s\\n' \"$WAYLAND_DISPLAY\""),
+    PreviewScrollLine::Output("wayland-0"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("tail -n 12 wheel-profile.tsv"),
+    PreviewScrollLine::Output("0      3.0000"),
+    PreviewScrollLine::Output("24     3.0000"),
+    PreviewScrollLine::Output("57     3.0000"),
+    PreviewScrollLine::Output("93     3.0000"),
+    PreviewScrollLine::Output("128    3.0000"),
+    PreviewScrollLine::Output("181    3.0000"),
+    PreviewScrollLine::Output("264    3.0000"),
+    PreviewScrollLine::Output("351    3.0000"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("top -p $(pidof chelotype)"),
+    PreviewScrollLine::Output("PID USER      PR  NI    VIRT    RES"),
+    PreviewScrollLine::Output("4211 chelokot 20   0  812.3m  72.1m"),
+    PreviewScrollLine::Output("CPU%  MEM%  TIME+ COMMAND"),
+    PreviewScrollLine::Output(" 2.1   0.4  0:03.42 chelotype"),
+    PreviewScrollLine::Dim(""),
+    PreviewScrollLine::Prompt("echo ready"),
+    PreviewScrollLine::Output("ready"),
+];
+
+fn cursor_shape_preview(shape: crate::config::CursorShape) -> gtk::DrawingArea {
+    let preview = gtk::DrawingArea::builder()
+        .width_request(290)
+        .height_request(46)
+        .build();
+    preview.set_can_target(false);
+    preview.set_draw_func(move |_, context, width, height| {
+        draw_cursor_shape_preview(context, shape, width, height);
+    });
+    preview
+}
+
+fn draw_cursor_shape_preview(
+    context: &gtk::cairo::Context,
+    shape: crate::config::CursorShape,
+    width: i32,
+    height: i32,
+) {
+    context.set_source_rgb(15.0 / 255.0, 17.0 / 255.0, 21.0 / 255.0);
+    context.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
+    let _ = context.fill();
+    context.select_font_face(
+        "monospace",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Normal,
+    );
+    context.set_font_size(14.0);
+    context.set_source_rgb(218.0 / 255.0, 225.0 / 255.0, 232.0 / 255.0);
+    context.move_to(14.0, 29.0);
+    let _ = context.show_text("let cursor = shape");
+    let line_height = 18.0;
+    let cursor_top = (f64::from(height) - line_height) * 0.5;
+    let target = crate::canvas::CursorDrawPosition {
+        pane_id: 0,
+        line: cursor_top / line_height,
+        column: 12.0,
+    };
+    crate::canvas::draw_cursor_visual(
+        context,
+        target,
+        None,
+        crate::config::CursorStyle::Steady,
+        shape,
+        line_height,
+        8.4,
+    );
+}
+
+fn populate_animation_settings(
+    container: &gtk::Box,
+    style: crate::config::CursorStyle,
+    canvas: TerminalCanvas,
+) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+    if style == crate::config::CursorStyle::Steady {
+        let label = gtk::Label::builder()
+            .label("No animation parameters for steady cursor")
+            .halign(gtk::Align::Start)
+            .build();
+        container.append(&label);
+        return;
+    }
+    container.append(&animation_slider_row(
+        AnimationSliderSpec {
+            title: "Duration",
+            key: "cursor_animation_duration_ms",
+            value: f64::from(crate::config::cursor_animation_duration_ms()),
+            min: 40.0,
+            max: 500.0,
+            step: 1.0,
+            digits: 0,
+            unit: "ms",
+            default: f64::from(crate::config::DEFAULT_CURSOR_ANIMATION_DURATION_MS),
+        },
+        canvas.clone(),
+    ));
+    match style {
+        crate::config::CursorStyle::Neovide => {
+            container.append(&animation_slider_row(
+                AnimationSliderSpec {
+                    title: "Trail size",
+                    key: "cursor_neovide_trail_size",
+                    value: crate::config::cursor_neovide_trail_size(),
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    digits: 2,
+                    unit: "",
+                    default: crate::config::DEFAULT_NEOVIDE_TRAIL_SIZE,
+                },
+                canvas,
+            ));
+        }
+        crate::config::CursorStyle::Smear => {
+            container.append(&animation_slider_row(
+                AnimationSliderSpec {
+                    title: "Head stiffness",
+                    key: "cursor_smear_stiffness",
+                    value: crate::config::cursor_smear_stiffness(),
+                    min: 0.05,
+                    max: 1.0,
+                    step: 0.01,
+                    digits: 2,
+                    unit: "",
+                    default: crate::config::DEFAULT_SMEAR_STIFFNESS,
+                },
+                canvas.clone(),
+            ));
+            container.append(&animation_slider_row(
+                AnimationSliderSpec {
+                    title: "Tail stiffness",
+                    key: "cursor_smear_trailing_stiffness",
+                    value: crate::config::cursor_smear_trailing_stiffness(),
+                    min: 0.05,
+                    max: 1.0,
+                    step: 0.01,
+                    digits: 2,
+                    unit: "",
+                    default: crate::config::DEFAULT_SMEAR_TRAILING_STIFFNESS,
+                },
+                canvas.clone(),
+            ));
+            container.append(&animation_slider_row(
+                AnimationSliderSpec {
+                    title: "Damping",
+                    key: "cursor_smear_damping",
+                    value: crate::config::cursor_smear_damping(),
+                    min: 0.0,
+                    max: 0.99,
+                    step: 0.01,
+                    digits: 2,
+                    unit: "",
+                    default: crate::config::DEFAULT_SMEAR_DAMPING,
+                },
+                canvas,
+            ));
+        }
+        crate::config::CursorStyle::Smooth | crate::config::CursorStyle::Steady => {}
+    }
+}
+
+struct AnimationSliderSpec {
+    title: &'static str,
+    key: &'static str,
+    value: f64,
+    min: f64,
+    max: f64,
+    step: f64,
+    digits: i32,
+    unit: &'static str,
+    default: f64,
+}
+
+fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(5)
+        .build();
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let label = gtk::Label::builder()
+        .label(spec.title)
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    let value_label = gtk::Label::builder().halign(gtk::Align::End).build();
+    set_slider_value_label(&value_label, spec.value, spec.digits, spec.unit);
+    let reset = gtk::Button::builder().label("Reset").build();
+    set_pointer_cursor(&reset);
+    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, spec.min, spec.max, spec.step);
+    set_pointer_cursor(&scale);
+    scale.set_value(spec.value);
+    scale.set_digits(spec.digits);
+    scale.set_hexpand(true);
+    scale.add_mark(
+        spec.min,
+        gtk::PositionType::Bottom,
+        Some(&format_slider_mark(spec.min, spec.digits, spec.unit)),
+    );
+    scale.add_mark(
+        spec.max,
+        gtk::PositionType::Bottom,
+        Some(&format_slider_mark(spec.max, spec.digits, spec.unit)),
+    );
+    {
+        let scale = scale.clone();
+        reset.connect_clicked(move |_| {
+            scale.set_value(spec.default);
+        });
+    }
+    {
+        let value_label = value_label.clone();
+        scale.connect_value_changed(move |scale| {
+            let value = scale.value();
+            let formatted = if spec.digits == 0 {
+                format!("{value:.0}")
+            } else {
+                format!("{value:.2}")
+            };
+            crate::config::write_value(spec.key, &formatted);
+            set_slider_value_label(&value_label, value, spec.digits, spec.unit);
             canvas.widget().queue_draw();
         });
     }
+    header.append(&label);
+    header.append(&value_label);
+    header.append(&reset);
+    row.append(&header);
+    row.append(&scale);
+    row
+}
 
-    group.add(&cursor_row);
-    group.add(&cursor_style_row);
-    group.add(&cursor_shape_row);
-    page.add(&group);
-    window.add(&page);
-    window.present();
+fn set_slider_value_label(label: &gtk::Label, value: f64, digits: i32, unit: &str) {
+    label.set_label(&format_slider_mark(value, digits, unit));
+}
+
+fn format_slider_mark(value: f64, digits: i32, unit: &str) -> String {
+    if digits == 0 {
+        if unit.is_empty() {
+            format!("{value:.0}")
+        } else {
+            format!("{value:.0} {unit}")
+        }
+    } else {
+        if unit.is_empty() {
+            format!("{value:.2}")
+        } else {
+            format!("{value:.2} {unit}")
+        }
+    }
 }
 
 type PendingInputLatency =
@@ -3056,6 +4166,22 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             min-width: 13rem;
             margin: 0.5rem;
         }
+        .settings-bottom-navigation {
+            background: #242428;
+            border-top: 1px solid #1b1b1f;
+            padding: 0.375rem 7rem;
+            min-height: 3rem;
+        }
+        .settings-bottom-navigation-button {
+            min-width: 7rem;
+            min-height: 2.25rem;
+            padding: 0.25rem 0.625rem;
+            border-radius: 0.5rem;
+            font-weight: 700;
+        }
+        .settings-bottom-navigation-button:checked {
+            background: #56565d;
+        }
     ";
     let provider = gtk::CssProvider::new();
     provider.load_from_data(css);
@@ -3129,49 +4255,187 @@ fn write_trace_file(path: &std::path::Path, content: &str) {
     }
 }
 
-fn start_smooth_scroll_timer(
-    workspace: std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
-    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
-    canvas_widget: gtk::DrawingArea,
-    smooth_scroll: std::rc::Rc<std::cell::RefCell<crate::smooth_scroll::SmoothScroll>>,
-    timer_active: std::rc::Rc<std::cell::Cell<bool>>,
-    scroll_trace: Option<std::path::PathBuf>,
+fn record_tick_work(started: std::time::Instant) {
+    crate::perf_trace::record_duration("gtk_tick_work", started.elapsed());
+}
+
+fn advance_smooth_scroll_frame(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    canvas: &TerminalCanvas,
+    metrics: CellMetrics,
+    smooth_scroll: &std::rc::Rc<std::cell::RefCell<crate::smooth_scroll::SmoothScroll>>,
+    frame_duration: std::time::Duration,
+    scroll_trace: Option<&std::path::Path>,
+) -> bool {
+    let Some(frame) = smooth_scroll
+        .borrow_mut()
+        .advance(frame_duration, metrics.height)
+    else {
+        return false;
+    };
+    if frame.line_delta != 0
+        && !workspace
+            .borrow_mut()
+            .scroll_active_changed(frame.line_delta)
+            .unwrap_or(false)
+    {
+        smooth_scroll.borrow_mut().cancel();
+        canvas.set_scroll_visual_offset_px(0.0);
+        trace_smooth_scroll(scroll_trace, "limit", frame.line_delta, 0.0);
+        return false;
+    }
+    if frame.line_delta == 0 {
+        canvas.set_scroll_visual_offset_px(frame.offset_px);
+    } else {
+        canvas.set_scroll_visual_offset_px_deferred(frame.offset_px);
+    }
+    trace_smooth_scroll_frame(
+        scroll_trace,
+        frame.line_delta,
+        frame.remaining_px,
+        frame.offset_px,
+        frame_duration,
+    );
+    if !smooth_scroll.borrow().is_active() {
+        trace_smooth_scroll(scroll_trace, "idle", 0, 0.0);
+    }
+    frame.line_delta != 0
+}
+
+fn configure_profile_scroll_burst(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    canvas: &TerminalCanvas,
+    cell_metrics: &std::rc::Rc<std::cell::Cell<Option<CellMetrics>>>,
+    smooth_scroll: &std::rc::Rc<std::cell::RefCell<crate::smooth_scroll::SmoothScroll>>,
+    scroll_trace: Option<&std::path::Path>,
 ) {
-    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
-        let Some(step) = smooth_scroll.borrow_mut().next_step() else {
-            timer_active.set(false);
-            trace_smooth_scroll(scroll_trace.as_deref(), "idle", 0, 0);
+    if std::env::var("CHELOTYPE_PROFILE_SCROLL_BURST")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+    let workspace_for_seed = workspace.clone();
+    glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+        let _ = workspace_for_seed
+            .borrow_mut()
+            .write_active(b"for n in $(seq 1 160); do echo PROFILE_SCROLL_$n; done\n");
+    });
+
+    let workspace = workspace.clone();
+    let canvas = canvas.clone();
+    let cell_metrics = cell_metrics.clone();
+    let smooth_scroll = smooth_scroll.clone();
+    let scroll_trace = scroll_trace.map(std::path::PathBuf::from);
+    let attempts = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        attempts.set(attempts.get() + 1);
+        if attempts.get() > 120 {
+            eprintln!("profile scroll burst could not find scrollback");
             return glib::ControlFlow::Break;
+        }
+        let Some(metrics) = cell_metrics.get() else {
+            return glib::ControlFlow::Continue;
         };
-        let _ = workspace.borrow_mut().scroll_active(step);
-        force_snapshot.set(true);
-        canvas_widget.queue_draw();
-        trace_smooth_scroll(
-            scroll_trace.as_deref(),
-            "step",
-            step,
-            smooth_scroll.borrow().pending_lines(),
-        );
-        glib::ControlFlow::Continue
+        let lines = 3;
+        let available_lines = workspace
+            .borrow()
+            .available_active_scroll_lines(lines)
+            .unwrap_or(0);
+        if available_lines == 0 {
+            return glib::ControlFlow::Continue;
+        }
+        let delta_px = f64::from(lines) * metrics.height;
+        let mut scroll = smooth_scroll.borrow_mut();
+        for _ in 0..8 {
+            let enqueued_px =
+                scroll.enqueue_pixels_clamped(delta_px, metrics.height, available_lines);
+            if enqueued_px.abs() >= 0.5 {
+                trace_smooth_scroll(
+                    scroll_trace.as_deref(),
+                    "enqueue",
+                    lines,
+                    scroll.remaining_px(),
+                );
+            }
+        }
+        drop(scroll);
+        canvas.widget().queue_draw();
+        glib::ControlFlow::Break
     });
 }
 
-fn trace_smooth_scroll(path: Option<&std::path::Path>, event: &str, lines: i32, pending: i32) {
+fn trace_smooth_scroll(path: Option<&std::path::Path>, event: &str, lines: i32, value: f64) {
+    trace_smooth_scroll_line(path, format!("{event}\t{lines}\t{value:.2}\n"));
+}
+
+fn trace_smooth_scroll_frame(
+    path: Option<&std::path::Path>,
+    lines: i32,
+    remaining_px: f64,
+    offset_px: f64,
+    frame_duration: std::time::Duration,
+) {
+    trace_smooth_scroll_line(
+        path,
+        format!(
+            "frame\t{lines}\t{remaining_px:.2}\t{offset_px:.2}\t{}\n",
+            frame_duration.as_micros()
+        ),
+    );
+}
+
+fn trace_smooth_scroll_line(path: Option<&std::path::Path>, line: String) {
     let Some(path) = path else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let Some(sink) = scroll_trace_sink(path) else {
+        return;
+    };
+    sink.record_line(line);
+}
+
+fn scroll_trace_sink(path: &std::path::Path) -> Option<&'static crate::trace_sink::TraceSink> {
+    static SINK: std::sync::OnceLock<Option<crate::trace_sink::TraceSink>> =
+        std::sync::OnceLock::new();
+    SINK.get_or_init(|| crate::trace_sink::TraceSink::new(path, "chelotype-scroll-trace"))
+        .as_ref()
+}
+
+fn record_frame_clock_diagnostics(
+    widget: &gtk::DrawingArea,
+    frame_clock: &gtk::gdk::FrameClock,
+    frame_time: i64,
+) {
+    if !crate::perf_trace::enabled() {
+        return;
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = std::io::Write::write_all(
-            &mut file,
-            format!("{event}\t{lines}\t{pending}\n").as_bytes(),
+    let fps_millihz = (frame_clock.fps() * 1000.0).round();
+    if fps_millihz.is_finite() && fps_millihz > 0.0 {
+        crate::perf_trace::record_counter("gdk_frame_clock_fps_millihz", fps_millihz as u64);
+    }
+    let (refresh_interval, presentation_time) = frame_clock.refresh_info(frame_time);
+    if refresh_interval > 0 {
+        crate::perf_trace::record_duration(
+            "gdk_refresh_interval",
+            std::time::Duration::from_micros(refresh_interval as u64),
         );
+    }
+    if presentation_time >= frame_time {
+        crate::perf_trace::record_duration(
+            "gdk_next_presentation_delta",
+            std::time::Duration::from_micros((presentation_time - frame_time) as u64),
+        );
+    }
+    if let Some(refresh_rate) = widget
+        .native()
+        .and_then(|native| native.surface())
+        .and_then(|surface| surface.display().monitor_at_surface(&surface))
+        .map(|monitor| monitor.refresh_rate())
+        .filter(|refresh_rate| *refresh_rate > 0)
+    {
+        crate::perf_trace::record_counter("gdk_monitor_refresh_millihz", refresh_rate as u64);
     }
 }
 
@@ -3260,6 +4524,19 @@ struct TerminalMetrics {
 }
 
 #[derive(Clone, Copy)]
+struct CachedTerminalMetrics {
+    allocation_width: i32,
+    allocation_height: i32,
+    metrics: TerminalMetrics,
+}
+
+impl CachedTerminalMetrics {
+    fn matches(self, allocation_width: i32, allocation_height: i32) -> bool {
+        self.allocation_width == allocation_width && self.allocation_height == allocation_height
+    }
+}
+
+#[derive(Clone, Copy)]
 struct CellMetrics {
     width: f64,
     height: f64,
@@ -3320,6 +4597,34 @@ fn terminal_metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalMetr
             height: font_metrics.line_height,
         },
     })
+}
+
+fn terminal_metrics_for_widget_cached(
+    widget: &gtk::DrawingArea,
+    cache: &std::cell::Cell<Option<CachedTerminalMetrics>>,
+    force_refresh: bool,
+) -> Option<TerminalMetrics> {
+    let width = widget.allocated_width();
+    let height = widget.allocated_height();
+    if width <= 0 || height <= 0 {
+        cache.set(None);
+        return None;
+    }
+    if !force_refresh
+        && let Some(cached) = cache.get()
+        && cached.matches(width, height)
+    {
+        return Some(cached.metrics);
+    }
+    let started = std::time::Instant::now();
+    let metrics = terminal_metrics_for_widget(widget)?;
+    crate::perf_trace::record_duration("gtk_metrics", started.elapsed());
+    cache.set(Some(CachedTerminalMetrics {
+        allocation_width: width,
+        allocation_height: height,
+        metrics,
+    }));
+    Some(metrics)
 }
 
 fn pointer_grid_position_for_panes(
@@ -3478,6 +4783,128 @@ mod tests {
         })
     }
 
+    #[test]
+    fn cached_terminal_metrics_match_only_same_allocation() {
+        let metrics = TerminalMetrics {
+            size: ScreenSize::new(80, 24).expect("valid size"),
+            cell: CellMetrics {
+                width: 10.0,
+                height: 20.0,
+            },
+        };
+        let cached = CachedTerminalMetrics {
+            allocation_width: 800,
+            allocation_height: 480,
+            metrics,
+        };
+
+        assert!(cached.matches(800, 480));
+        assert!(!cached.matches(801, 480));
+        assert!(!cached.matches(800, 481));
+    }
+
+    #[test]
+    fn scrolling_preview_waits_before_first_scroll() {
+        let mut preview = ScrollingPreviewState::with_profile(vec![WheelProfileEvent {
+            elapsed_ms: 0.0,
+            lines: 3.0,
+        }]);
+
+        for _ in 0..120 {
+            preview.advance(crate::frame_timing::TARGET_FRAME_DURATION);
+        }
+
+        assert_eq!(preview.phase, ScrollingPreviewPhase::InitialPause);
+        assert_eq!(preview.direct_lines(), 0.0);
+        assert_eq!(preview.smooth_lines(), 0.0);
+
+        preview.advance(crate::frame_timing::TARGET_FRAME_DURATION);
+
+        assert_eq!(preview.phase, ScrollingPreviewPhase::Forward);
+    }
+
+    #[test]
+    fn scrolling_preview_profile_normalizes_to_whole_line_endpoint() {
+        let events = normalize_preview_wheel_profile(vec![
+            WheelProfileEvent {
+                elapsed_ms: 0.0,
+                lines: 1.2,
+            },
+            WheelProfileEvent {
+                elapsed_ms: 32.0,
+                lines: 1.2,
+            },
+            WheelProfileEvent {
+                elapsed_ms: 64.0,
+                lines: 1.2,
+            },
+        ]);
+
+        let total = events.iter().map(|event| event.lines).sum::<f64>();
+
+        assert!((total - 4.0).abs() < 0.000_001, "{total}");
+        assert!(events.iter().all(|event| event.lines > 0.0));
+    }
+
+    #[test]
+    fn scrolling_preview_keeps_completed_smooth_position_until_reverse_phase() {
+        let mut preview = ScrollingPreviewState::with_profile(vec![
+            WheelProfileEvent {
+                elapsed_ms: 0.0,
+                lines: 3.0,
+            },
+            WheelProfileEvent {
+                elapsed_ms: 80.0,
+                lines: 3.0,
+            },
+        ]);
+
+        for _ in 0..240 {
+            preview.advance(crate::frame_timing::TARGET_FRAME_DURATION);
+            if preview.phase == ScrollingPreviewPhase::BottomPause
+                && !preview.smooth_scroll.is_active()
+            {
+                break;
+            }
+        }
+
+        assert_eq!(preview.phase, ScrollingPreviewPhase::BottomPause);
+        assert_eq!(preview.direct_lines(), 6.0);
+        assert_eq!(preview.smooth_lines(), 6.0);
+
+        preview.advance(std::time::Duration::from_millis(200));
+
+        assert_eq!(preview.phase, ScrollingPreviewPhase::BottomPause);
+        assert_eq!(preview.smooth_lines(), 6.0);
+    }
+
+    #[test]
+    fn scrolling_preview_returns_smooth_position_to_top_after_reverse() {
+        let mut preview = ScrollingPreviewState::with_profile(vec![
+            WheelProfileEvent {
+                elapsed_ms: 0.0,
+                lines: 3.0,
+            },
+            WheelProfileEvent {
+                elapsed_ms: 80.0,
+                lines: 3.0,
+            },
+        ]);
+
+        for _ in 0..1200 {
+            preview.advance(crate::frame_timing::TARGET_FRAME_DURATION);
+            if preview.phase == ScrollingPreviewPhase::TopPause
+                && !preview.smooth_scroll.is_active()
+            {
+                break;
+            }
+        }
+
+        assert_eq!(preview.phase, ScrollingPreviewPhase::TopPause);
+        assert_eq!(preview.direct_lines(), 0.0);
+        assert_eq!(preview.smooth_lines(), 0.0);
+    }
+
     fn pane(origin_col: usize, cols: usize) -> PaneHit {
         PaneHit {
             id: PaneId::from_raw(origin_col as u64 + 1),
@@ -3489,7 +4916,7 @@ mod tests {
     fn line(text: &str) -> Vec<crate::terminal_grid::TerminalCell> {
         text.chars()
             .map(|ch| crate::terminal_grid::TerminalCell {
-                text: ch.to_string(),
+                text: ch.to_string().into(),
                 ..crate::terminal_grid::TerminalCell::blank()
             })
             .collect()
@@ -3574,7 +5001,7 @@ mod tests {
 
     #[test]
     fn preedit_overlay_uses_terminal_grid_columns_for_wide_and_combining_text() {
-        let mut frame = Renderer::render_frame_with_selection(command_block_content(), None);
+        let mut frame = Renderer::render_frame_with_selection(&command_block_content(), None);
         apply_preedit_to_render_frame(
             &mut frame,
             Some(&PendingPreedit {
@@ -3594,7 +5021,7 @@ mod tests {
 
     #[test]
     fn preedit_overlay_cursor_columns_do_not_advance_for_combining_mark() {
-        let mut frame = Renderer::render_frame_with_selection(command_block_content(), None);
+        let mut frame = Renderer::render_frame_with_selection(&command_block_content(), None);
         let text = "a中e\u{0301}";
 
         apply_preedit_to_render_frame(

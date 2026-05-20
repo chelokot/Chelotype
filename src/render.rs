@@ -52,6 +52,7 @@ pub struct RenderRun {
     pub start_column: usize,
     pub columns: usize,
     pub text: String,
+    pub markup: String,
     pub style: RenderStyle,
 }
 
@@ -88,18 +89,18 @@ pub struct RenderOutput {
 pub struct Renderer;
 
 impl Renderer {
-    pub fn render(content: RenderableContentOwned) -> RenderOutput {
+    pub fn render(content: &RenderableContentOwned) -> RenderOutput {
         Self::render_with_selection(content, None)
     }
 
     pub fn render_with_selection(
-        content: RenderableContentOwned,
+        content: &RenderableContentOwned,
         selection: Option<SelectionRange>,
     ) -> RenderOutput {
         let mut history_markup = String::new();
         let mut input_markup = String::new();
         let mut input_text = String::new();
-        let input_range = input_region_range(&content);
+        let input_range = input_region_range(content);
         for (idx, line) in content.lines.iter().enumerate() {
             let markup = cells_to_markup(line, idx, selection);
             if input_range.contains(&idx) {
@@ -132,21 +133,33 @@ impl Renderer {
     }
 
     pub fn render_frame_with_selection(
-        content: RenderableContentOwned,
+        content: &RenderableContentOwned,
         selection: Option<SelectionRange>,
+    ) -> RenderFrame {
+        Self::render_frame(content, selection, RenderFrameDetail::Full)
+    }
+
+    pub fn render_frame_for_paint(
+        content: &RenderableContentOwned,
+        selection: Option<SelectionRange>,
+    ) -> RenderFrame {
+        Self::render_frame(content, selection, RenderFrameDetail::Paint)
+    }
+
+    fn render_frame(
+        content: &RenderableContentOwned,
+        selection: Option<SelectionRange>,
+        detail: RenderFrameDetail,
     ) -> RenderFrame {
         let mut history_markup = String::new();
         let mut input_markup = String::new();
         let mut input_text = String::new();
         let mut lines = Vec::with_capacity(content.lines.len());
-        let input_range = input_region_range(&content);
+        let input_range = input_region_range(content);
         for (idx, line) in content.lines.iter().enumerate() {
-            let line_render = build_line_render(line, idx, selection);
+            let line_render = build_line_render(line, idx, selection, detail);
             if input_range.contains(&idx) {
-                if !input_markup.is_empty() {
-                    input_markup.push('\n');
-                }
-                input_markup.push_str(&line_render.markup);
+                detail.push_input_markup(&mut input_markup, &line_render.markup);
                 if idx as i32 == content.cursor_line {
                     input_text = line_render.text.clone();
                 }
@@ -159,10 +172,7 @@ impl Renderer {
                     runs: line_render.runs,
                 });
             } else {
-                history_markup.push_str(&line_render.markup);
-                if idx + 1 != content.lines.len() {
-                    history_markup.push('\n');
-                }
+                detail.push_history_markup(&mut history_markup, &line_render.markup, idx, content);
                 lines.push(RenderLine {
                     row: idx,
                     region: RenderRegion::History,
@@ -186,7 +196,53 @@ impl Renderer {
             preedit: None,
             input_text,
             lines,
-            command_blocks: command_blocks(&content),
+            command_blocks: detail.command_blocks(content),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RenderFrameDetail {
+    Full,
+    Paint,
+}
+
+impl RenderFrameDetail {
+    fn full(self) -> bool {
+        self == Self::Full
+    }
+
+    fn push_input_markup(self, input_markup: &mut String, line_markup: &str) {
+        if !self.full() {
+            return;
+        }
+        if !input_markup.is_empty() {
+            input_markup.push('\n');
+        }
+        input_markup.push_str(line_markup);
+    }
+
+    fn push_history_markup(
+        self,
+        history_markup: &mut String,
+        line_markup: &str,
+        row: usize,
+        content: &RenderableContentOwned,
+    ) {
+        if !self.full() {
+            return;
+        }
+        history_markup.push_str(line_markup);
+        if row + 1 != content.lines.len() {
+            history_markup.push('\n');
+        }
+    }
+
+    fn command_blocks(self, content: &RenderableContentOwned) -> Vec<CommandBlock> {
+        if self.full() {
+            command_blocks(content)
+        } else {
+            Vec::new()
         }
     }
 }
@@ -363,10 +419,12 @@ fn cells_to_runs(
             idx += 1;
         }
         if !text.is_empty() {
+            let markup = run_markup(&style, &text);
             runs.push(RenderRun {
                 start_column: start,
                 columns: idx - start,
                 text,
+                markup,
                 style: style.into_render_style(),
             });
         }
@@ -378,6 +436,7 @@ fn build_line_render(
     cells: &[TerminalCell],
     row: usize,
     selection: Option<SelectionRange>,
+    detail: RenderFrameDetail,
 ) -> LineRender {
     let cells = &cells[..significant_len(cells)];
     let mut text = String::new();
@@ -389,30 +448,38 @@ fn build_line_render(
         let start = idx;
         let style = CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx));
         let mut run_text = String::new();
-        markup.push_str(&style_open(&style));
+        if detail.full() {
+            markup.push_str(&style_open(&style));
+        }
         while idx < cells.len()
             && CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx)) == style
         {
             push_cell_text(&mut text, &cells[idx]);
             push_cell_text(&mut run_text, &cells[idx]);
-            push_escaped_cell(&mut markup, &cells[idx]);
-            if !is_wide_spacer(&cells[idx]) {
+            if detail.full() {
+                push_escaped_cell(&mut markup, &cells[idx]);
+            }
+            if detail.full() && !is_wide_spacer(&cells[idx]) {
                 render_cells.push(RenderCell {
                     column: idx,
                     columns: if cells[idx].wide { 2 } else { 1 },
-                    text: cells[idx].text.clone(),
+                    text: cells[idx].text.to_string(),
                     style: CellStyle::from_cell(&cells[idx], is_selected(selection, row, idx))
                         .into_render_style(),
                 });
             }
             idx += 1;
         }
-        markup.push_str("</span>");
+        if detail.full() {
+            markup.push_str("</span>");
+        }
         if !run_text.is_empty() {
+            let run_markup = run_markup(&style, &run_text);
             runs.push(RenderRun {
                 start_column: start,
                 columns: idx - start,
                 text: run_text,
+                markup: run_markup,
                 style: style.into_render_style(),
             });
         }
@@ -423,6 +490,15 @@ fn build_line_render(
         cells: render_cells,
         runs,
     }
+}
+
+fn run_markup(style: &CellStyle, text: &str) -> String {
+    let mut markup = style_open(style);
+    for ch in text.chars() {
+        push_escaped_char(&mut markup, ch);
+    }
+    markup.push_str("</span>");
+    markup
 }
 
 fn is_selected(selection: Option<SelectionRange>, row: usize, column: usize) -> bool {
@@ -506,7 +582,7 @@ mod tests {
 
     fn cell(text: &str) -> TerminalCell {
         TerminalCell {
-            text: text.to_string(),
+            text: text.to_string().into(),
             ..TerminalCell::blank()
         }
     }
@@ -587,6 +663,7 @@ mod tests {
             &[cell("a"), suggestion_space, suggestion, cell("b")],
             0,
             None,
+            RenderFrameDetail::Full,
         );
         assert_eq!(line.text, "a sb");
         assert_eq!(
@@ -595,7 +672,7 @@ mod tests {
                 .map(|cell| (
                     cell.column,
                     cell.columns,
-                    cell.text.as_str(),
+                    cell.text.as_ref(),
                     cell.style.fg.as_deref()
                 ))
                 .collect::<Vec<_>>(),
@@ -647,7 +724,7 @@ mod tests {
             colors: TerminalColors::default(),
             mouse: MouseMode::default(),
         };
-        let frame = Renderer::render_frame_with_selection(content, None);
+        let frame = Renderer::render_frame_with_selection(&content, None);
         assert_eq!(frame.lines.len(), 2);
         assert_eq!(frame.lines[0].region, RenderRegion::History);
         assert_eq!(frame.lines[0].text, "old");
@@ -656,6 +733,40 @@ mod tests {
         assert_eq!(frame.lines[1].text, "new");
         assert_eq!(frame.lines[1].runs[0].start_column, 0);
         assert_eq!(frame.input_text, "new");
+    }
+
+    #[test]
+    fn paint_frame_skips_snapshot_only_markup_cells_and_command_blocks() {
+        let content = RenderableContentOwned {
+            lines: vec![
+                vec![cell("$"), cell(" "), cell("c")],
+                vec![cell("o"), cell("k")],
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata::default(),
+            ],
+            cursor_line: 0,
+            cursor_col: 3,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        };
+
+        let frame = Renderer::render_frame_for_paint(&content, None);
+
+        assert!(frame.history_markup.is_empty());
+        assert!(frame.input_markup.is_empty());
+        assert!(frame.command_blocks.is_empty());
+        assert!(frame.lines.iter().all(|line| line.markup.is_empty()));
+        assert!(frame.lines.iter().all(|line| line.cells.is_empty()));
+        assert_eq!(frame.lines[0].text, "$ c");
+        assert_eq!(frame.lines[0].runs[0].text, "$ c");
+        assert_eq!(frame.input_text, "$ c");
     }
 
     #[test]
@@ -684,7 +795,7 @@ mod tests {
             colors: TerminalColors::default(),
             mouse: MouseMode::default(),
         };
-        let frame = Renderer::render_frame_with_selection(content, None);
+        let frame = Renderer::render_frame_with_selection(&content, None);
         assert_eq!(frame.lines[0].region, RenderRegion::History);
         assert_eq!(frame.lines[1].region, RenderRegion::Input);
         assert_eq!(frame.lines[2].region, RenderRegion::Input);
@@ -718,7 +829,7 @@ mod tests {
             colors: TerminalColors::default(),
             mouse: MouseMode::default(),
         };
-        let frame = Renderer::render_frame_with_selection(content, None);
+        let frame = Renderer::render_frame_with_selection(&content, None);
         assert_eq!(frame.lines[0].region, RenderRegion::History);
         assert_eq!(frame.lines[1].region, RenderRegion::Input);
         assert_eq!(frame.lines[2].region, RenderRegion::Input);
@@ -756,7 +867,7 @@ mod tests {
             colors: TerminalColors::default(),
             mouse: MouseMode::default(),
         };
-        let frame = Renderer::render_frame_with_selection(content, None);
+        let frame = Renderer::render_frame_with_selection(&content, None);
         assert_eq!(frame.command_blocks.len(), 2);
         assert_eq!(frame.command_blocks[0].prompt_start_row, 0);
         assert_eq!(frame.command_blocks[0].prompt_end_row, 1);

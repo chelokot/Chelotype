@@ -186,14 +186,14 @@ mod tests {
             "OUT_1"
                 .chars()
                 .map(|ch| TerminalCell {
-                    text: ch.to_string(),
+                    text: ch.to_string().into(),
                     ..TerminalCell::blank()
                 })
                 .collect(),
             "OUT_2"
                 .chars()
                 .map(|ch| TerminalCell {
-                    text: ch.to_string(),
+                    text: ch.to_string().into(),
                     ..TerminalCell::blank()
                 })
                 .collect(),
@@ -225,7 +225,7 @@ mod tests {
             "PREV"
                 .chars()
                 .map(|ch| TerminalCell {
-                    text: ch.to_string(),
+                    text: ch.to_string().into(),
                     ..TerminalCell::blank()
                 })
                 .collect(),
@@ -233,7 +233,7 @@ mod tests {
             "NEXT"
                 .chars()
                 .map(|ch| TerminalCell {
-                    text: ch.to_string(),
+                    text: ch.to_string().into(),
                     ..TerminalCell::blank()
                 })
                 .collect(),

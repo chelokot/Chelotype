@@ -36,7 +36,7 @@ mod tests {
 
     fn cell(text: &str) -> TerminalCell {
         TerminalCell {
-            text: text.to_string(),
+            text: text.to_string().into(),
             ..TerminalCell::blank()
         }
     }

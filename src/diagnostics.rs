@@ -44,7 +44,7 @@ pub fn run_headless_scenario() -> std::io::Result<PathBuf> {
     }
     let content = wait_for_headless_content(&mut backend, &scenario.expected)?;
     let selection = scenario.selection.or(runtime.selection);
-    let rendered = Renderer::render_frame_with_selection(content.clone(), selection);
+    let rendered = Renderer::render_frame_with_selection(&content, selection);
     let path = write_snapshot(content.clone(), "headless")
         .ok_or_else(|| std::io::Error::other("snapshot write failed"))?;
     write_render_dump(

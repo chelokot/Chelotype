@@ -29,6 +29,17 @@ pub fn wheel_scroll_lines(delta_y: f64) -> Option<i32> {
     }
 }
 
+pub fn scroll_delta_pixels(delta_y: f64, line_height: f64) -> Option<f64> {
+    if delta_y == 0.0 || line_height <= 0.0 {
+        return None;
+    }
+    if (delta_y.abs() - 1.0).abs() <= f64::EPSILON {
+        Some(-delta_y.signum() * 3.0 * line_height)
+    } else {
+        Some(-delta_y)
+    }
+}
+
 impl PointerInteraction {
     pub fn selection(&self) -> Option<SelectionRange> {
         self.selection
@@ -500,5 +511,12 @@ mod tests {
         assert_eq!(wheel_scroll_lines(-1.0), Some(3));
         assert_eq!(wheel_scroll_lines(1.0), Some(-3));
         assert_eq!(wheel_scroll_lines(0.0), None);
+    }
+
+    #[test]
+    fn scroll_delta_preserves_high_resolution_surface_pixels() {
+        assert_eq!(scroll_delta_pixels(-2.5, 20.0), Some(2.5));
+        assert_eq!(scroll_delta_pixels(1.25, 20.0), Some(-1.25));
+        assert_eq!(scroll_delta_pixels(-1.0, 20.0), Some(60.0));
     }
 }
