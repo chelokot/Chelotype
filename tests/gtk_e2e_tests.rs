@@ -6192,6 +6192,18 @@ clear_input
 
 prepare_selected_input
 before="$(snapshot_count)"
+xdotool key --window "$window_id" Delete
+wait_latest_text_after "$before" '❯ ef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text_after "$before" '❯ abcdef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text_after "$before" '❯ ef'
+clear_input
+
+prepare_selected_input
+before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "X"
 wait_latest_text_after "$before" '❯ Xef'
 before="$(snapshot_count)"
@@ -6200,6 +6212,42 @@ wait_latest_text_after "$before" '❯ abcdef'
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+shift+z
 wait_latest_text_after "$before" '❯ Xef'
+clear_input
+
+before="$(snapshot_count)"
+xdotool type --window "$window_id" --delay 2 "PASTE"
+wait_latest_text_after "$before" '❯ PASTE'
+xdotool key --window "$window_id" ctrl+a
+for _ in {1..80}; do
+    if grep -Fx 'primary	PASTE' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+xdotool key --window "$window_id" ctrl+c
+for _ in {1..80}; do
+    if grep -Fx 'clipboard	PASTE' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -Fx 'clipboard	PASTE' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "Ctrl+C did not populate clipboard for selected paste replacement" >&2
+    cat "$clipboard_trace" >&2 || true
+    exit 1
+fi
+clear_input
+
+prepare_selected_input
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+v
+wait_latest_text_after "$before" '❯ PASTEef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text_after "$before" '❯ abcdef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text_after "$before" '❯ PASTEef'
 "#;
 
     let output = Command::new("xvfb-run")

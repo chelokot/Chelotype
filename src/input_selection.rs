@@ -31,10 +31,12 @@ pub fn input_start_column(line: &[TerminalCell]) -> usize {
         .unwrap_or(0)
 }
 
-pub fn input_line_range(lines: &[Vec<TerminalCell>], row: usize) -> Option<SelectionRange> {
-    let line = lines.get(row)?;
+pub fn active_input_line_range(content: &RenderableContentOwned) -> Option<SelectionRange> {
+    let row = usize::try_from(content.cursor_line).ok()?;
+    let line = content.lines.get(row)?;
     let start = input_start_column(line);
-    let end = line_significant_len(line);
+    let cursor = usize::try_from(content.cursor_col).ok();
+    let end = active_input_end_column(line, cursor);
     (end > start).then_some(SelectionRange::new(
         GridPoint { row, column: start },
         GridPoint { row, column: end },
@@ -62,7 +64,11 @@ pub fn keyboard_cursor_target(
         .or_else(|| usize::try_from(content.cursor_col).ok())?;
     let line = content.lines.get(row)?;
     let start = input_start_column(line);
-    let end = line_significant_len(line);
+    let end = if Some(row) == usize::try_from(content.cursor_line).ok() {
+        active_input_end_column(line, usize::try_from(content.cursor_col).ok())
+    } else {
+        line_significant_len(line)
+    };
     let column = match (direction, unit) {
         (CursorDirection::Left, CursorUnit::Cell) => cursor.saturating_sub(1).max(start),
         (CursorDirection::Right, CursorUnit::Cell) => (cursor + 1).min(end),
@@ -213,6 +219,42 @@ fn is_word_cell(cell: &TerminalCell) -> bool {
         .any(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
+fn active_input_end_column(line: &[TerminalCell], cursor: Option<usize>) -> usize {
+    let significant = line_significant_len(line);
+    let Some(cursor) = cursor.filter(|cursor| *cursor < significant) else {
+        return significant;
+    };
+    if line[cursor..significant]
+        .iter()
+        .all(is_fish_autosuggestion_cell)
+    {
+        cursor
+    } else {
+        significant
+    }
+}
+
+fn is_fish_autosuggestion_cell(cell: &TerminalCell) -> bool {
+    cell.fg
+        .as_deref()
+        .and_then(parse_hex_rgb)
+        .is_some_and(|(red, green, blue)| {
+            let max_channel = red.max(green).max(blue);
+            let min_channel = red.min(green).min(blue);
+            max_channel <= 160 && max_channel.saturating_sub(min_channel) <= 48
+        })
+}
+
+fn parse_hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    let value = value.strip_prefix('#')?;
+    (value.len() == 6).then_some(())?;
+    Some((
+        u8::from_str_radix(&value[0..2], 16).ok()?,
+        u8::from_str_radix(&value[2..4], 16).ok()?,
+        u8::from_str_radix(&value[4..6], 16).ok()?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +278,59 @@ mod tests {
             colors: TerminalColors::default(),
             mouse: MouseMode::default(),
         }
+    }
+
+    fn colored_cell(text: &str, fg: &str) -> TerminalCell {
+        TerminalCell {
+            text: text.to_string(),
+            fg: Some(fg.to_string()),
+            ..TerminalCell::blank()
+        }
+    }
+
+    #[test]
+    fn active_input_range_stops_before_fish_autosuggestion_tail() {
+        let mut content = content_with_cursor("", 7);
+        content.lines = vec![vec![
+            colored_cell("❯", "#b5bd68"),
+            TerminalCell::blank(),
+            colored_cell("P", "#ff6b81"),
+            colored_cell("A", "#ff6b81"),
+            colored_cell("S", "#ff6b81"),
+            colored_cell("T", "#ff6b81"),
+            colored_cell("E", "#ff6b81"),
+            colored_cell(" ", "#585b70"),
+            TerminalCell::blank(),
+        ]];
+
+        assert_eq!(
+            active_input_line_range(&content),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 2 },
+                GridPoint { row: 0, column: 7 }
+            ))
+        );
+    }
+
+    #[test]
+    fn cursor_right_does_not_move_into_fish_autosuggestion_tail() {
+        let mut content = content_with_cursor("", 7);
+        content.lines = vec![vec![
+            colored_cell("❯", "#b5bd68"),
+            TerminalCell::blank(),
+            colored_cell("P", "#ff6b81"),
+            colored_cell("A", "#ff6b81"),
+            colored_cell("S", "#ff6b81"),
+            colored_cell("T", "#ff6b81"),
+            colored_cell("E", "#ff6b81"),
+            colored_cell(" ", "#585b70"),
+            TerminalCell::blank(),
+        ]];
+
+        assert_eq!(
+            keyboard_cursor_target(&content, CursorDirection::Right, CursorUnit::Cell, None),
+            Some(MouseGridPosition { row: 0, column: 7 })
+        );
     }
 
     #[test]

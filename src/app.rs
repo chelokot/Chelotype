@@ -4,8 +4,8 @@ use crate::cell_text::lines_to_text;
 use crate::containers::{LaunchTarget, available_launch_targets};
 use crate::input::{CursorDirection, CursorUnit, KeyAction, key_to_action};
 use crate::input_selection::{
-    DirectedSelectionRange, active_cursor_point, cursor_movement_bytes_between_points,
-    directed_selection_for_target, input_line_range, input_start_column, keyboard_cursor_bytes,
+    DirectedSelectionRange, active_cursor_point, active_input_line_range,
+    cursor_movement_bytes_between_points, directed_selection_for_target, keyboard_cursor_bytes,
     keyboard_cursor_target, keyboard_selection_collapse_target,
 };
 use crate::interaction::{
@@ -14,8 +14,8 @@ use crate::interaction::{
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderFrame, RenderPreedit, Renderer};
 use crate::selection::{
-    GridPoint, SelectionRange, anchor_range_to_display, find_text_range, line_range,
-    line_significant_len, selected_text, viewport_range_for_display, word_range_at,
+    GridPoint, SelectionRange, anchor_range_to_display, find_text_range, line_range, selected_text,
+    viewport_range_for_display, word_range_at,
 };
 use crate::snapshot::{
     write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
@@ -2353,23 +2353,12 @@ fn select_active_input(
     let Some(content) = content.borrow().clone() else {
         return;
     };
-    let Some(row) = usize::try_from(content.cursor_line).ok() else {
+    let Some(range) = active_input_line_range(&content) else {
         return;
     };
-    let Some(line) = content.lines.get(row) else {
-        return;
-    };
-    let start = input_start_column(line);
-    let end = line_significant_len(line);
-    if end <= start {
-        return;
-    }
     set_viewport_selection(
         &content,
-        SelectionRange::new(
-            GridPoint { row, column: start },
-            GridPoint { row, column: end },
-        ),
+        range,
         selection,
         selection_text,
         selection_dirty,
@@ -2395,7 +2384,7 @@ fn select_mouse_click_range(
     let row = usize::from(position.row);
     let column = usize::from(position.column);
     let range = if press_count >= 3 && Some(row) == usize::try_from(content.cursor_line).ok() {
-        input_line_range(&content.lines, row)
+        active_input_line_range(&content)
     } else if press_count >= 3 {
         line_range(&content.lines, row)
     } else {
