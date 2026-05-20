@@ -493,6 +493,7 @@ fn build_ui(app: &Application) {
             selection_dirty: selection_dirty.clone(),
             keyboard_selection: keyboard_selection.clone(),
             pending_input_latency: pending_input_latency.clone(),
+            command_block_output: None,
         };
         click_controller.connect_pressed(move |gesture, press_count, x, y| {
             canvas_widget.grab_focus();
@@ -532,7 +533,18 @@ fn build_ui(app: &Application) {
                 left_pointer_down.set(button == MouseButton::Left);
                 if button == MouseButton::Right && !current_mode.sends_press_release() {
                     left_pointer_down.set(false);
-                    show_canvas_context_menu(&canvas_widget, x, y, context_menu.clone());
+                    let command_block_output = content.borrow().as_ref().and_then(|content| {
+                        command_block_output_text_at_rail(content, metrics.get(), target, x)
+                    });
+                    show_canvas_context_menu(
+                        &canvas_widget,
+                        x,
+                        y,
+                        CanvasContextMenuContext {
+                            command_block_output,
+                            ..context_menu.clone()
+                        },
+                    );
                     let _ = pointer_interaction.borrow_mut().cancel();
                     return;
                 }
@@ -2076,9 +2088,13 @@ fn copy_selection_to_clipboard(
     let Some(text) = selection_text.borrow().clone() else {
         return false;
     };
-    widget.clipboard().set_text(&text);
-    trace_clipboard_export("clipboard", &text);
+    copy_text_to_clipboard(widget, &text);
     true
+}
+
+fn copy_text_to_clipboard(widget: &gtk::DrawingArea, text: &str) {
+    widget.clipboard().set_text(text);
+    trace_clipboard_export("clipboard", text);
 }
 
 #[derive(Clone)]
@@ -2121,6 +2137,7 @@ struct CanvasContextMenuContext {
     selection_dirty: std::rc::Rc<std::cell::Cell<bool>>,
     keyboard_selection: std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     pending_input_latency: PendingInputLatency,
+    command_block_output: Option<String>,
 }
 
 fn show_canvas_context_menu(
@@ -2130,6 +2147,12 @@ fn show_canvas_context_menu(
     context: CanvasContextMenuContext,
 ) {
     let menu_model = gtk::gio::Menu::new();
+    if context.command_block_output.is_some() {
+        menu_model.append(
+            Some("Copy Block Output"),
+            Some("terminal-menu.copy-block-output"),
+        );
+    }
     menu_model.append(Some("Copy"), Some("terminal-menu.copy"));
     menu_model.append(Some("Cut"), Some("terminal-menu.cut"));
     menu_model.append(Some("Paste"), Some("terminal-menu.paste"));
@@ -2146,6 +2169,21 @@ fn show_canvas_context_menu(
     )));
 
     let actions = gtk::gio::SimpleActionGroup::new();
+
+    let copy_block_output = gtk::gio::SimpleAction::new("copy-block-output", None);
+    copy_block_output.set_enabled(context.command_block_output.is_some());
+    {
+        let widget = widget.clone();
+        let output = context.command_block_output.clone();
+        let popover = popover.clone();
+        copy_block_output.connect_activate(move |_, _| {
+            if let Some(output) = output.as_ref() {
+                copy_text_to_clipboard(&widget, output);
+            }
+            popover.popdown();
+        });
+    }
+    actions.add_action(&copy_block_output);
 
     let copy = gtk::gio::SimpleAction::new("copy", None);
     copy.set_enabled(context.selection_text.borrow().is_some());
@@ -2462,6 +2500,16 @@ fn command_block_output_selection_at_rail(
                 },
             ))
         })
+}
+
+fn command_block_output_text_at_rail(
+    content: &RenderableContentOwned,
+    metrics: Option<CellMetrics>,
+    target: PointerPanePosition,
+    x: f64,
+) -> Option<String> {
+    let range = command_block_output_selection_at_rail(content, metrics, target, x)?;
+    text_for_viewport_selection(content, range)
 }
 
 fn set_viewport_selection(
@@ -3414,6 +3462,20 @@ mod tests {
         assert_eq!(
             command_block_output_selection_at_rail(&content, metrics(), target, 8.0),
             None
+        );
+    }
+
+    #[test]
+    fn command_block_rail_context_extracts_block_output_text() {
+        let content = command_block_content();
+        let target = PointerPanePosition {
+            pane: None,
+            position: MouseGridPosition { row: 2, column: 0 },
+        };
+
+        assert_eq!(
+            command_block_output_text_at_rail(&content, metrics(), target, 3.0).as_deref(),
+            Some("BLOCK_OUT_1\nBLOCK_OUT_2")
         );
     }
 

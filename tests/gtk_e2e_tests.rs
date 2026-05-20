@@ -779,6 +779,29 @@ rail_x="$(awk -v canvas_x="$canvas_x" 'BEGIN { printf "%d", canvas_x + 6 }')"
 rail_y="$(awk -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", canvas_y + ((row + 0.5) * line) }')"
 echo "command block rail click window=$window_id row=$marker_row at=$rail_x,$rail_y" >&2
 xdotool windowfocus "$window_id" || true
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+rail_root_x="$(awk -v left="$X" -v x="$rail_x" 'BEGIN { printf "%d", left + x }')"
+rail_root_y="$(awk -v top="$Y" -v y="$rail_y" 'BEGIN { printf "%d", top + y }')"
+xdotool mousemove "$rail_root_x" "$rail_root_y"
+xdotool click 3
+sleep 0.2
+copy_block_x="$(awk -v x="$rail_root_x" 'BEGIN { printf "%d", x + 72 }')"
+copy_block_y="$(awk -v y="$rail_root_y" 'BEGIN { printf "%d", y + 24 }')"
+xdotool mousemove "$copy_block_x" "$copy_block_y"
+xdotool click 1
+for _ in {1..100}; do
+    if grep -F 'clipboard	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -F 'clipboard	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "command block context menu did not copy output" >&2
+    echo "rail=$rail_root_x,$rail_root_y copy=$copy_block_x,$copy_block_y" >&2
+    cat "$clipboard_trace" >&2 || true
+    cat /tmp/chelotype.log >&2 || true
+    exit 1
+fi
 xdotool mousemove --sync --window "$window_id" "$rail_x" "$rail_y"
 sleep 0.08
 xdotool mousedown 1
@@ -837,6 +860,11 @@ import -window "$window_id" "$screenshot"
         trace
             .lines()
             .any(|line| line == "primary\tCB_OUTPUT\\nCB_DONE")
+    );
+    assert!(
+        trace
+            .lines()
+            .any(|line| line == "clipboard\tCB_OUTPUT\\nCB_DONE")
     );
 
     let _ = std::fs::remove_dir_all(&dir);
