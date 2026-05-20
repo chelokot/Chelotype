@@ -5398,15 +5398,48 @@ fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool key --window "$window_id" ctrl+comma
+settings_id=""
 for _ in {1..60}; do
     settings_id="$(xdotool search --name 'Settings' | head -n 1 || true)"
     if [ -n "$settings_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$settings_id" ]; then
+    echo "settings window did not open from Ctrl+comma" >&2
+    xdotool search --name '.*' getwindowname %@ >&2 || true
+    exit 1
+fi
+xdotool windowfocus "$settings_id" || true
+sleep 0.2
+eval "$(xdotool getwindowgeometry --shell "$settings_id")"
+switch_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + width - 52 }')"
+switch_left_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + width - 82 }')"
+switch_y="$(awk -v y="$Y" 'BEGIN { printf "%d", y + 124 }')"
+xdotool mousemove "$switch_x" "$switch_y"
+xdotool click 1
+for _ in {1..60}; do
+    if grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1; then
+    echo "settings switch did not disable cursor animation" >&2
+    cat "$config_dir/config" >&2 || true
+    exit 1
+fi
+xdotool mousemove "$switch_left_x" "$switch_y"
+xdotool click 1
+for _ in {1..60}; do
+    if grep -Fx 'cursor_animation=on' "$config_dir/config" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
 done
-echo "settings window did not open from Ctrl+comma" >&2
-xdotool search --name '.*' getwindowname %@ >&2 || true
+echo "settings switch did not re-enable cursor animation" >&2
+cat "$config_dir/config" >&2 || true
 exit 1
 "#;
 
