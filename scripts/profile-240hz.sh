@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 duration_seconds=6
 scenario="held-key"
 strict=0
+strict_cpu=0
 release=0
 allow_live=0
 display_backend="x11"
@@ -14,7 +15,7 @@ gsk_renderer="${CHELOTYPE_GSK_RENDERER:-gl}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/profile-240hz.sh [--scenario held-key|scroll|scroll-burst|scroll-sustain|idle|frame-baseline|timer-baseline] [--display-backend x11|weston-headless|native-wayland] [--duration seconds] [--release] [--strict] [--allow-live]
+Usage: scripts/profile-240hz.sh [--scenario held-key|scroll|scroll-burst|scroll-sustain|idle|frame-baseline|timer-baseline] [--display-backend x11|weston-headless|native-wayland] [--duration seconds] [--release] [--strict] [--strict-cpu] [--allow-live]
 
 Runs the GTK app with CHELOTYPE_PERF_TRACE enabled and prints frame timing
 percentiles. Run the x11 backend under xvfb-run for nested automation. The
@@ -43,6 +44,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --strict)
       strict=1
+      shift
+      ;;
+    --strict-cpu)
+      strict_cpu=1
       shift
       ;;
     --release)
@@ -551,10 +556,11 @@ if [[ "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ]]; then
   ' "$scroll_trace"
 fi
 
-if [[ "$strict" -eq 1 ]]; then
+if [[ "$strict" -eq 1 || "$strict_cpu" -eq 1 ]]; then
   awk -F '\t' \
     -v frame_budget_us="$frame_budget_us" \
     -v target_refresh_millihz="$target_refresh_millihz" \
+    -v require_cadence_gate="$strict" \
     -v require_monitor_refresh="$([[ "$display_backend" == "weston-headless" || "$display_backend" == "native-wayland" ]] && echo 1 || echo 0)" '
     $1 == "gtk_frame_interval" { frame[++frame_count] = $2 }
     $1 == "gtk_tick_wall_interval" { wall[++wall_count] = $2 }
@@ -566,7 +572,7 @@ if [[ "$strict" -eq 1 ]]; then
     $1 == "gtk_render" { render[++render_count] = $2 }
     $1 == "gdk_monitor_refresh_millihz" { monitor[++monitor_count] = $2 }
     END {
-      if (require_monitor_refresh == 1) {
+      if (require_cadence_gate == 1 && require_monitor_refresh == 1) {
         if (monitor_count == 0) {
           print "strict profile failed: no gdk_monitor_refresh_millihz samples" > "/dev/stderr"
           exit 1
@@ -578,35 +584,41 @@ if [[ "$strict" -eq 1 ]]; then
           exit 1
         }
       }
-      if (frame_count == 0) {
+      if (require_cadence_gate == 1 && frame_count == 0) {
         print "strict profile failed: no gtk_frame_interval samples" > "/dev/stderr"
         exit 1
       }
-      asort(frame)
-      frame_p50 = frame[int((frame_count - 1) * 0.50) + 1]
-      if (frame_p50 > frame_budget_us) {
-        printf "strict profile failed: gtk_frame_interval p50 %dus exceeds 240Hz budget %dus\n", frame_p50, frame_budget_us > "/dev/stderr"
-        exit 1
+      if (require_cadence_gate == 1) {
+        asort(frame)
+        frame_p50 = frame[int((frame_count - 1) * 0.50) + 1]
+        if (frame_p50 > frame_budget_us) {
+          printf "strict profile failed: gtk_frame_interval p50 %dus exceeds 240Hz budget %dus\n", frame_p50, frame_budget_us > "/dev/stderr"
+          exit 1
+        }
       }
-      if (wall_count == 0) {
+      if (require_cadence_gate == 1 && wall_count == 0) {
         print "strict profile failed: no gtk_tick_wall_interval samples" > "/dev/stderr"
         exit 1
       }
-      asort(wall)
-      wall_p50 = wall[int((wall_count - 1) * 0.50) + 1]
-      if (wall_p50 > frame_budget_us) {
-        printf "strict profile failed: gtk_tick_wall_interval p50 %dus exceeds 240Hz budget %dus\n", wall_p50, frame_budget_us > "/dev/stderr"
-        exit 1
+      if (require_cadence_gate == 1) {
+        asort(wall)
+        wall_p50 = wall[int((wall_count - 1) * 0.50) + 1]
+        if (wall_p50 > frame_budget_us) {
+          printf "strict profile failed: gtk_tick_wall_interval p50 %dus exceeds 240Hz budget %dus\n", wall_p50, frame_budget_us > "/dev/stderr"
+          exit 1
+        }
       }
-      if (paint_interval_count == 0) {
+      if (require_cadence_gate == 1 && paint_interval_count == 0) {
         print "strict profile failed: no gtk_paint_interval samples" > "/dev/stderr"
         exit 1
       }
-      asort(paint_interval)
-      paint_interval_p50 = paint_interval[int((paint_interval_count - 1) * 0.50) + 1]
-      if (paint_interval_p50 > frame_budget_us) {
-        printf "strict profile failed: gtk_paint_interval p50 %dus exceeds 240Hz budget %dus\n", paint_interval_p50, frame_budget_us > "/dev/stderr"
-        exit 1
+      if (require_cadence_gate == 1) {
+        asort(paint_interval)
+        paint_interval_p50 = paint_interval[int((paint_interval_count - 1) * 0.50) + 1]
+        if (paint_interval_p50 > frame_budget_us) {
+          printf "strict profile failed: gtk_paint_interval p50 %dus exceeds 240Hz budget %dus\n", paint_interval_p50, frame_budget_us > "/dev/stderr"
+          exit 1
+        }
       }
       if (paint_count > 0) {
         asort(paint)
@@ -655,7 +667,7 @@ if [[ "$strict" -eq 1 ]]; then
       }
     }
   ' "$perf_trace"
-  if [[ "$scenario" == "scroll" || "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ]]; then
+  if [[ "$strict" -eq 1 && ( "$scenario" == "scroll" || "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ) ]]; then
     awk -F '\t' -v frame_budget_us="$frame_budget_us" '
       $1 == "frame" { scroll_frame[++scroll_frame_count] = $5 }
       END {
