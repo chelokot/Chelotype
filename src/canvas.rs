@@ -1,16 +1,17 @@
 use crate::config::{CursorShape, CursorStyle};
-use crate::render::{RenderFrame, RenderRun, RenderStyle};
+use crate::render::{RenderFrame, RenderRegion, RenderRun, RenderStyle};
 use crate::terminal_font::{TerminalFontMetrics, layout_for, metrics_for_widget};
 use crate::workspace_render::WorkspaceRenderFrame;
 use gtk::prelude::*;
 use gtk::{cairo, pango};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(530);
 const MAX_TEXT_LAYOUT_CACHE_ENTRIES: usize = 4096;
+const MAX_ROW_SURFACE_CACHE_ENTRIES: usize = 512;
 #[derive(Clone)]
 pub struct TerminalCanvas {
     area: gtk::DrawingArea,
@@ -40,6 +41,7 @@ impl TerminalCanvas {
         let cursor_motion = Rc::new(Cell::new(CursorMotionState::default()));
         let scroll_visual_offset_px = Rc::new(Cell::new(0.0));
         let text_layout_cache = Rc::new(RefCell::new(TextLayoutCache::default()));
+        let row_surface_cache = Rc::new(RefCell::new(RowSurfaceCache::default()));
         let last_paint_started = Rc::new(Cell::new(None::<Instant>));
         let draw_render = render.clone();
         let draw_scroll_underlay = scroll_underlay.clone();
@@ -47,6 +49,7 @@ impl TerminalCanvas {
         let draw_cursor_motion = cursor_motion.clone();
         let draw_scroll_visual_offset_px = scroll_visual_offset_px.clone();
         let draw_text_layout_cache = text_layout_cache.clone();
+        let draw_row_surface_cache = row_surface_cache.clone();
         let draw_last_paint_started = last_paint_started.clone();
         area.set_draw_func(move |widget, context, width, height| {
             let started = Instant::now();
@@ -60,8 +63,10 @@ impl TerminalCanvas {
             draw_background(context, width, height);
             if let Some(render) = draw_render.borrow().as_ref() {
                 let mut text_layout_cache = draw_text_layout_cache.borrow_mut();
+                let mut row_surface_cache = draw_row_surface_cache.borrow_mut();
                 let mut paint_resources = PaintResources {
                     text_layout_cache: &mut text_layout_cache,
+                    row_surface_cache: &mut row_surface_cache,
                     stats: PaintStats::default(),
                 };
                 draw_canvas_render(
@@ -257,7 +262,10 @@ fn draw_canvas_render(
                 cursor_paint.with_blink(paint.cursor_blink.visible),
                 metrics,
                 paint_resources,
-                paint.scroll_visual_offset_px,
+                PaintViewport {
+                    scroll_visual_offset_px: paint.scroll_visual_offset_px,
+                    width: f64::from(widget.allocated_width()),
+                },
             );
             if let Some(CanvasRenderFrame::Single(underlay)) = scroll_underlay {
                 draw_scroll_underlay_frame(
@@ -388,7 +396,10 @@ fn draw_scroll_underlay_frame_in_rect(
             CursorPaintState::hidden(),
             metrics,
             paint_resources,
-            scroll_visual_offset_px + line_height,
+            PaintViewport {
+                scroll_visual_offset_px: scroll_visual_offset_px + line_height,
+                width: rect.width,
+            },
         );
     } else {
         let missing = scroll_visual_offset_px.min(line_height);
@@ -401,7 +412,10 @@ fn draw_scroll_underlay_frame_in_rect(
             CursorPaintState::hidden(),
             metrics,
             paint_resources,
-            scroll_visual_offset_px - line_height,
+            PaintViewport {
+                scroll_visual_offset_px: scroll_visual_offset_px - line_height,
+                width: rect.width,
+            },
         );
     }
     let _ = context.restore();
@@ -414,12 +428,12 @@ fn draw_render_frame(
     cursor_paint: CursorPaintState,
     metrics: TerminalFontMetrics,
     paint_resources: &mut PaintResources<'_>,
-    scroll_visual_offset_px: f64,
+    viewport: PaintViewport,
 ) {
     let cell_width = metrics.cell_width;
     let line_height = metrics.line_height;
     let _ = context.save();
-    context.translate(0.0, scroll_visual_offset_px);
+    context.translate(0.0, viewport.scroll_visual_offset_px);
     let vertical_clip = context
         .clip_extents()
         .ok()
@@ -432,21 +446,15 @@ fn draw_render_frame(
             continue;
         }
         paint_resources.stats.rows += 1;
-        for run in &line.runs {
-            draw_run_background(context, run, cell_width, line_height, top);
-        }
-        for run in &line.runs {
-            if run.text.trim().is_empty() {
-                continue;
-            }
-            let left = run.start_column as f64 * cell_width;
-            let layout = paint_resources.layout_for(widget, &run.markup);
-            let _ = context.save();
-            context.rectangle(left, top, run.columns as f64 * cell_width, line_height);
-            context.clip();
-            gtk::render_layout(&widget.style_context(), context, left, top, &layout);
-            let _ = context.restore();
-        }
+        draw_render_line(
+            widget,
+            context,
+            line,
+            metrics,
+            paint_resources,
+            top,
+            viewport.width,
+        );
     }
 
     if render.cursor.visible && cursor_paint.visible {
@@ -472,6 +480,59 @@ fn draw_render_frame(
 fn row_intersects_clip(row_top: f64, line_height: f64, clip_top: f64, clip_bottom: f64) -> bool {
     let row_bottom = row_top + line_height;
     row_bottom >= clip_top && row_top <= clip_bottom
+}
+
+fn draw_render_line(
+    widget: &gtk::DrawingArea,
+    context: &cairo::Context,
+    line: &crate::render::RenderLine,
+    metrics: TerminalFontMetrics,
+    paint_resources: &mut PaintResources<'_>,
+    top: f64,
+    frame_width: f64,
+) {
+    if let Some(surface) = paint_resources.row_surface_for(widget, line, metrics, frame_width) {
+        let _ = context.set_source_surface(surface, 0.0, top);
+        let _ = context.paint();
+    } else {
+        draw_render_line_direct(
+            widget,
+            context,
+            line,
+            metrics,
+            paint_resources.text_layout_cache,
+            &mut paint_resources.stats,
+            top,
+        );
+    }
+}
+
+fn draw_render_line_direct(
+    widget: &gtk::DrawingArea,
+    context: &cairo::Context,
+    line: &crate::render::RenderLine,
+    metrics: TerminalFontMetrics,
+    text_layout_cache: &mut TextLayoutCache,
+    stats: &mut PaintStats,
+    top: f64,
+) {
+    let cell_width = metrics.cell_width;
+    let line_height = metrics.line_height;
+    for run in &line.runs {
+        draw_run_background(context, run, cell_width, line_height, top);
+    }
+    for run in &line.runs {
+        if run.text.trim().is_empty() {
+            continue;
+        }
+        let left = run.start_column as f64 * cell_width;
+        let layout = layout_for_paint(widget, text_layout_cache, stats, &run.markup);
+        let _ = context.save();
+        context.rectangle(left, top, run.columns as f64 * cell_width, line_height);
+        context.clip();
+        gtk::render_layout(&widget.style_context(), context, left, top, &layout);
+        let _ = context.restore();
+    }
 }
 
 fn draw_workspace_render(
@@ -501,10 +562,13 @@ fn draw_workspace_render(
             cursor_paint.for_pane(pane.pane_id, pane.active),
             metrics,
             paint_resources,
-            if pane.active {
-                scroll_visual_offset_px
-            } else {
-                0.0
+            PaintViewport {
+                scroll_visual_offset_px: if pane.active {
+                    scroll_visual_offset_px
+                } else {
+                    0.0
+                },
+                width,
             },
         );
         let _ = context.restore();
@@ -544,11 +608,19 @@ struct PaintRect {
     height: f64,
 }
 
+#[derive(Clone, Copy)]
+struct PaintViewport {
+    scroll_visual_offset_px: f64,
+    width: f64,
+}
+
 #[derive(Default)]
 struct PaintStats {
     rows: u64,
     layout_hits: u64,
     layout_misses: u64,
+    row_surface_hits: u64,
+    row_surface_misses: u64,
 }
 
 impl PaintStats {
@@ -556,25 +628,161 @@ impl PaintStats {
         crate::perf_trace::record_counter("gtk_paint_rows", self.rows);
         crate::perf_trace::record_counter("gtk_layout_cache_hits", self.layout_hits);
         crate::perf_trace::record_counter("gtk_layout_cache_misses", self.layout_misses);
+        crate::perf_trace::record_counter("gtk_row_surface_hits", self.row_surface_hits);
+        crate::perf_trace::record_counter("gtk_row_surface_misses", self.row_surface_misses);
     }
 }
 
 struct PaintResources<'a> {
     text_layout_cache: &'a mut TextLayoutCache,
+    row_surface_cache: &'a mut RowSurfaceCache,
     stats: PaintStats,
 }
 
 impl PaintResources<'_> {
-    fn layout_for(&mut self, widget: &gtk::DrawingArea, markup: &str) -> pango::Layout {
-        match self.text_layout_cache.layout_for(widget, markup) {
-            CachedLayout::Hit(layout) => {
-                self.stats.layout_hits += 1;
-                layout
-            }
-            CachedLayout::Miss(layout) => {
-                self.stats.layout_misses += 1;
-                layout
-            }
+    fn row_surface_for(
+        &mut self,
+        widget: &gtk::DrawingArea,
+        line: &crate::render::RenderLine,
+        metrics: TerminalFontMetrics,
+        frame_width: f64,
+    ) -> Option<cairo::ImageSurface> {
+        self.row_surface_cache.surface_for(
+            widget,
+            line,
+            metrics,
+            frame_width,
+            self.text_layout_cache,
+            &mut self.stats,
+        )
+    }
+}
+
+fn layout_for_paint(
+    widget: &gtk::DrawingArea,
+    text_layout_cache: &mut TextLayoutCache,
+    stats: &mut PaintStats,
+    markup: &str,
+) -> pango::Layout {
+    match text_layout_cache.layout_for(widget, markup) {
+        CachedLayout::Hit(layout) => {
+            stats.layout_hits += 1;
+            layout
+        }
+        CachedLayout::Miss(layout) => {
+            stats.layout_misses += 1;
+            layout
+        }
+    }
+}
+
+#[derive(Default)]
+struct RowSurfaceCache {
+    entries: VecDeque<RowSurfaceEntry>,
+}
+
+struct RowSurfaceEntry {
+    key: RowSurfaceKey,
+    surface: cairo::ImageSurface,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RowSurfaceKey {
+    signature: TextLayoutCacheSignature,
+    width_px: i32,
+    height_px: i32,
+    line: RowSurfaceLineKey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RowSurfaceLineKey {
+    region: RenderRegion,
+    text: String,
+    runs: Vec<RenderRun>,
+}
+
+impl RowSurfaceCache {
+    fn surface_for(
+        &mut self,
+        widget: &gtk::DrawingArea,
+        line: &crate::render::RenderLine,
+        metrics: TerminalFontMetrics,
+        frame_width: f64,
+        text_layout_cache: &mut TextLayoutCache,
+        stats: &mut PaintStats,
+    ) -> Option<cairo::ImageSurface> {
+        let spec = RowSurfaceSpec {
+            width_px: frame_width.ceil() as i32,
+            height_px: metrics.line_height.ceil() as i32,
+            metrics,
+        };
+        if spec.width_px <= 0 || spec.height_px <= 0 {
+            return None;
+        }
+        let key = RowSurfaceKey {
+            signature: TextLayoutCacheSignature::for_widget(widget),
+            width_px: spec.width_px,
+            height_px: spec.height_px,
+            line: RowSurfaceLineKey::from(line),
+        };
+        if let Some(entry) = self.entries.iter().find(|entry| entry.key == key) {
+            stats.row_surface_hits += 1;
+            return Some(entry.surface.clone());
+        }
+        let surface = self.render_surface(widget, line, spec, text_layout_cache, stats)?;
+        if self.entries.len() >= MAX_ROW_SURFACE_CACHE_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(RowSurfaceEntry {
+            key,
+            surface: surface.clone(),
+        });
+        stats.row_surface_misses += 1;
+        Some(surface)
+    }
+
+    fn render_surface(
+        &self,
+        widget: &gtk::DrawingArea,
+        line: &crate::render::RenderLine,
+        spec: RowSurfaceSpec,
+        text_layout_cache: &mut TextLayoutCache,
+        stats: &mut PaintStats,
+    ) -> Option<cairo::ImageSurface> {
+        let surface =
+            cairo::ImageSurface::create(cairo::Format::ARgb32, spec.width_px, spec.height_px)
+                .ok()?;
+        let context = cairo::Context::new(&surface).ok()?;
+        context.set_operator(cairo::Operator::Clear);
+        let _ = context.paint();
+        context.set_operator(cairo::Operator::Over);
+        draw_render_line_direct(
+            widget,
+            &context,
+            line,
+            spec.metrics,
+            text_layout_cache,
+            stats,
+            0.0,
+        );
+        surface.flush();
+        Some(surface)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RowSurfaceSpec {
+    width_px: i32,
+    height_px: i32,
+    metrics: TerminalFontMetrics,
+}
+
+impl From<&crate::render::RenderLine> for RowSurfaceLineKey {
+    fn from(line: &crate::render::RenderLine) -> Self {
+        Self {
+            region: line.region,
+            text: line.text.clone(),
+            runs: line.runs.clone(),
         }
     }
 }
@@ -611,14 +819,20 @@ impl TextLayoutCache {
     }
 
     fn sync_signature(&mut self, widget: &gtk::DrawingArea) {
-        let signature = TextLayoutCacheSignature {
-            font_size_tenths: (crate::terminal_font::font_size_pt() * 10.0).round() as u32,
-            text_scale_micros: (crate::terminal_font::text_scale_for_widget(widget) * 1_000_000.0)
-                .round() as u32,
-        };
+        let signature = TextLayoutCacheSignature::for_widget(widget);
         if self.signature != Some(signature) {
             self.signature = Some(signature);
             self.layouts.clear();
+        }
+    }
+}
+
+impl TextLayoutCacheSignature {
+    fn for_widget(widget: &gtk::DrawingArea) -> Self {
+        Self {
+            font_size_tenths: (crate::terminal_font::font_size_pt() * 10.0).round() as u32,
+            text_scale_micros: (crate::terminal_font::text_scale_for_widget(widget) * 1_000_000.0)
+                .round() as u32,
         }
     }
 }
@@ -1398,7 +1612,7 @@ fn markup_escape(ch: char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::RenderRun;
+    use crate::render::{RenderLine, RenderRegion, RenderRun};
     use serial_test::serial;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1436,6 +1650,47 @@ mod tests {
         assert!(run.markup.contains("underline=\"single\""));
         assert!(run.markup.contains("strikethrough=\"true\""));
         assert!(run.markup.contains("&lt;&amp;&gt;"));
+    }
+
+    #[test]
+    fn row_surface_key_reuses_same_line_content_after_row_shift() {
+        let style = RenderStyle {
+            fg: Some("#e5e7eb".to_string()),
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            strikeout: false,
+            selected: false,
+        };
+        let run = RenderRun {
+            start_column: 0,
+            columns: 5,
+            text: "hello".to_string(),
+            markup: run_markup(&style, "hello"),
+            style,
+        };
+        let first = RenderLine {
+            row: 4,
+            region: RenderRegion::History,
+            text: "hello".to_string(),
+            markup: String::new(),
+            cells: Vec::new(),
+            runs: vec![run.clone()],
+        };
+        let shifted = RenderLine {
+            row: 3,
+            region: RenderRegion::History,
+            text: "hello".to_string(),
+            markup: String::new(),
+            cells: Vec::new(),
+            runs: vec![run],
+        };
+
+        assert_eq!(
+            RowSurfaceLineKey::from(&first),
+            RowSurfaceLineKey::from(&shifted)
+        );
     }
 
     #[test]

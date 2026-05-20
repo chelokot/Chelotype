@@ -483,6 +483,8 @@ summarize_counter gtk_render_alloc_bytes
 summarize_counter gtk_paint_rows
 summarize_counter gtk_layout_cache_hits
 summarize_counter gtk_layout_cache_misses
+summarize_counter gtk_row_surface_hits
+summarize_counter gtk_row_surface_misses
 
 if [[ -s "$scroll_trace" ]]; then
   awk -F '\t' '
