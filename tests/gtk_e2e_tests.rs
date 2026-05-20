@@ -4270,6 +4270,19 @@ if grep -F '"selected_text": ' "$latest_json" >/dev/null 2>&1 && ! grep -F '"sel
     grep -F '"selected_text": ' "$latest_json" >&2 || true
     exit 1
 fi
+before_count="$(ls "$snapshot_dir"/*.json 2>/dev/null | wc -l)"
+xdotool key --window "$window_id" shift+Page_Down
+for _ in {1..60}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1)"
+    after_count="$(ls "$snapshot_dir"/*.json 2>/dev/null | wc -l)"
+    if [ "$after_count" -gt "$before_count" ] && grep -F '"selected_text": "VISUAL_SCROLL_TARGET' "$latest_json" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "selection did not reattach to the original text after scrolling back" >&2
+grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+exit 1
 "#;
 
     let output = Command::new("xvfb-run")
