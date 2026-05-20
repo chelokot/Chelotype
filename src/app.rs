@@ -2308,18 +2308,69 @@ fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCan
         .build();
     cursor_row.add_suffix(&cursor_animation);
     cursor_row.set_activatable_widget(Some(&cursor_animation));
+    let cursor_style_labels = crate::config::CursorStyle::ALL
+        .iter()
+        .map(|style| style.label())
+        .collect::<Vec<_>>();
+    let cursor_style_model = gtk::StringList::new(&cursor_style_labels);
+    let cursor_style_row = adw::ComboRow::builder()
+        .title("Cursor style")
+        .subtitle("Steady, smooth, smear, or Neovide-inspired trail")
+        .model(&cursor_style_model)
+        .selected(crate::config::cursor_style().selected_index())
+        .build();
+    let syncing_cursor_controls = std::rc::Rc::new(std::cell::Cell::new(false));
     {
         let canvas = canvas.clone();
+        let cursor_style_row = cursor_style_row.clone();
+        let syncing_cursor_controls = syncing_cursor_controls.clone();
         cursor_animation.connect_active_notify(move |switch| {
+            if syncing_cursor_controls.get() {
+                return;
+            }
+            let style = if switch.is_active() {
+                crate::config::CursorStyle::Neovide
+            } else {
+                crate::config::CursorStyle::Steady
+            };
+            syncing_cursor_controls.set(true);
+            cursor_style_row.set_selected(style.selected_index());
+            syncing_cursor_controls.set(false);
             crate::config::write_value(
                 "cursor_animation",
                 if switch.is_active() { "on" } else { "off" },
+            );
+            crate::config::write_value("cursor_style", style.config_value());
+            canvas.widget().queue_draw();
+        });
+    }
+    {
+        let canvas = canvas.clone();
+        let cursor_animation = cursor_animation.clone();
+        let syncing_cursor_controls = syncing_cursor_controls.clone();
+        cursor_style_row.connect_selected_notify(move |row| {
+            if syncing_cursor_controls.get() {
+                return;
+            }
+            let style = crate::config::CursorStyle::from_selected_index(row.selected());
+            syncing_cursor_controls.set(true);
+            cursor_animation.set_active(style != crate::config::CursorStyle::Steady);
+            syncing_cursor_controls.set(false);
+            crate::config::write_value("cursor_style", style.config_value());
+            crate::config::write_value(
+                "cursor_animation",
+                if style == crate::config::CursorStyle::Steady {
+                    "off"
+                } else {
+                    "on"
+                },
             );
             canvas.widget().queue_draw();
         });
     }
 
     group.add(&cursor_row);
+    group.add(&cursor_style_row);
     page.add(&group);
     window.add(&page);
     window.present();

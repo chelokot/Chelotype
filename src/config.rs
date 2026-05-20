@@ -1,3 +1,58 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorStyle {
+    Steady,
+    Smooth,
+    Smear,
+    Neovide,
+}
+
+impl CursorStyle {
+    pub const ALL: [Self; 4] = [Self::Steady, Self::Smooth, Self::Smear, Self::Neovide];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Steady => "Steady",
+            Self::Smooth => "Smooth",
+            Self::Smear => "Smear",
+            Self::Neovide => "Neovide",
+        }
+    }
+
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::Steady => "steady",
+            Self::Smooth => "smooth",
+            Self::Smear => "smear",
+            Self::Neovide => "neovide",
+        }
+    }
+
+    pub fn selected_index(self) -> u32 {
+        Self::ALL
+            .iter()
+            .position(|style| *style == self)
+            .unwrap_or(0)
+            .min(u32::MAX as usize) as u32
+    }
+
+    pub fn from_selected_index(index: u32) -> Self {
+        Self::ALL
+            .get(index as usize)
+            .copied()
+            .unwrap_or(Self::Neovide)
+    }
+
+    fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "off" | "steady" => Some(Self::Steady),
+            "on" | "smooth" => Some(Self::Smooth),
+            "smear" => Some(Self::Smear),
+            "neovide" => Some(Self::Neovide),
+            _ => None,
+        }
+    }
+}
+
 pub fn read_value(key: &str) -> Option<String> {
     let path = config_path()?;
     let content = std::fs::read_to_string(path).ok()?;
@@ -39,7 +94,20 @@ pub fn write_value(key: &str, value: &str) {
 }
 
 pub fn cursor_animation_enabled() -> bool {
-    read_value("cursor_animation").as_deref() != Some("off")
+    cursor_style() != CursorStyle::Steady
+}
+
+pub fn cursor_style() -> CursorStyle {
+    if let Some(style) =
+        read_value("cursor_style").and_then(|value| CursorStyle::from_config_value(&value))
+    {
+        return style;
+    }
+    match read_value("cursor_animation").as_deref() {
+        Some("off") => CursorStyle::Steady,
+        Some("on") => CursorStyle::Smooth,
+        _ => CursorStyle::Neovide,
+    }
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -92,9 +160,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn cursor_animation_is_enabled_unless_explicitly_disabled() {
+    fn cursor_style_defaults_to_neovide_and_keeps_legacy_animation_config() {
         let dir = std::env::temp_dir().join(format!(
-            "chelotype-cursor-animation-config-{}",
+            "chelotype-cursor-style-config-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system time")
@@ -105,10 +173,21 @@ mod tests {
         }
 
         assert!(cursor_animation_enabled());
+        assert_eq!(cursor_style(), CursorStyle::Neovide);
         write_value("cursor_animation", "off");
         assert!(!cursor_animation_enabled());
+        assert_eq!(cursor_style(), CursorStyle::Steady);
         write_value("cursor_animation", "on");
         assert!(cursor_animation_enabled());
+        assert_eq!(cursor_style(), CursorStyle::Smooth);
+        write_value("cursor_style", "smear");
+        assert!(cursor_animation_enabled());
+        assert_eq!(cursor_style(), CursorStyle::Smear);
+        write_value("cursor_style", "neovide");
+        assert_eq!(cursor_style(), CursorStyle::Neovide);
+        write_value("cursor_style", "steady");
+        assert!(!cursor_animation_enabled());
+        assert_eq!(cursor_style(), CursorStyle::Steady);
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");

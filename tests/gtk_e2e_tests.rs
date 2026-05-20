@@ -6196,12 +6196,12 @@ switch_y="$(awk -v y="$Y" 'BEGIN { printf "%d", y + 124 }')"
 xdotool mousemove "$switch_x" "$switch_y"
 xdotool click 1
 for _ in {1..60}; do
-    if grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1; then
+    if grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1 && grep -Fx 'cursor_style=steady' "$config_dir/config" >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
-if ! grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1; then
+if ! grep -Fx 'cursor_animation=off' "$config_dir/config" >/dev/null 2>&1 || ! grep -Fx 'cursor_style=steady' "$config_dir/config" >/dev/null 2>&1; then
     echo "settings switch did not disable cursor animation" >&2
     cat "$config_dir/config" >&2 || true
     exit 1
@@ -6209,7 +6209,7 @@ fi
 xdotool mousemove "$switch_left_x" "$switch_y"
 xdotool click 1
 for _ in {1..60}; do
-    if grep -Fx 'cursor_animation=on' "$config_dir/config" >/dev/null 2>&1; then
+    if grep -Fx 'cursor_animation=on' "$config_dir/config" >/dev/null 2>&1 && grep -Fx 'cursor_style=neovide' "$config_dir/config" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
