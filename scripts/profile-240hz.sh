@@ -341,7 +341,7 @@ summarize_duration() {
       p95 = values[int((count - 1) * 0.95) + 1]
       p99 = values[int((count - 1) * 0.99) + 1]
       max = values[count]
-      if (event == "gtk_frame_interval" || event == "gtk_tick_wall_interval") {
+      if (event == "gtk_frame_interval" || event == "gtk_tick_wall_interval" || event == "gtk_paint_interval") {
         fps = p50 > 0 ? 1000000 / p50 : 0
         printf "%-24s count=%-5d p50=%7dus fps=%6.1f p95=%7dus p99=%7dus max=%7dus\n", event, count, p50, fps, p95, p99, max
       } else {
@@ -374,6 +374,7 @@ summarize_refresh_gate() {
     $1 == "gdk_monitor_refresh_millihz" { monitor[++monitor_count] = $2 }
     $1 == "gtk_frame_interval" { frame[++frame_count] = $2 }
     $1 == "gtk_tick_wall_interval" { wall[++wall_count] = $2 }
+    $1 == "gtk_paint_interval" { paint[++paint_count] = $2 }
     END {
       if (monitor_count > 0) {
         asort(monitor)
@@ -402,6 +403,15 @@ summarize_refresh_gate() {
         printf "%-24s p50=%7dus fps=%6.1f budget=%dus status=%s\n", "wall_cadence", wall_p50, wall_hz, frame_budget_us, wall_status
       } else {
         printf "%-24s p50=unknown budget=%dus status=unknown\n", "wall_cadence", frame_budget_us
+      }
+      if (paint_count > 0) {
+        asort(paint)
+        paint_p50 = paint[int((paint_count - 1) * 0.50) + 1]
+        paint_hz = paint_p50 > 0 ? 1000000.0 / paint_p50 : 0
+        paint_status = paint_p50 <= frame_budget_us ? "ok" : "below-target"
+        printf "%-24s p50=%7dus fps=%6.1f budget=%dus status=%s\n", "paint_cadence", paint_p50, paint_hz, frame_budget_us, paint_status
+      } else {
+        printf "%-24s p50=unknown budget=%dus status=unknown\n", "paint_cadence", frame_budget_us
       }
     }
   ' "$perf_trace"
@@ -444,6 +454,7 @@ summarize_refresh_gate
 summarize_frame_buckets
 summarize_duration gtk_frame_interval
 summarize_duration gtk_tick_wall_interval
+summarize_duration gtk_paint_interval
 summarize_duration gtk_tick_work
 summarize_duration gtk_cursor_tick
 summarize_duration gtk_smooth_scroll_tick
@@ -524,6 +535,7 @@ if [[ "$strict" -eq 1 ]]; then
     -v require_monitor_refresh="$([[ "$display_backend" == "weston-headless" || "$display_backend" == "native-wayland" ]] && echo 1 || echo 0)" '
     $1 == "gtk_frame_interval" { frame[++frame_count] = $2 }
     $1 == "gtk_tick_wall_interval" { wall[++wall_count] = $2 }
+    $1 == "gtk_paint_interval" { paint_interval[++paint_interval_count] = $2 }
     $1 == "gtk_paint" { paint[++paint_count] = $2 }
     $1 == "gdk_monitor_refresh_millihz" { monitor[++monitor_count] = $2 }
     END {
@@ -557,6 +569,16 @@ if [[ "$strict" -eq 1 ]]; then
       wall_p50 = wall[int((wall_count - 1) * 0.50) + 1]
       if (wall_p50 > frame_budget_us) {
         printf "strict profile failed: gtk_tick_wall_interval p50 %dus exceeds 240Hz budget %dus\n", wall_p50, frame_budget_us > "/dev/stderr"
+        exit 1
+      }
+      if (paint_interval_count == 0) {
+        print "strict profile failed: no gtk_paint_interval samples" > "/dev/stderr"
+        exit 1
+      }
+      asort(paint_interval)
+      paint_interval_p50 = paint_interval[int((paint_interval_count - 1) * 0.50) + 1]
+      if (paint_interval_p50 > frame_budget_us) {
+        printf "strict profile failed: gtk_paint_interval p50 %dus exceeds 240Hz budget %dus\n", paint_interval_p50, frame_budget_us > "/dev/stderr"
         exit 1
       }
       if (paint_count > 0) {

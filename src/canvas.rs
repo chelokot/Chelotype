@@ -40,14 +40,22 @@ impl TerminalCanvas {
         let cursor_motion = Rc::new(Cell::new(CursorMotionState::default()));
         let scroll_visual_offset_px = Rc::new(Cell::new(0.0));
         let text_layout_cache = Rc::new(RefCell::new(TextLayoutCache::default()));
+        let last_paint_started = Rc::new(Cell::new(None::<Instant>));
         let draw_render = render.clone();
         let draw_scroll_underlay = scroll_underlay.clone();
         let draw_cursor_blink = cursor_blink.clone();
         let draw_cursor_motion = cursor_motion.clone();
         let draw_scroll_visual_offset_px = scroll_visual_offset_px.clone();
         let draw_text_layout_cache = text_layout_cache.clone();
+        let draw_last_paint_started = last_paint_started.clone();
         area.set_draw_func(move |widget, context, width, height| {
             let started = Instant::now();
+            if let Some(previous) = draw_last_paint_started.replace(Some(started)) {
+                crate::perf_trace::record_duration(
+                    "gtk_paint_interval",
+                    started.duration_since(previous),
+                );
+            }
             let now = Instant::now();
             draw_background(context, width, height);
             if let Some(render) = draw_render.borrow().as_ref() {
