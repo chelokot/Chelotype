@@ -31,6 +31,44 @@ fn assert_clean_gtk_stderr(stderr: &str) {
     assert!(!stderr.contains("error:"), "{stderr}");
 }
 
+fn write_fake_toolbox(bin_dir: &std::path::Path, log_path: &std::path::Path, container_name: &str) {
+    let fake_toolbox = bin_dir.join("toolbox");
+    std::fs::write(
+        &fake_toolbox,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+log={log:?}
+container_name={container_name:?}
+if [ "${{1:-}}" = "list" ] && [ "${{2:-}}" = "--containers" ]; then
+    printf 'CONTAINER ID  CONTAINER NAME           CREATED       STATUS   IMAGE NAME\n'
+    printf 'abc123        %s    today         running  image\n' "$container_name"
+    exit 0
+fi
+if [ "${{1:-}}" = "enter" ] && [ "${{2:-}}" = "--container" ]; then
+    container="$3"
+    shift 3
+    printf 'enter\t%s\t%s\n' "$container" "$*" >> "$log"
+    exec "$@"
+fi
+printf 'unexpected\t%s\n' "$*" >> "$log"
+exit 1
+"#,
+            log = log_path.to_string_lossy(),
+            container_name = container_name,
+        ),
+    )
+    .expect("fake toolbox script");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&fake_toolbox)
+            .expect("fake toolbox metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_toolbox, permissions).expect("fake toolbox executable");
+    }
+}
+
 fn json_snapshots(dir: &std::path::Path) -> Vec<serde_json::Value> {
     snapshot_paths(dir)
         .into_iter()
@@ -1897,39 +1935,7 @@ fn gtk_e2e_starts_first_tab_in_available_toolbox_container_under_xvfb() {
     let fake_bin = dir.join("bin");
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     let toolbox_log = dir.join("toolbox.tsv");
-    let fake_toolbox = fake_bin.join("toolbox");
-    std::fs::write(
-        &fake_toolbox,
-        format!(
-            r#"#!/usr/bin/env bash
-set -euo pipefail
-log={log:?}
-if [ "${{1:-}}" = "list" ] && [ "${{2:-}}" = "--containers" ]; then
-    printf 'CONTAINER ID  CONTAINER NAME           CREATED       STATUS   IMAGE NAME\n'
-    printf 'abc123        fedora-toolbox-latest    today         running  image\n'
-    exit 0
-fi
-if [ "${{1:-}}" = "enter" ] && [ "${{2:-}}" = "--container" ]; then
-    container="$3"
-    shift 3
-    printf 'enter\t%s\t%s\n' "$container" "$*" >> "$log"
-    exec "$@"
-fi
-printf 'unexpected\t%s\n' "$*" >> "$log"
-exit 1
-"#,
-            log = toolbox_log.to_string_lossy()
-        ),
-    )
-    .expect("fake toolbox script");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&fake_toolbox)
-            .expect("fake toolbox metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fake_toolbox, permissions).expect("fake toolbox executable");
-    }
+    write_fake_toolbox(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
 
     let snapshot_dir = dir.join("snapshots");
     std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
@@ -2025,6 +2031,156 @@ exit 1
     let trace = read_to_string(&tab_trace).expect("read tab trace");
     assert!(trace.contains("tab_0_title=fedora-toolbox-latest"));
     assert!(trace.contains("tab_0_launch_target=toolbox:fedora-toolbox-latest"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_opens_toolbox_container_from_launch_menu_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!(
+            "skipping gtk container launch menu e2e because xvfb-run or xdotool is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-container-menu-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("container menu dir");
+    let fake_bin = dir.join("bin");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    let toolbox_log = dir.join("toolbox.tsv");
+    write_fake_toolbox(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
+
+    let snapshot_dir = dir.join("snapshots");
+    std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+    let tab_trace = dir.join("tabs.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+tab_trace="$3"
+config_dir="$4"
+fake_bin="$5"
+toolbox_log="$6"
+PATH="$fake_bin:$PATH" GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_TAB_TRACE="$tab_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..100}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ] && [ -f "$tab_trace" ] && grep -F 'tab_0_launch_target=host' "$tab_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+trace_value() {
+    local key="$1"
+    sed -n "s/^${key}=\\([0-9][0-9]*\\)$/\\1/p" "$tab_trace"
+}
+wait_container_tab() {
+    for _ in {1..100}; do
+        if grep -F 'tab_count=2' "$tab_trace" >/dev/null 2>&1 && grep -F 'selected_index=1' "$tab_trace" >/dev/null 2>&1 && grep -F 'tab_1_launch_target=toolbox:fedora-toolbox-latest' "$tab_trace" >/dev/null 2>&1 && grep -F 'enter	fedora-toolbox-latest' "$toolbox_log" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+launch_x="$(trace_value launch_menu_x)"
+launch_y="$(trace_value launch_menu_y)"
+launch_width="$(trace_value launch_menu_width)"
+launch_height="$(trace_value launch_menu_height)"
+button_x="$(awk -v left="$X" -v x="$launch_x" -v width="$launch_width" 'BEGIN { printf "%d", left + x + (width / 2) }')"
+button_y="$(awk -v top="$Y" -v y="$launch_y" -v height="$launch_height" 'BEGIN { printf "%d", top + y + (height / 2) }')"
+xdotool mousemove "$button_x" "$button_y"
+xdotool click 1
+sleep 0.3
+command -v import >/dev/null 2>&1 && import -window root "$snapshot_dir/../menu-open.png" || true
+search_x="$(awk -v left="$X" -v x="$launch_x" 'BEGIN { printf "%d", left + x + 24 }')"
+search_y="$(awk -v top="$Y" -v y="$launch_y" -v height="$launch_height" 'BEGIN { printf "%d", top + y + height + 32 }')"
+xdotool mousemove "$search_x" "$search_y"
+xdotool click 1
+xdotool type --delay 2 "fedora-toolbox-latest"
+sleep 0.2
+command -v import >/dev/null 2>&1 && import -window root "$snapshot_dir/../menu-filter.png" || true
+row_x="$(awk -v x="$search_x" 'BEGIN { printf "%d", x + 20 }')"
+row_y="$(awk -v y="$search_y" 'BEGIN { printf "%d", y + 96 }')"
+xdotool mousemove "$row_x" "$row_y"
+xdotool click 1
+xdotool key Return
+sleep 0.2
+command -v import >/dev/null 2>&1 && import -window root "$snapshot_dir/../menu-after-row-click.png" || true
+if ! wait_container_tab; then
+    echo "launch menu did not open toolbox tab" >&2
+    cat "$tab_trace" >&2 || true
+    cat "$toolbox_log" >&2 || true
+    exit 1
+fi
+xdotool type --window "$window_id" --delay 2 "printf 'TOOLBOX_MENU_OK\n'"
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    latest="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest" ] && grep -F 'TOOLBOX_MENU_OK' "$latest" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "toolbox menu tab did not accept input" >&2
+cat "$tab_trace" >&2 || true
+cat "$toolbox_log" >&2 || true
+find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-container-menu-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            snapshot_dir.to_str().expect("snapshot dir utf8"),
+            tab_trace.to_str().expect("tab trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
+            fake_bin.to_str().expect("fake bin dir utf8"),
+            toolbox_log.to_str().expect("toolbox log path utf8"),
+        ])
+        .output()
+        .expect("run gtk container menu e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk container menu e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&tab_trace).expect("read tab trace");
+    assert!(trace.contains("tab_count=2"));
+    assert!(trace.contains("tab_1_launch_target=toolbox:fedora-toolbox-latest"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

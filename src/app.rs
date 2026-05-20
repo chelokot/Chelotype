@@ -1182,7 +1182,7 @@ fn build_ui(app: &Application) {
             trace_geometry(path, canvas.widget(), metrics);
         }
         if let Some(path) = &tab_trace {
-            trace_tabs(path, &tab_bar, &workspace_rc.borrow());
+            trace_tabs(path, &tab_bar, &launch_menu_button, &workspace_rc.borrow());
         }
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
             && last_size.get() != Some(size)
@@ -2892,15 +2892,24 @@ fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: Te
     write_trace_file(path, &content);
 }
 
-fn trace_tabs(path: &std::path::Path, tab_bar: &adw::TabBar, workspace: &TerminalWorkspace) {
+fn trace_tabs(
+    path: &std::path::Path,
+    tab_bar: &adw::TabBar,
+    launch_menu_button: &gtk::MenuButton,
+    workspace: &TerminalWorkspace,
+) {
     let tabs = workspace.tabs();
     let selected_index = tabs.iter().position(|tab| tab.active).unwrap_or(0);
     let mut content = format!(
-        "tab_bar_x={}\ntab_bar_y={}\ntab_bar_width={}\ntab_bar_height={}\ntab_count={}\nselected_index={}",
+        "tab_bar_x={}\ntab_bar_y={}\ntab_bar_width={}\ntab_bar_height={}\nlaunch_menu_x={}\nlaunch_menu_y={}\nlaunch_menu_width={}\nlaunch_menu_height={}\ntab_count={}\nselected_index={}",
         tab_bar.allocation().x(),
         tab_bar.allocation().y(),
         tab_bar.allocated_width(),
         tab_bar.allocated_height(),
+        launch_menu_button.allocation().x(),
+        launch_menu_button.allocation().y(),
+        launch_menu_button.allocated_width(),
+        launch_menu_button.allocated_height(),
         tabs.len(),
         selected_index,
     );
