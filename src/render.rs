@@ -4,6 +4,7 @@ use crate::command_blocks::{CommandBlock, command_blocks};
 use crate::selection::{GridPoint, SelectionRange};
 use crate::terminal_grid::{TerminalCell, TerminalSemanticPrompt};
 use serde::Serialize;
+use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RenderCursor {
@@ -37,6 +38,8 @@ pub struct RenderLine {
     pub markup: String,
     pub cells: Vec<RenderCell>,
     pub runs: Vec<RenderRun>,
+    #[serde(skip)]
+    pub paint_key: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -163,24 +166,24 @@ impl Renderer {
                 if idx as i32 == content.cursor_line {
                     input_text = line_render.text.clone();
                 }
-                lines.push(RenderLine {
-                    row: idx,
-                    region: RenderRegion::Input,
-                    text: line_render.text,
-                    markup: line_render.markup,
-                    cells: line_render.cells,
-                    runs: line_render.runs,
-                });
+                lines.push(RenderLine::new(
+                    idx,
+                    RenderRegion::Input,
+                    line_render.text,
+                    line_render.markup,
+                    line_render.cells,
+                    line_render.runs,
+                ));
             } else {
                 detail.push_history_markup(&mut history_markup, &line_render.markup, idx, content);
-                lines.push(RenderLine {
-                    row: idx,
-                    region: RenderRegion::History,
-                    text: line_render.text,
-                    markup: line_render.markup,
-                    cells: line_render.cells,
-                    runs: line_render.runs,
-                });
+                lines.push(RenderLine::new(
+                    idx,
+                    RenderRegion::History,
+                    line_render.text,
+                    line_render.markup,
+                    line_render.cells,
+                    line_render.runs,
+                ));
             }
         }
 
@@ -199,6 +202,36 @@ impl Renderer {
             command_blocks: detail.command_blocks(content),
         }
     }
+}
+
+impl RenderLine {
+    pub fn new(
+        row: usize,
+        region: RenderRegion,
+        text: String,
+        markup: String,
+        cells: Vec<RenderCell>,
+        runs: Vec<RenderRun>,
+    ) -> Self {
+        let paint_key = line_paint_key(region, &text, &runs);
+        Self {
+            row,
+            region,
+            text,
+            markup,
+            cells,
+            runs,
+            paint_key,
+        }
+    }
+}
+
+fn line_paint_key(region: RenderRegion, text: &str, runs: &[RenderRun]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    region.hash(&mut hasher);
+    text.hash(&mut hasher);
+    runs.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

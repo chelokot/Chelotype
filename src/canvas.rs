@@ -678,16 +678,27 @@ fn layout_for_paint(
 
 #[derive(Default)]
 struct RowSurfaceCache {
-    surfaces: HashMap<RowSurfaceKey, cairo::ImageSurface>,
+    surfaces: HashMap<RowSurfaceBucketKey, Vec<RowSurfaceEntry>>,
     order: VecDeque<RowSurfaceKey>,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RowSurfaceKey {
+    bucket: RowSurfaceBucketKey,
+    line: RowSurfaceLineKey,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RowSurfaceBucketKey {
     signature: TextLayoutCacheSignature,
     width_px: i32,
     height_px: i32,
+    line_paint_key: u64,
+}
+
+struct RowSurfaceEntry {
     line: RowSurfaceLineKey,
+    surface: cairo::ImageSurface,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -715,26 +726,57 @@ impl RowSurfaceCache {
         if spec.width_px <= 0 || spec.height_px <= 0 {
             return None;
         }
-        let key = RowSurfaceKey {
+        let bucket = RowSurfaceBucketKey {
             signature: TextLayoutCacheSignature::for_widget(widget),
             width_px: spec.width_px,
             height_px: spec.height_px,
-            line: RowSurfaceLineKey::from(line),
+            line_paint_key: line.paint_key,
         };
-        if let Some(surface) = self.surfaces.get(&key) {
+        if let Some(entry) = self
+            .surfaces
+            .get(&bucket)
+            .and_then(|entries| entries.iter().find(|entry| entry.line.matches(line)))
+        {
             stats.row_surface_hits += 1;
-            return Some(surface.clone());
+            return Some(entry.surface.clone());
         }
         let surface = self.render_surface(widget, line, spec, text_layout_cache, stats)?;
-        if self.surfaces.len() >= MAX_ROW_SURFACE_CACHE_ENTRIES
+        if self.len() >= MAX_ROW_SURFACE_CACHE_ENTRIES
             && let Some(evicted) = self.order.pop_front()
         {
-            self.surfaces.remove(&evicted);
+            self.remove(&evicted);
         }
-        self.order.push_back(key.clone());
-        self.surfaces.insert(key, surface.clone());
+        let line_key = RowSurfaceLineKey::from(line);
+        let key = RowSurfaceKey {
+            bucket,
+            line: line_key.clone(),
+        };
+        self.order.push_back(key);
+        self.surfaces
+            .entry(bucket)
+            .or_default()
+            .push(RowSurfaceEntry {
+                line: line_key,
+                surface: surface.clone(),
+            });
         stats.row_surface_misses += 1;
         Some(surface)
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn remove(&mut self, key: &RowSurfaceKey) {
+        let Some(entries) = self.surfaces.get_mut(&key.bucket) else {
+            return;
+        };
+        if let Some(index) = entries.iter().position(|entry| entry.line == key.line) {
+            entries.remove(index);
+        }
+        if entries.is_empty() {
+            self.surfaces.remove(&key.bucket);
+        }
     }
 
     fn render_surface(
@@ -780,6 +822,12 @@ impl From<&crate::render::RenderLine> for RowSurfaceLineKey {
             text: line.text.clone(),
             runs: line.runs.clone(),
         }
+    }
+}
+
+impl RowSurfaceLineKey {
+    fn matches(&self, line: &crate::render::RenderLine) -> bool {
+        self.region == line.region && self.text == line.text && self.runs == line.runs
     }
 }
 
@@ -1666,23 +1714,24 @@ mod tests {
             markup: run_markup(&style, "hello"),
             style,
         };
-        let first = RenderLine {
-            row: 4,
-            region: RenderRegion::History,
-            text: "hello".to_string(),
-            markup: String::new(),
-            cells: Vec::new(),
-            runs: vec![run.clone()],
-        };
-        let shifted = RenderLine {
-            row: 3,
-            region: RenderRegion::History,
-            text: "hello".to_string(),
-            markup: String::new(),
-            cells: Vec::new(),
-            runs: vec![run],
-        };
+        let first = RenderLine::new(
+            4,
+            RenderRegion::History,
+            "hello".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![run.clone()],
+        );
+        let shifted = RenderLine::new(
+            3,
+            RenderRegion::History,
+            "hello".to_string(),
+            String::new(),
+            Vec::new(),
+            vec![run],
+        );
 
+        assert_eq!(first.paint_key, shifted.paint_key);
         assert_eq!(
             RowSurfaceLineKey::from(&first),
             RowSurfaceLineKey::from(&shifted)
