@@ -2319,6 +2319,17 @@ fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCan
         .model(&cursor_style_model)
         .selected(crate::config::cursor_style().selected_index())
         .build();
+    let cursor_shape_labels = crate::config::CursorShape::ALL
+        .iter()
+        .map(|shape| shape.label())
+        .collect::<Vec<_>>();
+    let cursor_shape_model = gtk::StringList::new(&cursor_shape_labels);
+    let cursor_shape_row = adw::ComboRow::builder()
+        .title("Cursor shape")
+        .subtitle("Vertical bar or block cursor")
+        .model(&cursor_shape_model)
+        .selected(crate::config::cursor_shape().selected_index())
+        .build();
     let syncing_cursor_controls = std::rc::Rc::new(std::cell::Cell::new(false));
     {
         let canvas = canvas.clone();
@@ -2346,6 +2357,15 @@ fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCan
     }
     {
         let canvas = canvas.clone();
+        cursor_shape_row.connect_selected_notify(move |row| {
+            let shape = crate::config::CursorShape::from_selected_index(row.selected());
+            crate::config::write_value("cursor_shape", shape.config_value());
+            canvas.widget().queue_draw();
+        });
+    }
+
+    {
+        let canvas = canvas.clone();
         let cursor_animation = cursor_animation.clone();
         let syncing_cursor_controls = syncing_cursor_controls.clone();
         cursor_style_row.connect_selected_notify(move |row| {
@@ -2371,6 +2391,7 @@ fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCan
 
     group.add(&cursor_row);
     group.add(&cursor_style_row);
+    group.add(&cursor_shape_row);
     page.add(&group);
     window.add(&page);
     window.present();

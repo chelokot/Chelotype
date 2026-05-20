@@ -6,6 +6,12 @@ pub enum CursorStyle {
     Neovide,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorShape {
+    Bar,
+    Block,
+}
+
 impl CursorStyle {
     pub const ALL: [Self; 4] = [Self::Steady, Self::Smooth, Self::Smear, Self::Neovide];
 
@@ -48,6 +54,44 @@ impl CursorStyle {
             "on" | "smooth" => Some(Self::Smooth),
             "smear" => Some(Self::Smear),
             "neovide" => Some(Self::Neovide),
+            _ => None,
+        }
+    }
+}
+
+impl CursorShape {
+    pub const ALL: [Self; 2] = [Self::Bar, Self::Block];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bar => "Bar",
+            Self::Block => "Block",
+        }
+    }
+
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::Bar => "bar",
+            Self::Block => "block",
+        }
+    }
+
+    pub fn selected_index(self) -> u32 {
+        Self::ALL
+            .iter()
+            .position(|shape| *shape == self)
+            .unwrap_or(0)
+            .min(u32::MAX as usize) as u32
+    }
+
+    pub fn from_selected_index(index: u32) -> Self {
+        Self::ALL.get(index as usize).copied().unwrap_or(Self::Bar)
+    }
+
+    fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "bar" => Some(Self::Bar),
+            "block" => Some(Self::Block),
             _ => None,
         }
     }
@@ -108,6 +152,12 @@ pub fn cursor_style() -> CursorStyle {
         Some("on") => CursorStyle::Smooth,
         _ => CursorStyle::Neovide,
     }
+}
+
+pub fn cursor_shape() -> CursorShape {
+    read_value("cursor_shape")
+        .and_then(|value| CursorShape::from_config_value(&value))
+        .unwrap_or(CursorShape::Bar)
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -188,6 +238,34 @@ mod tests {
         write_value("cursor_style", "steady");
         assert!(!cursor_animation_enabled());
         assert_eq!(cursor_style(), CursorStyle::Steady);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn cursor_shape_defaults_to_bar_and_reads_block_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-cursor-shape-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert_eq!(cursor_shape(), CursorShape::Bar);
+        write_value("cursor_shape", "block");
+        assert_eq!(cursor_shape(), CursorShape::Block);
+        write_value("cursor_shape", "bar");
+        assert_eq!(cursor_shape(), CursorShape::Bar);
+        write_value("cursor_shape", "unknown");
+        assert_eq!(cursor_shape(), CursorShape::Bar);
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");

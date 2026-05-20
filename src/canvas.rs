@@ -1,4 +1,4 @@
-use crate::config::CursorStyle;
+use crate::config::{CursorShape, CursorStyle};
 use crate::render::{RenderFrame, RenderRun, RenderStyle};
 use crate::terminal_font::{TerminalFontMetrics, layout_for, metrics_for_widget};
 use crate::workspace_render::WorkspaceRenderFrame;
@@ -62,7 +62,7 @@ impl TerminalCanvas {
                     render,
                     draw_cursor_blink.get(),
                     draw_cursor_motion.get(),
-                    crate::config::cursor_style(),
+                    CursorOptions::from_config(),
                     now,
                 );
             }
@@ -210,7 +210,7 @@ fn draw_canvas_render(
     render: &CanvasRenderFrame,
     cursor_blink: CursorBlinkState,
     cursor_motion: CursorMotionState,
-    cursor_style: CursorStyle,
+    cursor_options: CursorOptions,
     now: Instant,
 ) {
     let Some(metrics) = metrics_for_widget(widget) else {
@@ -220,7 +220,7 @@ fn draw_canvas_render(
         visible: cursor_blink.visible,
         pane_id: 0,
         motion: cursor_motion,
-        style: cursor_style,
+        options: cursor_options,
         now,
     };
     match render {
@@ -274,7 +274,7 @@ fn draw_render_frame(
                 context,
                 render,
                 cursor_paint.motion.for_pane(cursor_paint.pane_id),
-                cursor_paint.style,
+                cursor_paint.options,
                 cursor_paint.now,
                 line_height,
                 cell_width,
@@ -356,8 +356,23 @@ struct CursorPaintState {
     visible: bool,
     pane_id: u64,
     motion: CursorMotionState,
-    style: CursorStyle,
+    options: CursorOptions,
     now: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct CursorOptions {
+    style: CursorStyle,
+    shape: CursorShape,
+}
+
+impl CursorOptions {
+    fn from_config() -> Self {
+        Self {
+            style: crate::config::cursor_style(),
+            shape: crate::config::cursor_shape(),
+        }
+    }
 }
 
 impl CursorPaintState {
@@ -604,7 +619,7 @@ fn draw_cursor(
     context: &cairo::Context,
     render: &RenderFrame,
     cursor_motion: Option<CursorMotionState>,
-    cursor_style: CursorStyle,
+    cursor_options: CursorOptions,
     now: Instant,
     line_height: f64,
     cell_width: f64,
@@ -615,28 +630,59 @@ fn draw_cursor(
         column: f64::from(render.cursor.column.max(0)),
     };
     let path = cursor_motion.and_then(|motion| motion.path(now));
-    match cursor_style {
-        CursorStyle::Steady => draw_caret_at(context, target, line_height, cell_width),
+    match cursor_options.style {
+        CursorStyle::Steady => draw_caret_at(
+            context,
+            target,
+            cursor_options.shape,
+            line_height,
+            cell_width,
+        ),
         CursorStyle::Smooth => draw_caret_at(
             context,
             path.map(|path| path.current).unwrap_or(target),
+            cursor_options.shape,
             line_height,
             cell_width,
         ),
         CursorStyle::Smear => {
             if let Some(path) = path {
                 draw_smear_trail(context, path, line_height, cell_width, SmearPreset::Soft);
-                draw_caret_at(context, path.current, line_height, cell_width);
+                draw_caret_at(
+                    context,
+                    path.current,
+                    cursor_options.shape,
+                    line_height,
+                    cell_width,
+                );
             } else {
-                draw_caret_at(context, target, line_height, cell_width);
+                draw_caret_at(
+                    context,
+                    target,
+                    cursor_options.shape,
+                    line_height,
+                    cell_width,
+                );
             }
         }
         CursorStyle::Neovide => {
             if let Some(path) = path {
                 draw_smear_trail(context, path, line_height, cell_width, SmearPreset::Neovide);
-                draw_caret_at(context, path.current, line_height, cell_width);
+                draw_caret_at(
+                    context,
+                    path.current,
+                    cursor_options.shape,
+                    line_height,
+                    cell_width,
+                );
             } else {
-                draw_caret_at(context, target, line_height, cell_width);
+                draw_caret_at(
+                    context,
+                    target,
+                    cursor_options.shape,
+                    line_height,
+                    cell_width,
+                );
             }
         }
     }
@@ -714,13 +760,22 @@ fn draw_smear_trail(
 fn draw_caret_at(
     context: &cairo::Context,
     position: CursorDrawPosition,
+    shape: CursorShape,
     line_height: f64,
     cell_width: f64,
 ) {
     let x = position.column * cell_width;
     let y = position.line * line_height;
-    context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
-    context.rectangle(x.round(), y.round(), 1.25, line_height);
+    match shape {
+        CursorShape::Bar => {
+            context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
+            context.rectangle(x.round(), y.round(), 1.25, line_height);
+        }
+        CursorShape::Block => {
+            context.set_source_rgba(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, 0.72);
+            context.rectangle(x.round(), y.round(), cell_width.ceil(), line_height);
+        }
+    }
     let _ = context.fill();
 }
 
