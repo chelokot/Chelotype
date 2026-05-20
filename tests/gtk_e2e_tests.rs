@@ -7430,7 +7430,7 @@ bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
 geometry_trace="$4"
-target="KEEP_TOKEN"
+target="KEEP_TOKENyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
@@ -7473,11 +7473,16 @@ if ! grep -R 'KEEP_TOKEN' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
     exit 1
 fi
 latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
+latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1)"
+cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
 marker_row="$(grep -n 'KEEP_TOKEN' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
 marker_line="$(sed -n "$((marker_row + 1))p" "$latest_txt")"
 marker_col="$(awk -v line="$marker_line" -v target="$target" 'BEGIN { print index(line, target) - 1 }')"
-if [ -z "$marker_col" ]; then
+if [ -z "$marker_col" ] || [ "$marker_col" -lt 0 ]; then
+    marker_col="$(awk -v line="$marker_line" 'BEGIN { print index(line, "KEEP_TOKEN") - 1 }')"
+fi
+if [ -z "$marker_col" ] || [ "$marker_col" -lt 0 ] || [ -z "$cols" ]; then
     echo "could not locate KEEP_TOKEN column" >&2
     cat "$latest_txt" >&2
     exit 1
@@ -7487,22 +7492,26 @@ canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
+last_absolute="$((marker_col + ${#target} - 1))"
+end_row="$((marker_row + (last_absolute / cols)))"
+end_col="$((last_absolute % cols))"
 start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$marker_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((col + 1.2) * cell) }')"
-end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$marker_col" -v cell="$cell_width" -v len="${#target}" 'BEGIN { printf "%d", left + canvas_x + ((col + len - 0.3) * cell) }')"
-target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
-xdotool mousemove "$start_x" "$target_y"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$end_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((col + 0.8) * cell) }')"
+start_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+end_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$end_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+xdotool mousemove "$start_x" "$start_y"
 xdotool mousedown 1
 sleep 0.1
-xdotool mousemove "$end_x" "$target_y"
+xdotool mousemove "$end_x" "$end_y"
 sleep 0.1
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -F 'primary	KEEP_TOKEN' "$clipboard_trace" >/dev/null 2>&1 && grep -R '"selected_text": "KEEP_TOKEN' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -F "primary	$target" "$clipboard_trace" >/dev/null 2>&1 && grep -R "\"selected_text\": \"$target\"" "$snapshot_dir" >/dev/null 2>&1; then
         break
     fi
     sleep 0.05
 done
-if ! grep -F 'primary	KEEP_TOKEN' "$clipboard_trace" >/dev/null 2>&1; then
+if ! grep -F "primary	$target" "$clipboard_trace" >/dev/null 2>&1; then
     echo "initial KEEP_TOKEN selection did not export" >&2
     cat "$clipboard_trace" >&2 || true
     cat /tmp/chelotype.log >&2 || true
@@ -7514,7 +7523,7 @@ for _ in {1..120}; do
     latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
     if [ -n "$latest_json" ] && [ -n "$latest_txt" ]; then
         cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
-        if [ -n "$cols" ] && [ "$cols" -ge 80 ] && grep -F '"selected_text": "KEEP_TOKEN"' "$latest_json" >/dev/null 2>&1 && grep -F 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxKEEP_TOKEN' "$latest_txt" >/dev/null 2>&1; then
+        if [ -n "$cols" ] && [ "$cols" -ge 80 ] && grep -F "\"selected_text\": \"$target\"" "$latest_json" >/dev/null 2>&1 && grep -F "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx$target" "$latest_txt" >/dev/null 2>&1; then
             exit 0
         fi
     fi
@@ -7554,7 +7563,11 @@ exit 1
     assert_clean_gtk_stderr(&stderr);
 
     let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
-    assert!(trace.lines().any(|line| line == "primary\tKEEP_TOKEN"));
+    assert!(
+        trace
+            .lines()
+            .any(|line| line == "primary\tKEEP_TOKENyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+    );
 
     let json = snapshot_paths(&dir)
         .into_iter()
@@ -7565,7 +7578,7 @@ exit 1
         .map(|path| read_to_string(path).expect("read json snapshot"))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(json.contains("\"selected_text\": \"KEEP_TOKEN\""));
+    assert!(json.contains("\"selected_text\": \"KEEP_TOKENyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\""));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

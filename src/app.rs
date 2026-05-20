@@ -14,8 +14,8 @@ use crate::interaction::{
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderFrame, RenderPreedit, Renderer};
 use crate::selection::{
-    GridPoint, SelectionRange, anchor_range_to_display, find_text_range, line_range, selected_text,
-    viewport_range_for_display, word_range_at,
+    GridPoint, SelectionRange, anchor_range_to_display, find_text_range, line_range,
+    selected_text_with_metadata, viewport_range_for_display, word_range_at,
 };
 use crate::snapshot::{
     write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
@@ -2297,7 +2297,7 @@ fn text_for_viewport_selection(
     content: &RenderableContentOwned,
     selection: SelectionRange,
 ) -> Option<String> {
-    let text = selected_text(&content.lines, selection);
+    let text = selected_text_with_metadata(&content.lines, &content.line_metadata, selection);
     if text.is_empty() { None } else { Some(text) }
 }
 

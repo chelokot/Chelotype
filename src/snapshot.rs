@@ -1,7 +1,7 @@
 use crate::backend::RenderableContentOwned;
 use crate::cell_text::lines_to_text;
 use crate::render::RenderFrame;
-use crate::selection::{SelectionRange, selected_text};
+use crate::selection::{SelectionRange, selected_text_with_metadata};
 use crate::terminal_grid::{TerminalCell, TerminalLineMetadata, TerminalSemanticPrompt};
 use crate::workspace_render::WorkspaceRenderFrame;
 use serde::Serialize;
@@ -128,7 +128,9 @@ pub fn write_snapshot_with_selection(
             utf8: snapshot.mouse.utf8,
         },
         selection,
-        selected_text: selection.map(|range| selected_text(&snapshot.lines, range)),
+        selected_text: selection.map(|range| {
+            selected_text_with_metadata(&snapshot.lines, &snapshot.line_metadata, range)
+        }),
         text: snapshot_plain_from_lines(&snapshot.lines),
         lines: lines_json,
     };

@@ -1,6 +1,6 @@
 use crate::cell_text::push_cell_text;
 use crate::mouse::MouseGridPosition;
-use crate::terminal_grid::TerminalCell;
+use crate::terminal_grid::{TerminalCell, TerminalLineMetadata};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -63,6 +63,14 @@ impl SelectionRange {
 }
 
 pub fn selected_text(lines: &[Vec<TerminalCell>], range: SelectionRange) -> String {
+    selected_text_with_metadata(lines, &[], range)
+}
+
+pub fn selected_text_with_metadata(
+    lines: &[Vec<TerminalCell>],
+    metadata: &[TerminalLineMetadata],
+    range: SelectionRange,
+) -> String {
     if range.is_empty() {
         return String::new();
     }
@@ -88,7 +96,7 @@ pub fn selected_text(lines: &[Vec<TerminalCell>], range: SelectionRange) -> Stri
         {
             push_cell_text(&mut out, cell);
         }
-        if row != range.end.row && row + 1 < lines.len() {
+        if row != range.end.row && row + 1 < lines.len() && has_hard_line_break(metadata, row) {
             out.push('\n');
         }
     }
@@ -132,8 +140,11 @@ pub fn word_range_at(
 }
 
 pub fn find_text_range(lines: &[Vec<TerminalCell>], text: &str) -> Option<SelectionRange> {
-    if text.is_empty() || text.contains('\n') {
+    if text.is_empty() {
         return None;
+    }
+    if text.contains('\n') {
+        return find_multiline_text_range(lines, text);
     }
     lines
         .iter()
@@ -226,6 +237,76 @@ fn significant_len(line: &[TerminalCell]) -> usize {
         .unwrap_or(0)
 }
 
+fn has_hard_line_break(metadata: &[TerminalLineMetadata], row: usize) -> bool {
+    !(metadata.get(row).is_some_and(|line| line.wrapped)
+        && metadata
+            .get(row + 1)
+            .is_some_and(|line| line.wrap_continuation))
+}
+
+fn find_multiline_text_range(lines: &[Vec<TerminalCell>], needle: &str) -> Option<SelectionRange> {
+    let parts = needle.split('\n').collect::<Vec<_>>();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    let last_index = parts.len() - 1;
+    if parts.len() > lines.len() {
+        return None;
+    }
+    for start_row in 0..=lines.len() - parts.len() {
+        let first_line = line_text(&lines[start_row]);
+        let Some(start_byte) = first_line.find(parts[0]) else {
+            continue;
+        };
+        if &first_line[start_byte..] != parts[0] {
+            continue;
+        }
+        let Some((start_column, _)) =
+            byte_range_to_columns(&lines[start_row], start_byte, first_line.len())
+        else {
+            continue;
+        };
+        let mut matches = true;
+        for middle_index in 1..last_index {
+            if line_text(&lines[start_row + middle_index]) != parts[middle_index] {
+                matches = false;
+                break;
+            }
+        }
+        if !matches {
+            continue;
+        }
+        let last_line = line_text(&lines[start_row + last_index]);
+        if !last_line.starts_with(parts[last_index]) {
+            continue;
+        }
+        let Some((_, end_column)) =
+            byte_range_to_columns(&lines[start_row + last_index], 0, parts[last_index].len())
+        else {
+            continue;
+        };
+        return Some(SelectionRange::new(
+            GridPoint {
+                row: start_row,
+                column: start_column,
+            },
+            GridPoint {
+                row: start_row + last_index,
+                column: end_column,
+            },
+        ));
+    }
+    None
+}
+
+fn line_text(line: &[TerminalCell]) -> String {
+    let mut text = String::new();
+    for cell in line.iter().take(significant_len(line)) {
+        push_cell_text(&mut text, cell);
+    }
+    text
+}
+
 fn find_text_in_line(line: &[TerminalCell], needle: &str) -> Option<(usize, usize)> {
     let mut haystack = String::new();
     let mut spans = Vec::new();
@@ -239,6 +320,24 @@ fn find_text_in_line(line: &[TerminalCell], needle: &str) -> Option<(usize, usiz
     }
     let start_byte = haystack.find(needle)?;
     let end_byte = start_byte + needle.len();
+    byte_range_to_columns(line, start_byte, end_byte)
+}
+
+fn byte_range_to_columns(
+    line: &[TerminalCell],
+    start_byte: usize,
+    end_byte: usize,
+) -> Option<(usize, usize)> {
+    let mut haystack = String::new();
+    let mut spans = Vec::new();
+    for (column, cell) in line.iter().take(significant_len(line)).enumerate() {
+        let start = haystack.len();
+        push_cell_text(&mut haystack, cell);
+        let end = haystack.len();
+        if start != end {
+            spans.push((start, end, column, column + 1));
+        }
+    }
     let start_column = spans
         .iter()
         .find_map(|(start, _, column, _)| (*start == start_byte).then_some(*column))?;
@@ -328,6 +427,60 @@ mod tests {
             GridPoint { row: 2, column: 3 },
         );
         assert_eq!(selected_text(&lines, range), "cdef\nghijkl\nmno");
+    }
+
+    #[test]
+    fn extracts_soft_wrapped_text_without_inserted_newlines() {
+        let lines = [line("abcdef"), line("ghijkl"), line("mnopqr")];
+        let metadata = [
+            TerminalLineMetadata {
+                wrapped: true,
+                ..TerminalLineMetadata::default()
+            },
+            TerminalLineMetadata {
+                wrapped: true,
+                wrap_continuation: true,
+                ..TerminalLineMetadata::default()
+            },
+            TerminalLineMetadata {
+                wrap_continuation: true,
+                ..TerminalLineMetadata::default()
+            },
+        ];
+        let range = SelectionRange::new(
+            GridPoint { row: 0, column: 2 },
+            GridPoint { row: 2, column: 3 },
+        );
+
+        assert_eq!(
+            selected_text_with_metadata(&lines, &metadata, range),
+            "cdefghijklmno"
+        );
+    }
+
+    #[test]
+    fn keeps_newlines_between_hard_lines() {
+        let lines = [line("abcdef"), line("ghijkl"), line("mnopqr")];
+        let metadata = [
+            TerminalLineMetadata {
+                wrapped: true,
+                ..TerminalLineMetadata::default()
+            },
+            TerminalLineMetadata::default(),
+            TerminalLineMetadata {
+                wrap_continuation: true,
+                ..TerminalLineMetadata::default()
+            },
+        ];
+        let range = SelectionRange::new(
+            GridPoint { row: 0, column: 2 },
+            GridPoint { row: 2, column: 3 },
+        );
+
+        assert_eq!(
+            selected_text_with_metadata(&lines, &metadata, range),
+            "cdef\nghijkl\nmno"
+        );
     }
 
     #[test]
@@ -451,10 +604,22 @@ mod tests {
     }
 
     #[test]
-    fn text_range_search_ignores_empty_and_multiline_needles() {
+    fn finds_multiline_text_range_across_hard_lines() {
+        let lines = [line("prefix FIRST"), line("MIDDLE"), line("LAST suffix")];
+
+        assert_eq!(
+            find_text_range(&lines, "FIRST\nMIDDLE\nLAST"),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 7 },
+                GridPoint { row: 2, column: 4 },
+            ))
+        );
+    }
+
+    #[test]
+    fn text_range_search_ignores_empty_needles() {
         let lines = [line("first"), line("second")];
 
         assert_eq!(find_text_range(&lines, ""), None);
-        assert_eq!(find_text_range(&lines, "first\nsecond"), None);
     }
 }

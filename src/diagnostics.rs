@@ -7,7 +7,7 @@ use crate::interaction::{
 };
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderLine, Renderer};
-use crate::selection::{GridPoint, SelectionRange, selected_text};
+use crate::selection::{GridPoint, SelectionRange, selected_text_with_metadata};
 use crate::snapshot::{write_snapshot, write_workspace_render_snapshot};
 use crate::workspace::TerminalWorkspace;
 use crate::workspace_render::{WorkspaceRenderFrame, WorkspaceRenderLayout};
@@ -53,7 +53,9 @@ pub fn run_headless_scenario() -> std::io::Result<PathBuf> {
         &rendered.input_markup,
         &rendered.lines,
         &rendered.command_blocks,
-        selection.map(|selection| selected_text(&content.lines, selection)),
+        selection.map(|selection| {
+            selected_text_with_metadata(&content.lines, &content.line_metadata, selection)
+        }),
         selection,
     )?;
     Ok(path)
