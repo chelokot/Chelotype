@@ -327,6 +327,15 @@ if [[ -n "${app_pid:-}" ]]; then
   app_pid=""
 fi
 
+if [[ "$scenario" == "scroll-burst" ]] && grep -q $'^profile_scroll_burst_start\t' "$perf_trace" 2>/dev/null; then
+  filtered_perf_trace="$profile_root/perf-scroll-burst.tsv"
+  awk -F '\t' '
+    $1 == "profile_scroll_burst_start" { started = 1 }
+    started { print }
+  ' "$perf_trace" > "$filtered_perf_trace"
+  perf_trace="$filtered_perf_trace"
+fi
+
 summarize_duration() {
   local event="$1"
   awk -F '\t' -v event="$event" '

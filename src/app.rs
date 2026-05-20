@@ -4367,6 +4367,7 @@ fn configure_profile_scroll_burst(
         if available_lines == 0 {
             return glib::ControlFlow::Continue;
         }
+        crate::perf_trace::record_counter("profile_scroll_burst_start", attempts.get().into());
         let delta_px = f64::from(lines) * metrics.height;
         let mut scroll = smooth_scroll.borrow_mut();
         for _ in 0..8 {
