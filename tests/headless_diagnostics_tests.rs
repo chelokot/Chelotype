@@ -770,6 +770,84 @@ fn headless_mode_replays_backspace_and_arrow_cursor_actions() {
 
 #[test]
 #[serial]
+fn headless_mode_preserves_command_blocks_after_reflow_resize() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-command-block-reflow-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let target = "CMD_BLOCK_REFLOW_abcdefghijklmnopqrstuvwxyz";
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "resize:18x8|raw:printf $'\\033]133;A\\007PROMPT\\033]133;B\\007\\n\\033]133;C\\007CMD_BLOCK_REFLOW_abcdefghijklmnopqrstuvwxyz\\n\\033]133;D;0\\007\\033]133;A\\007NEXT\\n'\\n|wait:CMD_BLOCK_REFLOW_|resize:52x8",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "CMD_BLOCK_REFLOW_|NEXT")
+        .output()
+        .expect("run command-block reflow headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let render_dump = snapshot_file_ending_with(&paths, ".render.json");
+    let dump = serde_json::from_str::<serde_json::Value>(
+        &read_to_string(render_dump).expect("read render dump"),
+    )
+    .expect("valid render dump");
+    let lines = dump["lines"].as_array().expect("render lines");
+    let blocks = dump["command_blocks"]
+        .as_array()
+        .expect("command block array");
+    let output_block = blocks
+        .iter()
+        .find(|block| {
+            let output_start = block["prompt_end_row"].as_u64().map(|row| row + 1);
+            let end_row = block["end_row"].as_u64();
+            output_start.zip(end_row).is_some_and(|(start, end)| {
+                start <= end
+                    && lines
+                        .get(start as usize)
+                        .and_then(|line| line["text"].as_str())
+                        == Some(target)
+            })
+        })
+        .unwrap_or_else(|| panic!("no resized command block owns target output: {dump}"));
+
+    assert!(
+        output_block["prompt_end_row"]
+            .as_u64()
+            .expect("prompt end row")
+            < output_block["end_row"].as_u64().expect("block end row")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["text"].as_str() == Some(target))
+    );
+
+    let json_snapshot = snapshot_file_with_extension(&paths, "json");
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&read_to_string(json_snapshot).expect("read json snapshot"))
+            .expect("parse json snapshot");
+    assert_eq!(snapshot["cols"], 52);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_exports_unicode_and_style_cells_in_json() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-style-{}",
