@@ -537,7 +537,7 @@ fn draw_preedit(
 ) {
     let x = preedit.column.max(0) as f64 * cell_width;
     let y = preedit.line.max(0) as f64 * line_height;
-    let columns = preedit.text.chars().count().max(1);
+    let columns = preedit.columns.max(1);
     context.set_source_rgb(37.0 / 255.0, 41.0 / 255.0, 48.0 / 255.0);
     context.rectangle(x, y, columns as f64 * cell_width, line_height);
     let _ = context.fill();
@@ -561,18 +561,8 @@ fn draw_preedit(
     gtk::render_layout(&widget.style_context(), context, x, y, &layout);
 
     if render.cursor.visible {
-        let cursor_text = preedit
-            .text
-            .chars()
-            .take(preedit.cursor.min(preedit.text.chars().count()))
-            .collect::<String>();
-        let cursor_x = if cursor_text.is_empty() {
-            x
-        } else {
-            let cursor_layout = layout_for(widget, &markup_escape_text(&cursor_text));
-            let (width, _) = cursor_layout.pixel_size();
-            x + f64::from(width)
-        };
+        let cursor_x =
+            (preedit.column.max(0) as usize + preedit.cursor_columns) as f64 * cell_width;
         context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
         context.rectangle(cursor_x.round(), y.round(), 1.25, line_height);
         let _ = context.fill();
@@ -588,14 +578,6 @@ fn run_markup(run: &RenderRun) -> String {
     }
     span.push_str("</span>");
     span
-}
-
-fn markup_escape_text(text: &str) -> String {
-    let mut escaped = String::new();
-    for ch in text.chars() {
-        escaped.push_str(&markup_escape(ch));
-    }
-    escaped
 }
 
 fn push_style_markup(span: &mut String, style: &RenderStyle) {

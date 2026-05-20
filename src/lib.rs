@@ -22,6 +22,7 @@ pub mod smooth_scroll;
 pub mod snapshot;
 pub mod terminal_font;
 pub mod terminal_grid;
+pub mod text_width;
 pub mod workspace;
 pub mod workspace_render;
 

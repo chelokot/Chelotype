@@ -1644,6 +1644,8 @@ exit 1
         .collect::<Vec<_>>()
         .join("\n");
     assert!(render.contains("\"preedit\": {"));
+    assert!(render.contains("\"columns\":"));
+    assert!(render.contains("\"cursor_columns\":"));
     assert!(render.contains("\"preedit\": null"));
     assert!(render.contains("\"input_text\": \"❯ é\""));
 

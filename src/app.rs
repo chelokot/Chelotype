@@ -23,6 +23,7 @@ use crate::snapshot::{
 };
 use crate::terminal_font::metrics_for_widget;
 use crate::terminal_grid::TerminalSemanticPrompt;
+use crate::text_width::{display_columns, display_columns_until_char};
 use crate::workspace::{PaneId, TabId, TerminalWorkspace};
 use crate::workspace_render::{WorkspaceRenderFrame, WorkspaceRenderLayout};
 use adw::Application;
@@ -3112,6 +3113,8 @@ fn apply_preedit_to_render_frame(render: &mut RenderFrame, preedit: Option<&Pend
     render.preedit = preedit.map(|preedit| RenderPreedit {
         text: preedit.text.clone(),
         cursor: preedit.cursor,
+        columns: display_columns(&preedit.text).max(1),
+        cursor_columns: display_columns_until_char(&preedit.text, preedit.cursor),
         line: render.cursor.line,
         column: render.cursor.column,
     });
@@ -3477,6 +3480,61 @@ mod tests {
             command_block_output_text_at_rail(&content, metrics(), target, 3.0).as_deref(),
             Some("BLOCK_OUT_1\nBLOCK_OUT_2")
         );
+    }
+
+    #[test]
+    fn preedit_overlay_uses_terminal_grid_columns_for_wide_and_combining_text() {
+        let mut frame = Renderer::render_frame_with_selection(command_block_content(), None);
+        apply_preedit_to_render_frame(
+            &mut frame,
+            Some(&PendingPreedit {
+                text: "a中e\u{0301}".to_string(),
+                cursor: 2,
+            }),
+        );
+
+        let preedit = frame.preedit.expect("preedit render state");
+        assert_eq!(preedit.text, "a中e\u{0301}");
+        assert_eq!(preedit.cursor, 2);
+        assert_eq!(preedit.columns, 4);
+        assert_eq!(preedit.cursor_columns, 3);
+        assert_eq!(preedit.line, 3);
+        assert_eq!(preedit.column, 2);
+    }
+
+    #[test]
+    fn preedit_overlay_cursor_columns_do_not_advance_for_combining_mark() {
+        let mut frame = Renderer::render_frame_with_selection(command_block_content(), None);
+        let text = "a中e\u{0301}";
+
+        apply_preedit_to_render_frame(
+            &mut frame,
+            Some(&PendingPreedit {
+                text: text.to_string(),
+                cursor: 3,
+            }),
+        );
+        let before_combining = frame
+            .preedit
+            .as_ref()
+            .expect("preedit before combining")
+            .cursor_columns;
+
+        apply_preedit_to_render_frame(
+            &mut frame,
+            Some(&PendingPreedit {
+                text: text.to_string(),
+                cursor: 4,
+            }),
+        );
+        let after_combining = frame
+            .preedit
+            .as_ref()
+            .expect("preedit after combining")
+            .cursor_columns;
+
+        assert_eq!(before_combining, 4);
+        assert_eq!(after_combining, 4);
     }
 
     #[test]

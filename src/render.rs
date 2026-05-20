@@ -17,6 +17,8 @@ pub struct RenderCursor {
 pub struct RenderPreedit {
     pub text: String,
     pub cursor: usize,
+    pub columns: usize,
+    pub cursor_columns: usize,
     pub line: i32,
     pub column: i32,
 }
