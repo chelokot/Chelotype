@@ -1,6 +1,7 @@
 use crate::backend::{MouseMode, RenderableContentOwned, ScreenSize};
 use crate::canvas::TerminalCanvas;
 use crate::cell_text::lines_to_text;
+use crate::command_blocks::command_blocks;
 use crate::containers::{LaunchTarget, available_launch_targets};
 use crate::input::{CursorDirection, CursorUnit, KeyAction, key_to_action};
 use crate::input_selection::{
@@ -15,7 +16,7 @@ use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderFrame, RenderPreedit, Renderer};
 use crate::selection::{
     GridPoint, SelectionRange, anchor_range_to_display, find_text_range, line_range,
-    selected_text_with_metadata, viewport_range_for_display, word_range_at,
+    line_significant_len, selected_text_with_metadata, viewport_range_for_display, word_range_at,
 };
 use crate::snapshot::{
     write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
@@ -532,6 +533,24 @@ fn build_ui(app: &Application) {
                 if button == MouseButton::Right && !current_mode.sends_press_release() {
                     left_pointer_down.set(false);
                     show_canvas_context_menu(&canvas_widget, x, y, context_menu.clone());
+                    let _ = pointer_interaction.borrow_mut().cancel();
+                    return;
+                }
+                if button == MouseButton::Left
+                    && !current_mode.sends_press_release()
+                    && let Some(content) = content.borrow().clone()
+                    && let Some(range) =
+                        command_block_output_selection_at_rail(&content, metrics.get(), target, x)
+                {
+                    set_viewport_selection(
+                        &content,
+                        range,
+                        &selection,
+                        &selection_text,
+                        &selection_dirty,
+                        &keyboard_selection,
+                    );
+                    drag_gesture_moved.set(true);
                     let _ = pointer_interaction.borrow_mut().cancel();
                     return;
                 }
@@ -2404,6 +2423,47 @@ fn select_mouse_click_range(
     true
 }
 
+fn command_block_output_selection_at_rail(
+    content: &RenderableContentOwned,
+    metrics: Option<CellMetrics>,
+    target: PointerPanePosition,
+    x: f64,
+) -> Option<SelectionRange> {
+    let metrics = metrics?;
+    if metrics.width <= 0.0 || target.position.column != 0 {
+        return None;
+    }
+    let origin_col = target.pane.map(|pane| pane.origin_col).unwrap_or(0);
+    let local_x = x - origin_col as f64 * metrics.width;
+    if !(0.0..=(metrics.width * 0.55)).contains(&local_x) {
+        return None;
+    }
+    let row = usize::from(target.position.row);
+    command_blocks(content)
+        .into_iter()
+        .find(|block| row >= block.prompt_start_row && row <= block.end_row)
+        .and_then(|block| {
+            let output_start = block.output_start_row()?;
+            let output_end = (output_start..=block.end_row).rev().find(|row| {
+                content
+                    .lines
+                    .get(*row)
+                    .is_some_and(|line| line_significant_len(line) > 0)
+            })?;
+            let end_column = line_significant_len(content.lines.get(output_end)?);
+            (end_column > 0).then_some(SelectionRange::new(
+                GridPoint {
+                    row: output_start,
+                    column: 0,
+                },
+                GridPoint {
+                    row: output_end,
+                    column: end_column,
+                },
+            ))
+        })
+}
+
 fn set_viewport_selection(
     content: &RenderableContentOwned,
     range: SelectionRange,
@@ -3283,6 +3343,78 @@ mod tests {
             origin_col,
             cols,
         }
+    }
+
+    fn line(text: &str) -> Vec<crate::terminal_grid::TerminalCell> {
+        text.chars()
+            .map(|ch| crate::terminal_grid::TerminalCell {
+                text: ch.to_string(),
+                ..crate::terminal_grid::TerminalCell::blank()
+            })
+            .collect()
+    }
+
+    fn command_block_content() -> RenderableContentOwned {
+        use crate::terminal_grid::{
+            MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
+        };
+        TerminalContent {
+            lines: vec![
+                line("❯ printf block"),
+                line("BLOCK_OUT_1"),
+                line("BLOCK_OUT_2"),
+                line("❯ "),
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata::default(),
+                TerminalLineMetadata::default(),
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+            ],
+            cursor_line: 3,
+            cursor_col: 2,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        }
+    }
+
+    #[test]
+    fn command_block_rail_click_selects_block_output() {
+        let content = command_block_content();
+        let target = PointerPanePosition {
+            pane: None,
+            position: MouseGridPosition { row: 1, column: 0 },
+        };
+
+        assert_eq!(
+            command_block_output_selection_at_rail(&content, metrics(), target, 3.0),
+            Some(SelectionRange::new(
+                GridPoint { row: 1, column: 0 },
+                GridPoint { row: 2, column: 11 },
+            ))
+        );
+    }
+
+    #[test]
+    fn command_block_rail_click_ignores_text_cell_body() {
+        let content = command_block_content();
+        let target = PointerPanePosition {
+            pane: None,
+            position: MouseGridPosition { row: 1, column: 0 },
+        };
+
+        assert_eq!(
+            command_block_output_selection_at_rail(&content, metrics(), target, 8.0),
+            None
+        );
     }
 
     #[test]

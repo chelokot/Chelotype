@@ -718,13 +718,18 @@ fn gtk_e2e_renders_osc133_command_block_rail_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let screenshot = dir.join("window.png");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 screenshot="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+clipboard_trace="$4"
+geometry_trace="$5"
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -741,7 +746,7 @@ if [ -z "$window_id" ]; then
 fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
-xdotool type --window "$window_id" --delay 2 "printf '\033]133;A\007CB_PROMPT\n\033]133;B\007CB_OUTPUT\nCB_DONE\n'"
+xdotool type --window "$window_id" --delay 2 "printf '\033]133;A\007CB_PROMPT\033]133;B\007\n\033]133;C\007CB_OUTPUT\nCB_DONE\n\033]133;D;0\007\033]133;A\007NEXT_PROMPT\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
     if grep -R 'CB_DONE' "$snapshot_dir" >/dev/null 2>&1 && grep -R '"command_blocks": \\[' "$snapshot_dir"/*.render.json >/dev/null 2>&1; then
@@ -759,6 +764,39 @@ if ! grep -R '"prompt_start_row"' "$snapshot_dir"/*.render.json >/dev/null 2>&1;
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
+latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
+marker_row="$(grep -n '^CB_OUTPUT' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+if [ -z "$marker_row" ] || [ "$marker_row" -lt 0 ] || [ ! -f "$geometry_trace" ]; then
+    echo "could not locate command block output row" >&2
+    [ -n "$latest_txt" ] && cat "$latest_txt" >&2
+    exit 1
+fi
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+rail_x="$(awk -v canvas_x="$canvas_x" 'BEGIN { printf "%d", canvas_x + 6 }')"
+rail_y="$(awk -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", canvas_y + ((row + 0.5) * line) }')"
+echo "command block rail click window=$window_id row=$marker_row at=$rail_x,$rail_y" >&2
+xdotool windowfocus "$window_id" || true
+xdotool mousemove --sync --window "$window_id" "$rail_x" "$rail_y"
+sleep 0.08
+xdotool mousedown 1
+sleep 0.08
+xdotool mouseup 1
+for _ in {1..100}; do
+    if grep -F 'primary	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1 && grep -R '"selected_text": "CB_OUTPUT\nCB_DONE"' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -F 'primary	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "command block rail click did not select output" >&2
+    cat "$clipboard_trace" >&2 || true
+    grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+    cat /tmp/chelotype.log >&2 || true
+    exit 1
+fi
 import -window "$window_id" "$screenshot"
 "#;
 
@@ -774,6 +812,8 @@ import -window "$window_id" "$screenshot"
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             screenshot.to_str().expect("screenshot path utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk command block e2e under xvfb");
@@ -791,6 +831,12 @@ import -window "$window_id" "$screenshot"
     assert!(
         rail_pixels > 20,
         "expected visible command block rail pixels, found {rail_pixels}"
+    );
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(
+        trace
+            .lines()
+            .any(|line| line == "primary\tCB_OUTPUT\\nCB_DONE")
     );
 
     let _ = std::fs::remove_dir_all(&dir);
