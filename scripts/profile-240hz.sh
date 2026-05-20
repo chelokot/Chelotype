@@ -13,7 +13,7 @@ target_refresh_millihz=240000
 
 usage() {
   cat <<'EOF'
-Usage: scripts/profile-240hz.sh [--scenario held-key|scroll|scroll-burst|idle|frame-baseline] [--display-backend x11|weston-headless|native-wayland] [--duration seconds] [--release] [--strict] [--allow-live]
+Usage: scripts/profile-240hz.sh [--scenario held-key|scroll|scroll-burst|idle|frame-baseline|timer-baseline] [--display-backend x11|weston-headless|native-wayland] [--duration seconds] [--release] [--strict] [--allow-live]
 
 Runs the GTK app with CHELOTYPE_PERF_TRACE enabled and prints frame timing
 percentiles. Run the x11 backend under xvfb-run for nested automation. The
@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$scenario" in
-  held-key|scroll|scroll-burst|idle|frame-baseline) ;;
+  held-key|scroll|scroll-burst|idle|frame-baseline|timer-baseline) ;;
   *)
     echo "unknown scenario: $scenario" >&2
     exit 2
@@ -96,7 +96,7 @@ elif [[ "$display_backend" == "weston-headless" ]]; then
     exit 2
   fi
   case "$scenario" in
-    idle|scroll-burst|frame-baseline) ;;
+    idle|scroll-burst|frame-baseline|timer-baseline) ;;
     *)
       echo "weston-headless currently supports idle and scroll-burst scenarios" >&2
       exit 2
@@ -108,7 +108,7 @@ else
     exit 2
   fi
   case "$scenario" in
-    idle|scroll-burst|frame-baseline) ;;
+    idle|scroll-burst|frame-baseline|timer-baseline) ;;
     *)
       echo "native-wayland currently supports idle and scroll-burst scenarios" >&2
       exit 2
@@ -194,6 +194,9 @@ EOF
   if [[ "$scenario" == "frame-baseline" ]]; then
     app_env+=("CHELOTYPE_PROFILE_FRAME_BASELINE=1")
   fi
+  if [[ "$scenario" == "timer-baseline" ]]; then
+    app_env+=("CHELOTYPE_PROFILE_TIMER_BASELINE=1")
+  fi
 elif [[ "$display_backend" == "native-wayland" ]]; then
   app_env+=(
     "GDK_BACKEND=wayland"
@@ -204,6 +207,9 @@ elif [[ "$display_backend" == "native-wayland" ]]; then
   fi
   if [[ "$scenario" == "frame-baseline" ]]; then
     app_env+=("CHELOTYPE_PROFILE_FRAME_BASELINE=1")
+  fi
+  if [[ "$scenario" == "timer-baseline" ]]; then
+    app_env+=("CHELOTYPE_PROFILE_TIMER_BASELINE=1")
   fi
 else
   app_env+=("GDK_BACKEND=${GDK_BACKEND:-x11}")
@@ -300,6 +306,11 @@ case "$scenario" in
     sleep "$duration_seconds"
     ;;
   frame-baseline)
+    : > "$perf_trace"
+    : > "$scroll_trace"
+    sleep "$duration_seconds"
+    ;;
+  timer-baseline)
     : > "$perf_trace"
     : > "$scroll_trace"
     sleep "$duration_seconds"
@@ -405,6 +416,7 @@ summarize_duration gtk_snapshot_dirty
 summarize_duration gtk_snapshot_forced
 summarize_duration gdk_refresh_interval
 summarize_duration gdk_next_presentation_delta
+summarize_duration glib_timeout_interval
 summarize_duration gtk_paint
 summarize_duration gtk_render
 summarize_duration input_to_render

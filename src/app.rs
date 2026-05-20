@@ -1262,6 +1262,25 @@ fn build_ui(app: &Application) {
         .ok()
         .as_deref()
         == Some("1");
+    let profile_timer_baseline = std::env::var("CHELOTYPE_PROFILE_TIMER_BASELINE")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if profile_timer_baseline {
+        let timer_canvas = canvas.clone();
+        let last_timer_tick = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+        glib::timeout_add_local(crate::frame_timing::TARGET_FRAME_DURATION, move || {
+            let now = std::time::Instant::now();
+            if let Some(previous) = last_timer_tick.replace(Some(now)) {
+                crate::perf_trace::record_duration(
+                    "glib_timeout_interval",
+                    now.duration_since(previous),
+                );
+            }
+            timer_canvas.widget().queue_draw();
+            glib::ControlFlow::Continue
+        });
+    }
     let tick_canvas = canvas.clone();
     canvas.widget().add_tick_callback(move |_, frame_clock| {
         let tick_wall_started = std::time::Instant::now();
@@ -1282,10 +1301,12 @@ fn build_ui(app: &Application) {
             crate::perf_trace::record_duration("gtk_frame_interval", elapsed_frame);
         }
         record_frame_clock_diagnostics(tick_canvas.widget(), frame_clock, tick_started);
-        if profile_frame_baseline {
+        if profile_frame_baseline || profile_timer_baseline {
             tick_canvas.widget().queue_draw();
-            frame_clock.request_phase(gtk::gdk::FrameClockPhase::UPDATE);
-            frame_clock.request_phase(gtk::gdk::FrameClockPhase::PAINT);
+            if profile_frame_baseline {
+                frame_clock.request_phase(gtk::gdk::FrameClockPhase::UPDATE);
+                frame_clock.request_phase(gtk::gdk::FrameClockPhase::PAINT);
+            }
             record_tick_work(tick_wall_started);
             return glib::ControlFlow::Continue;
         }
