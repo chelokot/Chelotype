@@ -319,6 +319,12 @@ case "$scenario" in
 esac
 fi
 
+if [[ -n "${app_pid:-}" ]]; then
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  app_pid=""
+fi
+
 summarize_duration() {
   local event="$1"
   awk -F '\t' -v event="$event" '
@@ -399,6 +405,31 @@ summarize_refresh_gate() {
   ' "$perf_trace"
 }
 
+summarize_frame_buckets() {
+  awk -F '\t' -v frame_budget_us="$frame_budget_us" '
+    function add_bucket(value) {
+      if (value <= frame_budget_us * 1.25) {
+        one++
+      } else if (value <= frame_budget_us * 2.25) {
+        two++
+      } else if (value <= frame_budget_us * 3.25) {
+        three++
+      } else {
+        longer++
+      }
+      count++
+    }
+    $1 == "gtk_frame_interval" { add_bucket($2) }
+    END {
+      if (count == 0) {
+        printf "%-24s count=0\n", "frame_buckets"
+        exit
+      }
+      printf "%-24s count=%-5d <=1x=%-5d <=2x=%-5d <=3x=%-5d >3x=%-5d\n", "frame_buckets", count, one, two, three, longer
+    }
+  ' "$perf_trace"
+}
+
 echo "profile root: $profile_root"
 profile_mode="$([[ "$release" -eq 1 ]] && echo release || echo debug)"
 if [[ "$display_backend" == "weston-headless" ]]; then
@@ -408,6 +439,7 @@ else
 fi
 echo
 summarize_refresh_gate
+summarize_frame_buckets
 summarize_duration gtk_frame_interval
 summarize_duration gtk_tick_wall_interval
 summarize_duration gtk_tick_work
