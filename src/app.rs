@@ -1258,6 +1258,8 @@ fn build_ui(app: &Application) {
     let app_for_tick = app.clone();
     let last_frame_tick = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
     let last_wall_tick = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+    let last_completed_frame_timing = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
+    let last_presentation_time = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
     let profile_frame_baseline = std::env::var("CHELOTYPE_PROFILE_FRAME_BASELINE")
         .ok()
         .as_deref()
@@ -1287,6 +1289,8 @@ fn build_ui(app: &Application) {
         });
     }
     let tick_canvas = canvas.clone();
+    let tick_last_completed_frame_timing = last_completed_frame_timing.clone();
+    let tick_last_presentation_time = last_presentation_time.clone();
     canvas.widget().add_tick_callback(move |_, frame_clock| {
         let tick_wall_started = std::time::Instant::now();
         if profile_updating_baseline && !started_frame_updating.replace(true) {
@@ -1312,7 +1316,13 @@ fn build_ui(app: &Application) {
         if let Some(elapsed_frame) = elapsed_frame {
             crate::perf_trace::record_duration("gtk_frame_interval", elapsed_frame);
         }
-        record_frame_clock_diagnostics(tick_canvas.widget(), frame_clock, tick_started);
+        record_frame_clock_diagnostics(
+            tick_canvas.widget(),
+            frame_clock,
+            tick_started,
+            &tick_last_completed_frame_timing,
+            &tick_last_presentation_time,
+        );
         if profile_frame_baseline || profile_timer_baseline || profile_updating_baseline {
             tick_canvas.widget().queue_draw();
             if profile_frame_baseline {
@@ -4454,6 +4464,8 @@ fn record_frame_clock_diagnostics(
     widget: &gtk::DrawingArea,
     frame_clock: &gtk::gdk::FrameClock,
     frame_time: i64,
+    last_completed_frame_timing: &std::cell::Cell<Option<i64>>,
+    last_presentation_time: &std::cell::Cell<Option<i64>>,
 ) {
     if !crate::perf_trace::enabled() {
         return;
@@ -4483,6 +4495,60 @@ fn record_frame_clock_diagnostics(
         .filter(|refresh_rate| *refresh_rate > 0)
     {
         crate::perf_trace::record_counter("gdk_monitor_refresh_millihz", refresh_rate as u64);
+    }
+    let current_counter = frame_clock.frame_counter();
+    let first_counter = last_completed_frame_timing
+        .get()
+        .map_or_else(|| frame_clock.history_start(), |counter| counter + 1)
+        .max(frame_clock.history_start());
+    for counter in first_counter..=current_counter {
+        let Some(timing) = frame_clock.timings(counter) else {
+            continue;
+        };
+        if !timing.is_complete() {
+            break;
+        }
+        last_completed_frame_timing.set(Some(timing.frame_counter()));
+        let timing_frame_time = timing.frame_time();
+        let timing_refresh_interval = timing.refresh_interval();
+        let predicted_presentation_time = timing.predicted_presentation_time();
+        let actual_presentation_time = timing.presentation_time();
+        if timing_refresh_interval > 0 {
+            crate::perf_trace::record_duration(
+                "gdk_timings_refresh_interval",
+                std::time::Duration::from_micros(timing_refresh_interval as u64),
+            );
+        }
+        if actual_presentation_time > 0 {
+            crate::perf_trace::record_duration(
+                "gdk_timings_frame_to_presentation",
+                std::time::Duration::from_micros(
+                    actual_presentation_time.abs_diff(timing_frame_time),
+                ),
+            );
+        }
+        if actual_presentation_time > 0 && predicted_presentation_time > 0 {
+            crate::perf_trace::record_duration(
+                "gdk_timings_presentation_error",
+                std::time::Duration::from_micros(
+                    actual_presentation_time.abs_diff(predicted_presentation_time),
+                ),
+            );
+        }
+        if actual_presentation_time > 0 {
+            if let Some(previous_presentation_time) =
+                last_presentation_time.replace(Some(actual_presentation_time))
+                && actual_presentation_time >= previous_presentation_time
+            {
+                crate::perf_trace::record_duration(
+                    "gdk_timings_presentation_interval",
+                    std::time::Duration::from_micros(
+                        (actual_presentation_time - previous_presentation_time) as u64,
+                    ),
+                );
+            }
+            crate::perf_trace::record_counter("gdk_timings_complete", 1);
+        }
     }
 }
 

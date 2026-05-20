@@ -360,6 +360,9 @@ summarize_duration() {
       if (event == "gtk_frame_interval" || event == "gtk_tick_wall_interval" || event == "gtk_paint_interval") {
         fps = p50 > 0 ? 1000000 / p50 : 0
         printf "%-24s count=%-5d p50=%7dus fps=%6.1f p95=%7dus p99=%7dus max=%7dus\n", event, count, p50, fps, p95, p99, max
+      } else if (event == "gdk_timings_presentation_interval") {
+        fps = p50 > 0 ? 1000000 / p50 : 0
+        printf "%-24s count=%-5d p50=%7dus fps=%6.1f p95=%7dus p99=%7dus max=%7dus\n", event, count, p50, fps, p95, p99, max
       } else {
         printf "%-24s count=%-5d p50=%7dus p95=%7dus p99=%7dus max=%7dus\n", event, count, p50, p95, p99, max
       }
@@ -478,6 +481,10 @@ summarize_duration gtk_snapshot_dirty
 summarize_duration gtk_snapshot_forced
 summarize_duration gdk_refresh_interval
 summarize_duration gdk_next_presentation_delta
+summarize_duration gdk_timings_refresh_interval
+summarize_duration gdk_timings_frame_to_presentation
+summarize_duration gdk_timings_presentation_error
+summarize_duration gdk_timings_presentation_interval
 summarize_duration glib_timeout_interval
 summarize_duration gtk_paint
 summarize_duration gtk_render
@@ -487,6 +494,7 @@ summarize_counter gdk_frame_clock_fps_millihz
 summarize_counter gdk_monitor_refresh_millihz
 summarize_counter gdk_frame_clock_begin_updating
 summarize_counter gdk_frame_clock_updating_active
+summarize_counter gdk_timings_complete
 summarize_counter gtk_render_allocs
 summarize_counter gtk_render_alloc_bytes
 summarize_counter gtk_paint_rows
