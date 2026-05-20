@@ -734,6 +734,50 @@ fn headless_mode_replays_scroll_event() {
 
 #[test]
 #[serial]
+fn headless_mode_replays_non_latin_key_events_through_input_mapping() {
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-headless-non-latin-key-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
+        .env("CHELOTYPE_HEADLESS", "1")
+        .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+        .env(
+            "CHELOTYPE_HEADLESS_EVENTS",
+            "raw:read value\\n|key:я|key:Enter|raw:printf 'NON_LATIN_KEY=%s\\n' \"$value\"\\n",
+        )
+        .env("CHELOTYPE_HEADLESS_EXPECT", "NON_LATIN_KEY=я")
+        .output()
+        .expect("run non-latin key headless binary");
+    assert!(
+        output.status.success(),
+        "headless failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("WARNING"), "{stderr}");
+    assert!(!stderr.contains("Gtk-WARNING"), "{stderr}");
+    assert!(!stderr.contains("error:"), "{stderr}");
+
+    let paths = snapshot_paths(&dir);
+    let text_snapshot = snapshot_file_with_extension(&paths, "txt");
+    let text = read_to_string(text_snapshot).expect("read text snapshot");
+    assert!(text.contains("NON_LATIN_KEY=я"), "{text}");
+
+    let render_dump = snapshot_file_ending_with(&paths, ".render.json");
+    let json = read_to_string(render_dump).expect("read render dump");
+    assert!(json.contains("\"text\": \"я\""), "{json}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn headless_mode_replays_backspace_and_arrow_cursor_actions() {
     let dir = std::env::temp_dir().join(format!(
         "chelotype-headless-editing-{}",
