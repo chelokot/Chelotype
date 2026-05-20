@@ -4345,6 +4345,185 @@ exit 1
 
 #[test]
 #[serial]
+fn gtk_e2e_keeps_selection_anchored_during_smooth_wheel_scroll_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!(
+            "skipping gtk smooth-scroll selection e2e because xvfb-run or xdotool is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-selection-smooth-scroll-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let geometry_trace = dir.join("geometry.env");
+    let scroll_trace = dir.join("scroll.tsv");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+geometry_trace="$3"
+scroll_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+snapshot_count() {
+    find "$snapshot_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l
+}
+latest_snapshot() {
+    local extension="$1"
+    find "$snapshot_dir" -maxdepth 1 -name "*.$extension" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n 1 | sed 's/^[^ ]* //'
+}
+xdotool type --window "$window_id" --delay 1 "python3 -c \"for i in range(1, 80): print(f'SMOOTH_FILL_{i:02d}'); print('SMOOTH_SELECTION_TARGET')\""
+xdotool key --window "$window_id" Return
+for _ in {1..140}; do
+    if grep -R '^SMOOTH_SELECTION_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '^SMOOTH_SELECTION_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "smooth-scroll selection target never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+latest_txt="$(latest_snapshot txt)"
+marker_row="$(grep -n '^SMOOTH_SELECTION_TARGET' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$((marker_row - 1))"
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (1.0 * cell) }')"
+end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (25.5 * cell) }')"
+target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+xdotool mousemove "$start_x" "$target_y"
+xdotool mousedown 1
+sleep 0.06
+xdotool mousemove "$end_x" "$target_y"
+sleep 0.06
+xdotool mouseup 1
+for _ in {1..100}; do
+    if grep -R '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -R '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+    echo "initial smooth-scroll target selection was not captured" >&2
+    grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+    exit 1
+fi
+mouse_x="$((X + WIDTH / 2))"
+mouse_y="$((Y + HEIGHT / 2))"
+xdotool mousemove "$mouse_x" "$mouse_y"
+before_count="$(snapshot_count)"
+for _ in {1..12}; do
+    xdotool click 4 || true
+done
+for _ in {1..160}; do
+    after_count="$(snapshot_count)"
+    positive_steps="$(awk -F '\t' '$1 == "step" && $2 == "1" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
+    if [ "$after_count" -gt "$before_count" ] && [ "$positive_steps" -ge 12 ]; then
+        break
+    fi
+    sleep 0.05
+done
+latest_json="$(latest_snapshot json)"
+if grep -F '"selected_text": ' "$latest_json" >/dev/null 2>&1 && ! grep -F '"selected_text": null' "$latest_json" >/dev/null 2>&1 && ! grep -F '"selected_text": "SMOOTH_SELECTION_TARGET' "$latest_json" >/dev/null 2>&1; then
+    echo "smooth wheel scroll moved selection onto different visible text" >&2
+    grep -F '"selected_text": ' "$latest_json" >&2 || true
+    cat "$scroll_trace" >&2 || true
+    exit 1
+fi
+before_count="$(snapshot_count)"
+for _ in {1..12}; do
+    xdotool click 5 || true
+done
+for _ in {1..180}; do
+    after_count="$(snapshot_count)"
+    negative_steps="$(awk -F '\t' '$1 == "step" && $2 == "-1" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
+    if [ "$after_count" -gt "$before_count" ] && [ "$negative_steps" -ge 12 ] && grep -R '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.05
+done
+echo "smooth wheel scroll did not reattach selection to original text" >&2
+grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+cat "$scroll_trace" >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-selection-smooth-scroll-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+            scroll_trace.to_str().expect("scroll trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk smooth-scroll selection e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk smooth-scroll selection e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&scroll_trace).expect("read smooth-scroll selection trace");
+    assert!(
+        trace
+            .lines()
+            .filter(|line| line.starts_with("step\t1\t"))
+            .count()
+            >= 12,
+        "{trace}"
+    );
+    assert!(
+        trace
+            .lines()
+            .filter(|line| line.starts_with("step\t-1\t"))
+            .count()
+            >= 12,
+        "{trace}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_copies_selection_to_clipboard_with_ctrl_shift_c_under_xvfb() {
     gtk_e2e_copies_selection_to_clipboard_with_shortcut_under_xvfb(
         "ctrl+shift+c",
