@@ -12,11 +12,14 @@ pub enum CursorShape {
     Block,
 }
 
-pub const DEFAULT_CURSOR_ANIMATION_DURATION_MS: u32 = 150;
+pub const DEFAULT_CURSOR_ANIMATION_DURATION_MS: u32 = 100;
 pub const DEFAULT_NEOVIDE_TRAIL_SIZE: f64 = 0.65;
-pub const DEFAULT_SMEAR_STIFFNESS: f64 = 0.78;
-pub const DEFAULT_SMEAR_TRAILING_STIFFNESS: f64 = 0.62;
-pub const DEFAULT_SMEAR_DAMPING: f64 = 0.92;
+pub const DEFAULT_SMEAR_STIFFNESS: f64 = 0.6;
+pub const DEFAULT_SMEAR_TRAILING_STIFFNESS: f64 = 0.45;
+pub const DEFAULT_SMEAR_DAMPING: f64 = 0.85;
+pub const DEFAULT_SMEAR_ANTICIPATION: f64 = 0.2;
+pub const DEFAULT_SMEAR_TRAILING_EXPONENT: f64 = 3.0;
+pub const DEFAULT_SMEAR_MAX_LENGTH: f64 = 25.0;
 pub const DEFAULT_SMOOTH_SCROLLING: bool = true;
 
 impl CursorStyle {
@@ -204,6 +207,33 @@ pub fn cursor_smear_trailing_stiffness() -> f64 {
 
 pub fn cursor_smear_damping() -> f64 {
     read_f64("cursor_smear_damping", DEFAULT_SMEAR_DAMPING, 0.0, 0.99)
+}
+
+pub fn cursor_smear_anticipation() -> f64 {
+    read_f64(
+        "cursor_smear_anticipation",
+        DEFAULT_SMEAR_ANTICIPATION,
+        0.0,
+        2.0,
+    )
+}
+
+pub fn cursor_smear_trailing_exponent() -> f64 {
+    read_f64(
+        "cursor_smear_trailing_exponent",
+        DEFAULT_SMEAR_TRAILING_EXPONENT,
+        0.1,
+        8.0,
+    )
+}
+
+pub fn cursor_smear_max_length() -> f64 {
+    read_f64(
+        "cursor_smear_max_length",
+        DEFAULT_SMEAR_MAX_LENGTH,
+        1.0,
+        80.0,
+    )
 }
 
 fn read_u32(key: &str, default: u32, min: u32, max: u32) -> u32 {
