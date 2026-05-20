@@ -898,6 +898,174 @@ import -window "$window_id" "$screenshot"
 
 #[test]
 #[serial]
+fn gtk_e2e_command_block_rail_selection_survives_resize_reflow_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") || !has_command("python3") {
+        eprintln!(
+            "skipping gtk command block reflow e2e because xvfb-run, xdotool, or python3 is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-command-block-reflow-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let geometry_trace = dir.join("geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+geometry_trace="$4"
+expected='CB_WRAP_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_tail'
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+render_snapshot_count() {
+    find "$snapshot_dir" -maxdepth 1 -name '*.render.json' 2>/dev/null | wc -l
+}
+wait_latest_contains_wrapped_output() {
+    for _ in {1..140}; do
+        latest="$(latest_txt || true)"
+        if [ -n "$latest" ] && grep -F 'CB_WRAP_' "$latest" >/dev/null 2>&1 && grep -F '0123456789_tail' "$latest" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text did not contain wrapped command block output" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 1 "printf '\033]133;A\007CB_PROMPT\033]133;B\007\n\033]133;C\007CB_WRAP_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_tail\n\033]133;D;0\007\033]133;A\007NEXT_PROMPT\n'"
+xdotool key --window "$window_id" Return
+wait_latest_contains_wrapped_output
+before_resize_render_count="$(render_snapshot_count)"
+xdotool windowsize "$window_id" 520 420
+for _ in {1..140}; do
+    latest="$(latest_txt || true)"
+    render_count="$(render_snapshot_count)"
+    if [ "$render_count" -gt "$before_resize_render_count" ] && [ -n "$latest" ] && grep -F 'CB_WRAP_' "$latest" >/dev/null 2>&1 && grep -F '0123456789_tail' "$latest" >/dev/null 2>&1 && grep -R '"prompt_start_row"' "$snapshot_dir"/*.render.json >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if [ "$(render_snapshot_count)" -le "$before_resize_render_count" ]; then
+    echo "resize did not produce a fresh render snapshot" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+latest="$(latest_txt || true)"
+if [ -z "$latest" ] || ! grep -F 'CB_WRAP_' "$latest" >/dev/null 2>&1 || ! grep -F '0123456789_tail' "$latest" >/dev/null 2>&1; then
+    echo "resized command block output never appeared" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    [ -n "$latest" ] && cat "$latest" >&2
+    exit 1
+fi
+marker_row="$(python3 - "$snapshot_dir" <<'PY'
+import glob
+import json
+import os
+import sys
+
+paths = glob.glob(os.path.join(sys.argv[1], "*.render.json"))
+latest = max(paths, key=os.path.getmtime)
+with open(latest, encoding="utf-8") as handle:
+    frame = json.load(handle)
+for line in frame["lines"]:
+    if line["text"].startswith("CB_WRAP_"):
+        print(line["row"])
+        break
+PY
+)"
+if [ -z "$marker_row" ] || [ "$marker_row" -lt 0 ]; then
+    echo "could not locate resized command block output row" >&2
+    cat "$latest" >&2
+    exit 1
+fi
+canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+rail_root_x="$(awk -v left="$X" -v canvas_x="$canvas_x" 'BEGIN { printf "%d", left + canvas_x + 6 }')"
+rail_root_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+xdotool mousemove "$rail_root_x" "$rail_root_y"
+xdotool click 1
+for _ in {1..120}; do
+    if grep -Fx "primary	$expected" "$clipboard_trace" >/dev/null 2>&1 && grep -R "\"selected_text\": \"$expected\"" "$snapshot_dir" >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.05
+done
+echo "resized command block rail click did not select reflowed output" >&2
+echo "rail=$rail_root_x,$rail_root_y row=$marker_row" >&2
+cat "$clipboard_trace" >&2 || true
+grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+cat "$latest" >&2 || true
+exit 1
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-command-block-reflow-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk command block reflow e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk command block reflow e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(
+        trace.lines().any(|line| line
+            == "primary\tCB_WRAP_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_tail"),
+        "reflowed command block output was not selected: {trace}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_keeps_colored_text_on_fixed_grid_across_spaces_under_xvfb() {
     if !has_command("xvfb-run")
         || !has_command("xdotool")
