@@ -1741,8 +1741,14 @@ wait_latest_text '❯ é'
 #[test]
 #[serial]
 fn gtk_e2e_renders_im_preedit_before_commit_under_xvfb() {
-    if !has_command("xvfb-run") || !has_command("xdotool") {
-        eprintln!("skipping gtk IM preedit e2e because xvfb-run or xdotool is not installed");
+    if !has_command("xvfb-run")
+        || !has_command("xdotool")
+        || !has_command("import")
+        || !has_command("convert")
+    {
+        eprintln!(
+            "skipping gtk IM preedit e2e because xvfb-run, xdotool, import, or convert is not installed"
+        );
         return;
     }
 
@@ -1754,12 +1760,16 @@ fn gtk_e2e_renders_im_preedit_before_commit_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let preedit_screenshot = dir.join("preedit.png");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+preedit_screenshot="$3"
+geometry_trace="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -1814,6 +1824,7 @@ xdotool key --window "$window_id" Multi_key
 sleep 0.15
 xdotool key --window "$window_id" apostrophe
 wait_preedit
+import -window "$window_id" "$preedit_screenshot"
 xdotool key --window "$window_id" e
 wait_latest_text '❯ é'
 for _ in {1..100}; do
@@ -1840,6 +1851,10 @@ exit 1
             "chelotype-gtk-im-preedit-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            preedit_screenshot
+                .to_str()
+                .expect("preedit screenshot path utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk IM preedit e2e under xvfb");
@@ -1867,6 +1882,41 @@ exit 1
     assert!(render.contains("\"cursor_columns\":"));
     assert!(render.contains("\"preedit\": null"));
     assert!(render.contains("\"input_text\": \"❯ é\""));
+    let preedit_snapshot = json_snapshots(&dir)
+        .into_iter()
+        .find(|snapshot| snapshot["preedit"].is_object())
+        .expect("preedit render-state snapshot");
+    let preedit = &preedit_snapshot["preedit"];
+    let line = preedit["line"].as_f64().expect("numeric preedit line");
+    let column = preedit["column"].as_f64().expect("numeric preedit column");
+    let columns = preedit["columns"]
+        .as_f64()
+        .expect("numeric preedit columns");
+    let expected_x = geometry_metric(&geometry_trace, "canvas_x")
+        + column * geometry_metric(&geometry_trace, "cell_width");
+    let expected_y = geometry_metric(&geometry_trace, "canvas_y")
+        + line * geometry_metric(&geometry_trace, "line_height");
+    let expected_width = columns * geometry_metric(&geometry_trace, "cell_width");
+    let preedit_background = pixel_bounds(&preedit_screenshot, |pixel| {
+        pixel.red == 37 && pixel.green == 41 && pixel.blue == 48
+    })
+    .expect("preedit background pixels in screenshot");
+    assert!(
+        preedit_background.count >= 20,
+        "preedit background should be visibly filled, got {preedit_background:?}"
+    );
+    assert!(
+        (preedit_background.min_x as f64 - expected_x).abs() <= 6.0,
+        "preedit background x should match render-state column: bounds={preedit_background:?} expected_x={expected_x:.2}"
+    );
+    assert!(
+        (preedit_background.min_y as f64 - expected_y).abs() <= 6.0,
+        "preedit background y should match render-state line: bounds={preedit_background:?} expected_y={expected_y:.2}"
+    );
+    assert!(
+        preedit_background.width() as f64 + 6.0 >= expected_width,
+        "preedit background width should cover render-state columns: bounds={preedit_background:?} expected_width={expected_width:.2}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
