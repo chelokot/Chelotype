@@ -6041,6 +6041,202 @@ wait_latest_text_after "$before" '❯ aX'
 
 #[test]
 #[serial]
+fn gtk_e2e_undo_redo_treats_selection_edits_as_single_steps_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!(
+            "skipping gtk selection undo/redo e2e because xvfb-run or xdotool is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-selection-undo-redo-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let clipboard_trace = dir.join("clipboard.tsv");
+    let config_dir = dir.join("config");
+    let geometry_trace = dir.join("geometry.env");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+clipboard_trace="$3"
+config_dir="$4"
+geometry_trace="$5"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+snapshot_count() {
+    find "$snapshot_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l
+}
+wait_latest_text_after() {
+    local before="$1"
+    local text="$2"
+    for _ in {1..100}; do
+        local count
+        count="$(snapshot_count)"
+        latest="$(latest_txt || true)"
+        if [ "$count" -gt "$before" ] && [ -n "$latest" ] && grep -F "$text" "$latest" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text after snapshot $before did not become: $text" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    cat "$clipboard_trace" >&2 || true
+    return 1
+}
+wait_latest_text() {
+    local text="$1"
+    local before
+    before="$(snapshot_count)"
+    wait_latest_text_after "$before" "$text"
+}
+input_row() {
+    latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1)"
+    sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1
+}
+drag_input_prefix() {
+    local row="$1"
+    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    eval "$(xdotool getwindowgeometry --shell "$window_id")"
+    start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.0 * cell) }')"
+    end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (5.8 * cell) }')"
+    mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
+    target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+    xdotool mousemove "$start_x" "$target_y"
+    xdotool mousedown 1
+    sleep 0.12
+    xdotool mousemove "$mid_x" "$target_y"
+    sleep 0.12
+    xdotool mousemove "$end_x" "$target_y"
+    sleep 0.12
+    xdotool mouseup 1
+}
+wait_selected_prefix() {
+    for _ in {1..80}; do
+        if grep -Fx 'primary	abcd' "$clipboard_trace" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "input prefix selection did not export" >&2
+    cat "$clipboard_trace" >&2 || true
+    return 1
+}
+clear_input() {
+    before="$(snapshot_count)"
+    xdotool key --window "$window_id" ctrl+a
+    xdotool key --window "$window_id" BackSpace
+    wait_latest_text_after "$before" '❯ '
+}
+prepare_selected_input() {
+    xdotool type --window "$window_id" --delay 2 "abcdef"
+    wait_latest_text '❯ abcdef'
+    row="$(input_row)"
+    drag_input_prefix "$row"
+    wait_selected_prefix
+}
+
+prepare_selected_input
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+x
+wait_latest_text_after "$before" '❯ ef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text_after "$before" '❯ abcdef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text_after "$before" '❯ ef'
+clear_input
+
+prepare_selected_input
+before="$(snapshot_count)"
+xdotool key --window "$window_id" BackSpace
+wait_latest_text_after "$before" '❯ ef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text_after "$before" '❯ abcdef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text_after "$before" '❯ ef'
+clear_input
+
+prepare_selected_input
+before="$(snapshot_count)"
+xdotool type --window "$window_id" --delay 2 "X"
+wait_latest_text_after "$before" '❯ Xef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+z
+wait_latest_text_after "$before" '❯ abcdef'
+before="$(snapshot_count)"
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text_after "$before" '❯ Xef'
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-selection-undo-redo-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk selection undo/redo e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk selection undo/redo e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&clipboard_trace).expect("read clipboard trace");
+    assert!(trace.lines().any(|line| line == "primary\tabcd"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_supports_double_and_triple_click_selection_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk click selection e2e because xvfb-run or xdotool is not installed");
