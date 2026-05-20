@@ -764,6 +764,32 @@ if ! grep -R '"prompt_start_row"' "$snapshot_dir"/*.render.json >/dev/null 2>&1;
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
+xdotool key --window "$window_id" ctrl+shift+Up
+for _ in {1..100}; do
+    if grep -F 'primary	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1 && grep -R '"selected_text": "CB_OUTPUT\nCB_DONE"' "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -F 'primary	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "command block keyboard shortcut did not select previous output" >&2
+    cat "$clipboard_trace" >&2 || true
+    grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+    exit 1
+fi
+xdotool key --window "$window_id" ctrl+shift+c
+for _ in {1..100}; do
+    if grep -F 'clipboard	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -F 'clipboard	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "command block keyboard-selected output did not copy" >&2
+    cat "$clipboard_trace" >&2 || true
+    exit 1
+fi
+: > "$clipboard_trace"
 latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
 marker_row="$(grep -n '^CB_OUTPUT' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"

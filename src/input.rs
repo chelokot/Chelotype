@@ -1,3 +1,4 @@
+use crate::command_blocks::CommandBlockDirection;
 use gtk::gdk;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -9,6 +10,7 @@ pub enum KeyAction {
         selecting: bool,
     },
     SelectInput,
+    SelectCommandBlockOutput(CommandBlockDirection),
     ScrollDisplay(i32),
     CopySelection,
     CutSelection,
@@ -55,6 +57,15 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
             },
             selecting: shift,
         });
+    }
+    if ctrl && shift && matches!(key, gdk::Key::Up | gdk::Key::Down) {
+        return Some(KeyAction::SelectCommandBlockOutput(
+            if key == gdk::Key::Up {
+                CommandBlockDirection::Previous
+            } else {
+                CommandBlockDirection::Next
+            },
+        ));
     }
     if ctrl
         && !shift
@@ -269,6 +280,28 @@ mod tests {
                 unit: CursorUnit::Cell,
                 selecting: true,
             })
+        );
+    }
+
+    #[test]
+    fn maps_command_block_output_selection_shortcuts() {
+        assert_eq!(
+            key_to_action(
+                gdk::Key::Up,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::SelectCommandBlockOutput(
+                CommandBlockDirection::Previous
+            ))
+        );
+        assert_eq!(
+            key_to_action(
+                gdk::Key::Down,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::SelectCommandBlockOutput(
+                CommandBlockDirection::Next
+            ))
         );
     }
 

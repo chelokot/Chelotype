@@ -1,3 +1,4 @@
+use crate::selection::{GridPoint, SelectionRange, line_significant_len};
 use crate::terminal_grid::{TerminalContent, TerminalSemanticPrompt};
 use serde::Serialize;
 
@@ -8,6 +9,12 @@ pub struct CommandBlock {
     pub end_row: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandBlockDirection {
+    Previous,
+    Next,
+}
+
 impl CommandBlock {
     pub fn output_start_row(&self) -> Option<usize> {
         (self.prompt_end_row < self.end_row).then_some(self.prompt_end_row + 1)
@@ -15,6 +22,49 @@ impl CommandBlock {
 
     pub fn output_end_row(&self) -> Option<usize> {
         self.output_start_row().map(|_| self.end_row)
+    }
+}
+
+pub fn command_block_output_range(
+    content: &TerminalContent,
+    block: &CommandBlock,
+) -> Option<SelectionRange> {
+    let output_start = block.output_start_row()?;
+    let output_end = (output_start..=block.end_row).rev().find(|row| {
+        content
+            .lines
+            .get(*row)
+            .is_some_and(|line| line_significant_len(line) > 0)
+    })?;
+    let end_column = line_significant_len(content.lines.get(output_end)?);
+    (end_column > 0).then_some(SelectionRange::new(
+        GridPoint {
+            row: output_start,
+            column: 0,
+        },
+        GridPoint {
+            row: output_end,
+            column: end_column,
+        },
+    ))
+}
+
+pub fn command_block_output_range_near_cursor(
+    content: &TerminalContent,
+    direction: CommandBlockDirection,
+) -> Option<SelectionRange> {
+    let cursor_row = usize::try_from(content.cursor_line).ok()?;
+    let blocks = command_blocks(content);
+    match direction {
+        CommandBlockDirection::Previous => blocks
+            .iter()
+            .rev()
+            .filter(|block| block.prompt_start_row < cursor_row)
+            .find_map(|block| command_block_output_range(content, block)),
+        CommandBlockDirection::Next => blocks
+            .iter()
+            .filter(|block| block.prompt_start_row >= cursor_row)
+            .find_map(|block| command_block_output_range(content, block)),
     }
 }
 
@@ -120,5 +170,90 @@ mod tests {
     #[test]
     fn does_not_guess_blocks_without_semantic_prompt() {
         assert!(command_blocks(&content(vec![TerminalSemanticPrompt::None])).is_empty());
+    }
+
+    #[test]
+    fn output_range_trims_blank_tail_and_keeps_full_output_body() {
+        let mut content = content(vec![
+            TerminalSemanticPrompt::Prompt,
+            TerminalSemanticPrompt::None,
+            TerminalSemanticPrompt::None,
+            TerminalSemanticPrompt::None,
+            TerminalSemanticPrompt::Prompt,
+        ]);
+        content.lines = vec![
+            vec![TerminalCell::blank()],
+            "OUT_1"
+                .chars()
+                .map(|ch| TerminalCell {
+                    text: ch.to_string(),
+                    ..TerminalCell::blank()
+                })
+                .collect(),
+            "OUT_2"
+                .chars()
+                .map(|ch| TerminalCell {
+                    text: ch.to_string(),
+                    ..TerminalCell::blank()
+                })
+                .collect(),
+            vec![TerminalCell::blank()],
+            vec![TerminalCell::blank()],
+        ];
+        let blocks = command_blocks(&content);
+
+        assert_eq!(
+            command_block_output_range(&content, &blocks[0]),
+            Some(SelectionRange::new(
+                GridPoint { row: 1, column: 0 },
+                GridPoint { row: 2, column: 5 },
+            ))
+        );
+    }
+
+    #[test]
+    fn output_range_near_cursor_selects_previous_or_next_block_output() {
+        let mut content = content(vec![
+            TerminalSemanticPrompt::Prompt,
+            TerminalSemanticPrompt::None,
+            TerminalSemanticPrompt::Prompt,
+            TerminalSemanticPrompt::None,
+            TerminalSemanticPrompt::Prompt,
+        ]);
+        content.lines = vec![
+            vec![TerminalCell::blank()],
+            "PREV"
+                .chars()
+                .map(|ch| TerminalCell {
+                    text: ch.to_string(),
+                    ..TerminalCell::blank()
+                })
+                .collect(),
+            vec![TerminalCell::blank()],
+            "NEXT"
+                .chars()
+                .map(|ch| TerminalCell {
+                    text: ch.to_string(),
+                    ..TerminalCell::blank()
+                })
+                .collect(),
+            vec![TerminalCell::blank()],
+        ];
+        content.cursor_line = 2;
+
+        assert_eq!(
+            command_block_output_range_near_cursor(&content, CommandBlockDirection::Previous),
+            Some(SelectionRange::new(
+                GridPoint { row: 1, column: 0 },
+                GridPoint { row: 1, column: 4 },
+            ))
+        );
+        assert_eq!(
+            command_block_output_range_near_cursor(&content, CommandBlockDirection::Next),
+            Some(SelectionRange::new(
+                GridPoint { row: 3, column: 0 },
+                GridPoint { row: 3, column: 4 },
+            ))
+        );
     }
 }

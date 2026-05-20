@@ -1,7 +1,9 @@
 use crate::backend::{MouseMode, RenderableContentOwned, ScreenSize};
 use crate::canvas::TerminalCanvas;
 use crate::cell_text::lines_to_text;
-use crate::command_blocks::command_blocks;
+use crate::command_blocks::{
+    command_block_output_range, command_block_output_range_near_cursor, command_blocks,
+};
 use crate::containers::{LaunchTarget, available_launch_targets};
 use crate::input::{CursorDirection, CursorUnit, KeyAction, key_to_action};
 use crate::input_selection::{
@@ -16,7 +18,7 @@ use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderFrame, RenderPreedit, Renderer};
 use crate::selection::{
     GridPoint, SelectionRange, anchor_range_to_display, find_text_range, line_range,
-    line_significant_len, selected_text_with_metadata, viewport_range_for_display, word_range_at,
+    selected_text_with_metadata, viewport_range_for_display, word_range_at,
 };
 use crate::snapshot::{
     write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
@@ -328,6 +330,17 @@ fn build_ui(app: &Application) {
                         mark_pending_input_latency(&pending_input_latency);
                         select_active_input(
                             &content,
+                            &selection,
+                            &selection_text,
+                            &selection_dirty,
+                            &keyboard_selection,
+                        );
+                    }
+                    KeyAction::SelectCommandBlockOutput(direction) => {
+                        mark_pending_input_latency(&pending_input_latency);
+                        select_command_block_output(
+                            &content,
+                            direction,
                             &selection,
                             &selection_text,
                             &selection_dirty,
@@ -2424,6 +2437,30 @@ fn select_active_input(
     );
 }
 
+fn select_command_block_output(
+    content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+    direction: crate::command_blocks::CommandBlockDirection,
+    selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
+    selection_text: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    selection_dirty: &std::rc::Rc<std::cell::Cell<bool>>,
+    keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
+) {
+    let Some(content) = content.borrow().clone() else {
+        return;
+    };
+    let Some(range) = command_block_output_range_near_cursor(&content, direction) else {
+        return;
+    };
+    set_viewport_selection(
+        &content,
+        range,
+        selection,
+        selection_text,
+        selection_dirty,
+        keyboard_selection,
+    );
+}
+
 fn select_mouse_click_range(
     content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
     selection: &std::rc::Rc<std::cell::Cell<Option<SelectionRange>>>,
@@ -2481,26 +2518,7 @@ fn command_block_output_selection_at_rail(
     command_blocks(content)
         .into_iter()
         .find(|block| row >= block.prompt_start_row && row <= block.end_row)
-        .and_then(|block| {
-            let output_start = block.output_start_row()?;
-            let output_end = (output_start..=block.end_row).rev().find(|row| {
-                content
-                    .lines
-                    .get(*row)
-                    .is_some_and(|line| line_significant_len(line) > 0)
-            })?;
-            let end_column = line_significant_len(content.lines.get(output_end)?);
-            (end_column > 0).then_some(SelectionRange::new(
-                GridPoint {
-                    row: output_start,
-                    column: 0,
-                },
-                GridPoint {
-                    row: output_end,
-                    column: end_column,
-                },
-            ))
-        })
+        .and_then(|block| command_block_output_range(content, &block))
 }
 
 fn command_block_output_text_at_rail(

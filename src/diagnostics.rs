@@ -200,7 +200,9 @@ impl WorkspaceHeadlessRuntime {
                             crate::input::CursorDirection::Left => b"\x1b[D",
                             crate::input::CursorDirection::Right => b"\x1b[C",
                         }),
-                        KeyAction::CursorMove { .. } | KeyAction::SelectInput => Ok(()),
+                        KeyAction::CursorMove { .. }
+                        | KeyAction::SelectInput
+                        | KeyAction::SelectCommandBlockOutput(_) => Ok(()),
                         KeyAction::ScrollDisplay(lines) => workspace.scroll_active(lines),
                         KeyAction::NewTab => {
                             workspace.add_tab_with(headless_shell_command())?;
@@ -351,7 +353,9 @@ impl HeadlessRuntime {
                             crate::input::CursorDirection::Left => b"\x1b[D",
                             crate::input::CursorDirection::Right => b"\x1b[C",
                         }),
-                        KeyAction::CursorMove { .. } | KeyAction::SelectInput => Ok(()),
+                        KeyAction::CursorMove { .. }
+                        | KeyAction::SelectInput
+                        | KeyAction::SelectCommandBlockOutput(_) => Ok(()),
                         KeyAction::ScrollDisplay(lines) => backend.scroll_display(lines),
                         KeyAction::CopySelection
                         | KeyAction::CutSelection
