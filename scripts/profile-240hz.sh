@@ -559,7 +559,11 @@ if [[ "$strict" -eq 1 ]]; then
     $1 == "gtk_frame_interval" { frame[++frame_count] = $2 }
     $1 == "gtk_tick_wall_interval" { wall[++wall_count] = $2 }
     $1 == "gtk_paint_interval" { paint_interval[++paint_interval_count] = $2 }
+    $1 == "gtk_tick_work" { tick_work[++tick_work_count] = $2 }
+    $1 == "gtk_smooth_scroll_tick" { scroll_tick[++scroll_tick_count] = $2 }
+    $1 == "gtk_snapshot_forced" { snapshot_forced[++snapshot_forced_count] = $2 }
     $1 == "gtk_paint" { paint[++paint_count] = $2 }
+    $1 == "gtk_render" { render[++render_count] = $2 }
     $1 == "gdk_monitor_refresh_millihz" { monitor[++monitor_count] = $2 }
     END {
       if (require_monitor_refresh == 1) {
@@ -607,14 +611,51 @@ if [[ "$strict" -eq 1 ]]; then
       if (paint_count > 0) {
         asort(paint)
         paint_p50 = paint[int((paint_count - 1) * 0.50) + 1]
+        paint_p95 = paint[int((paint_count - 1) * 0.95) + 1]
         if (paint_p50 > frame_budget_us) {
           printf "strict profile failed: gtk_paint p50 %dus exceeds 240Hz budget %dus\n", paint_p50, frame_budget_us > "/dev/stderr"
+          exit 1
+        }
+        if (paint_p95 > frame_budget_us) {
+          printf "strict profile failed: gtk_paint p95 %dus exceeds 240Hz CPU budget %dus\n", paint_p95, frame_budget_us > "/dev/stderr"
+          exit 1
+        }
+      }
+      if (render_count > 0) {
+        asort(render)
+        render_p95 = render[int((render_count - 1) * 0.95) + 1]
+        if (render_p95 > frame_budget_us) {
+          printf "strict profile failed: gtk_render p95 %dus exceeds 240Hz CPU budget %dus\n", render_p95, frame_budget_us > "/dev/stderr"
+          exit 1
+        }
+      }
+      if (tick_work_count > 0) {
+        asort(tick_work)
+        tick_work_p95 = tick_work[int((tick_work_count - 1) * 0.95) + 1]
+        if (tick_work_p95 > frame_budget_us) {
+          printf "strict profile failed: gtk_tick_work p95 %dus exceeds 240Hz CPU budget %dus\n", tick_work_p95, frame_budget_us > "/dev/stderr"
+          exit 1
+        }
+      }
+      if (scroll_tick_count > 0) {
+        asort(scroll_tick)
+        scroll_tick_p95 = scroll_tick[int((scroll_tick_count - 1) * 0.95) + 1]
+        if (scroll_tick_p95 > frame_budget_us) {
+          printf "strict profile failed: gtk_smooth_scroll_tick p95 %dus exceeds 240Hz CPU budget %dus\n", scroll_tick_p95, frame_budget_us > "/dev/stderr"
+          exit 1
+        }
+      }
+      if (snapshot_forced_count > 0) {
+        asort(snapshot_forced)
+        snapshot_forced_p95 = snapshot_forced[int((snapshot_forced_count - 1) * 0.95) + 1]
+        if (snapshot_forced_p95 > frame_budget_us) {
+          printf "strict profile failed: gtk_snapshot_forced p95 %dus exceeds 240Hz CPU budget %dus\n", snapshot_forced_p95, frame_budget_us > "/dev/stderr"
           exit 1
         }
       }
     }
   ' "$perf_trace"
-  if [[ "$scenario" == "scroll" || "$scenario" == "scroll-burst" ]]; then
+  if [[ "$scenario" == "scroll" || "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ]]; then
     awk -F '\t' -v frame_budget_us="$frame_budget_us" '
       $1 == "frame" { scroll_frame[++scroll_frame_count] = $5 }
       END {
