@@ -678,15 +678,11 @@ fn layout_for_paint(
 
 #[derive(Default)]
 struct RowSurfaceCache {
-    entries: VecDeque<RowSurfaceEntry>,
+    surfaces: HashMap<RowSurfaceKey, cairo::ImageSurface>,
+    order: VecDeque<RowSurfaceKey>,
 }
 
-struct RowSurfaceEntry {
-    key: RowSurfaceKey,
-    surface: cairo::ImageSurface,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RowSurfaceKey {
     signature: TextLayoutCacheSignature,
     width_px: i32,
@@ -694,7 +690,7 @@ struct RowSurfaceKey {
     line: RowSurfaceLineKey,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RowSurfaceLineKey {
     region: RenderRegion,
     text: String,
@@ -725,18 +721,18 @@ impl RowSurfaceCache {
             height_px: spec.height_px,
             line: RowSurfaceLineKey::from(line),
         };
-        if let Some(entry) = self.entries.iter().find(|entry| entry.key == key) {
+        if let Some(surface) = self.surfaces.get(&key) {
             stats.row_surface_hits += 1;
-            return Some(entry.surface.clone());
+            return Some(surface.clone());
         }
         let surface = self.render_surface(widget, line, spec, text_layout_cache, stats)?;
-        if self.entries.len() >= MAX_ROW_SURFACE_CACHE_ENTRIES {
-            self.entries.pop_front();
+        if self.surfaces.len() >= MAX_ROW_SURFACE_CACHE_ENTRIES
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.surfaces.remove(&evicted);
         }
-        self.entries.push_back(RowSurfaceEntry {
-            key,
-            surface: surface.clone(),
-        });
+        self.order.push_back(key.clone());
+        self.surfaces.insert(key, surface.clone());
         stats.row_surface_misses += 1;
         Some(surface)
     }
@@ -787,7 +783,7 @@ impl From<&crate::render::RenderLine> for RowSurfaceLineKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TextLayoutCacheSignature {
     font_size_tenths: u32,
     text_scale_micros: u32,

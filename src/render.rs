@@ -23,7 +23,7 @@ pub struct RenderPreedit {
     pub column: i32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 pub enum RenderRegion {
     History,
     Input,
@@ -47,7 +47,7 @@ pub struct RenderCell {
     pub style: RenderStyle,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct RenderRun {
     pub start_column: usize,
     pub columns: usize,
@@ -56,7 +56,7 @@ pub struct RenderRun {
     pub style: RenderStyle,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct RenderStyle {
     pub fg: Option<String>,
     pub bg: Option<String>,
