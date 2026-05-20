@@ -1016,14 +1016,34 @@ xdotool mousemove "$rail_root_x" "$rail_root_y"
 xdotool click 1
 for _ in {1..120}; do
     if grep -Fx "primary	$expected" "$clipboard_trace" >/dev/null 2>&1 && grep -R "\"selected_text\": \"$expected\"" "$snapshot_dir" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -Fx "primary	$expected" "$clipboard_trace" >/dev/null 2>&1; then
+    echo "resized command block rail click did not select reflowed output" >&2
+    echo "rail=$rail_root_x,$rail_root_y row=$marker_row" >&2
+    cat "$clipboard_trace" >&2 || true
+    grep -R '"selected_text"' "$snapshot_dir" >&2 || true
+    cat "$latest" >&2 || true
+    exit 1
+fi
+xdotool mousemove "$rail_root_x" "$rail_root_y"
+xdotool click 3
+sleep 0.2
+copy_block_x="$(awk -v x="$rail_root_x" 'BEGIN { printf "%d", x + 72 }')"
+copy_block_y="$(awk -v y="$rail_root_y" 'BEGIN { printf "%d", y + 24 }')"
+xdotool mousemove "$copy_block_x" "$copy_block_y"
+xdotool click 1
+for _ in {1..120}; do
+    if grep -Fx "clipboard	$expected" "$clipboard_trace" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.05
 done
-echo "resized command block rail click did not select reflowed output" >&2
-echo "rail=$rail_root_x,$rail_root_y row=$marker_row" >&2
+echo "resized command block context menu did not copy reflowed output" >&2
+echo "rail=$rail_root_x,$rail_root_y copy=$copy_block_x,$copy_block_y row=$marker_row" >&2
 cat "$clipboard_trace" >&2 || true
-grep -R '"selected_text"' "$snapshot_dir" >&2 || true
 cat "$latest" >&2 || true
 exit 1
 "#;
@@ -1059,6 +1079,11 @@ exit 1
         trace.lines().any(|line| line
             == "primary\tCB_WRAP_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_tail"),
         "reflowed command block output was not selected: {trace}"
+    );
+    assert!(
+        trace.lines().any(|line| line
+            == "clipboard\tCB_WRAP_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_tail"),
+        "reflowed command block output was not copied from context menu: {trace}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
