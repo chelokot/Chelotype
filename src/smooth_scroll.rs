@@ -373,4 +373,42 @@ mod tests {
         assert_eq!(scroll_speed_lines_per_second(12.0), 146.0);
         assert_eq!(scroll_speed_lines_per_second(24.0), 242.0);
     }
+
+    #[test]
+    fn produces_pixel_level_frames_at_240hz_until_settled() {
+        let mut scroll = SmoothScroll::default();
+        scroll.enqueue_lines(10, 20.0);
+
+        let mut frames = Vec::new();
+        while scroll.is_active() {
+            frames.push(
+                scroll
+                    .advance(crate::frame_timing::TARGET_FRAME_DURATION, 20.0)
+                    .expect("smooth scroll frame"),
+            );
+        }
+
+        assert!(frames.len() >= 8, "{frames:?}");
+        assert_eq!(frames.last().expect("final frame").remaining_px, 0.0);
+        assert_eq!(frames.last().expect("final frame").offset_px, 0.0);
+        assert!(frames.iter().all(|frame| frame.remaining_px >= 0.0));
+        assert!(
+            frames
+                .windows(2)
+                .all(|window| window[1].remaining_px <= window[0].remaining_px),
+            "{frames:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.line_delta == 0 && frame.offset_px.abs() > 0.5),
+            "{frames:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.line_delta != 0 && frame.offset_px.abs() > 0.5),
+            "{frames:?}"
+        );
+    }
 }
