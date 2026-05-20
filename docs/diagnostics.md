@@ -22,6 +22,7 @@ Live snapshots
 - Set `CHELOTYPE_CLIPBOARD_TRACE=/path/to/file.tsv` to write PRIMARY/CLIPBOARD selection exports.
 - Set `CHELOTYPE_PERF_TRACE=/path/to/file.tsv` to write `input_to_render`, per-input allocation-to-render, GTK render/paint, per-render allocation, and RSS samples.
 - Run `scripts/profile-240hz.sh --scenario held-key|scroll|scroll-burst|idle|frame-baseline|timer-baseline` to collect and summarize those perf samples from a nested run. `scroll-burst` sends wheel events without spacing so accumulated target distance must accelerate. `frame-baseline` keeps a minimal animation loop active and isolates compositor/GDK frame-callback cadence from terminal snapshot/render work; `timer-baseline` compares a 240 Hz GLib timeout with GDK frame-callback cadence. Use `--strict` when you want the command to fail if p50 frame interval, scroll-frame interval, or paint time misses the 4.166 ms 240 Hz budget.
+- For Weston-headless diagnostics, use `CHELOTYPE_WESTON_RENDERER=gl|pixman` and `CHELOTYPE_WESTON_REPAINT_WINDOW=<ms>` to compare compositor settings. The script prints both values in the scenario header.
 - Run `scripts/record-wheel-profile.sh`, scroll naturally over the opened `wev` window, then press Ctrl+C to save a real wheel timing profile to `~/.config/chelotype/wheel-profile.tsv`. The Appearance settings preview replays this profile through the same smooth-scroll integrator used by the terminal.
 
 Usage tips

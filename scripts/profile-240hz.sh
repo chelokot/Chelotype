@@ -167,9 +167,10 @@ if [[ "$display_backend" == "weston-headless" ]]; then
   weston_config="$profile_root/weston.ini"
   weston_socket="chelotype-profile"
   weston_renderer="${CHELOTYPE_WESTON_RENDERER:-gl}"
-  cat > "$weston_config" <<'EOF'
+  weston_repaint_window="${CHELOTYPE_WESTON_REPAINT_WINDOW:-4}"
+  cat > "$weston_config" <<EOF
 [core]
-repaint-window=4
+repaint-window=$weston_repaint_window
 EOF
   weston --backend=headless --renderer="$weston_renderer" --width=1200 --height=900 --refresh-rate=240000 --socket="$weston_socket" --config="$weston_config" --idle-time=0 --log="$weston_log" &
   weston_pid="$!"
@@ -401,7 +402,7 @@ summarize_refresh_gate() {
 echo "profile root: $profile_root"
 profile_mode="$([[ "$release" -eq 1 ]] && echo release || echo debug)"
 if [[ "$display_backend" == "weston-headless" ]]; then
-  echo "scenario: $scenario duration=${duration_seconds}s backend=$display_backend renderer=$weston_renderer profile=$profile_mode"
+  echo "scenario: $scenario duration=${duration_seconds}s backend=$display_backend renderer=$weston_renderer repaint_window=${weston_repaint_window}ms profile=$profile_mode"
 else
   echo "scenario: $scenario duration=${duration_seconds}s backend=$display_backend profile=$profile_mode"
 fi
