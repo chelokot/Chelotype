@@ -4337,11 +4337,18 @@ fn configure_profile_scroll_burst(
     {
         return;
     }
+    let burst_repeats = std::env::var("CHELOTYPE_PROFILE_SCROLL_BURST_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let seed_rows = 160 * burst_repeats;
+    let seed_command = format!("for n in $(seq 1 {seed_rows}); do echo PROFILE_SCROLL_$n; done\n");
     let workspace_for_seed = workspace.clone();
     glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
         let _ = workspace_for_seed
             .borrow_mut()
-            .write_active(b"for n in $(seq 1 160); do echo PROFILE_SCROLL_$n; done\n");
+            .write_active(seed_command.as_bytes());
     });
 
     let workspace = workspace.clone();
@@ -4350,6 +4357,7 @@ fn configure_profile_scroll_burst(
     let smooth_scroll = smooth_scroll.clone();
     let scroll_trace = scroll_trace.map(std::path::PathBuf::from);
     let attempts = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let remaining_bursts = std::rc::Rc::new(std::cell::Cell::new(burst_repeats));
     glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
         attempts.set(attempts.get() + 1);
         if attempts.get() > 120 {
@@ -4383,8 +4391,13 @@ fn configure_profile_scroll_burst(
             }
         }
         drop(scroll);
+        remaining_bursts.set(remaining_bursts.get().saturating_sub(1));
         canvas.widget().queue_draw();
-        glib::ControlFlow::Break
+        if remaining_bursts.get() == 0 {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
     });
 }
 

@@ -14,7 +14,7 @@ gsk_renderer="${CHELOTYPE_GSK_RENDERER:-gl}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/profile-240hz.sh [--scenario held-key|scroll|scroll-burst|idle|frame-baseline|timer-baseline] [--display-backend x11|weston-headless|native-wayland] [--duration seconds] [--release] [--strict] [--allow-live]
+Usage: scripts/profile-240hz.sh [--scenario held-key|scroll|scroll-burst|scroll-sustain|idle|frame-baseline|timer-baseline] [--display-backend x11|weston-headless|native-wayland] [--duration seconds] [--release] [--strict] [--allow-live]
 
 Runs the GTK app with CHELOTYPE_PERF_TRACE enabled and prints frame timing
 percentiles. Run the x11 backend under xvfb-run for nested automation. The
@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$scenario" in
-  held-key|scroll|scroll-burst|idle|frame-baseline|timer-baseline) ;;
+  held-key|scroll|scroll-burst|scroll-sustain|idle|frame-baseline|timer-baseline) ;;
   *)
     echo "unknown scenario: $scenario" >&2
     exit 2
@@ -97,9 +97,9 @@ elif [[ "$display_backend" == "weston-headless" ]]; then
     exit 2
   fi
   case "$scenario" in
-    idle|scroll-burst|frame-baseline|timer-baseline) ;;
+    idle|scroll-burst|scroll-sustain|frame-baseline|timer-baseline) ;;
     *)
-      echo "weston-headless currently supports idle and scroll-burst scenarios" >&2
+      echo "weston-headless currently supports idle, scroll-burst, scroll-sustain, frame-baseline, and timer-baseline scenarios" >&2
       exit 2
       ;;
   esac
@@ -109,9 +109,9 @@ else
     exit 2
   fi
   case "$scenario" in
-    idle|scroll-burst|frame-baseline|timer-baseline) ;;
+    idle|scroll-burst|scroll-sustain|frame-baseline|timer-baseline) ;;
     *)
-      echo "native-wayland currently supports idle and scroll-burst scenarios" >&2
+      echo "native-wayland currently supports idle, scroll-burst, scroll-sustain, frame-baseline, and timer-baseline scenarios" >&2
       exit 2
       ;;
   esac
@@ -190,8 +190,11 @@ EOF
     "WAYLAND_DISPLAY=$weston_socket"
     "GSK_RENDERER=$gsk_renderer"
   )
-  if [[ "$scenario" == "scroll-burst" ]]; then
+  if [[ "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ]]; then
     app_env+=("CHELOTYPE_PROFILE_SCROLL_BURST=1")
+  fi
+  if [[ "$scenario" == "scroll-sustain" ]]; then
+    app_env+=("CHELOTYPE_PROFILE_SCROLL_BURST_REPEATS=6")
   fi
   if [[ "$scenario" == "frame-baseline" ]]; then
     app_env+=("CHELOTYPE_PROFILE_FRAME_BASELINE=1")
@@ -204,8 +207,11 @@ elif [[ "$display_backend" == "native-wayland" ]]; then
     "GDK_BACKEND=wayland"
     "GSK_RENDERER=$gsk_renderer"
   )
-  if [[ "$scenario" == "scroll-burst" ]]; then
+  if [[ "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ]]; then
     app_env+=("CHELOTYPE_PROFILE_SCROLL_BURST=1")
+  fi
+  if [[ "$scenario" == "scroll-sustain" ]]; then
+    app_env+=("CHELOTYPE_PROFILE_SCROLL_BURST_REPEATS=6")
   fi
   if [[ "$scenario" == "frame-baseline" ]]; then
     app_env+=("CHELOTYPE_PROFILE_FRAME_BASELINE=1")
@@ -224,7 +230,7 @@ app_pid="$!"
 if [[ "$display_backend" == "weston-headless" || "$display_backend" == "native-wayland" ]]; then
   : > "$perf_trace"
   : > "$scroll_trace"
-  if [[ "$scenario" == "scroll-burst" ]]; then
+  if [[ "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ]]; then
     reached_scroll_idle=0
     for _ in {1..160}; do
       if grep -q $'^idle\t0\t0.00' "$scroll_trace" 2>/dev/null; then
@@ -234,11 +240,11 @@ if [[ "$display_backend" == "weston-headless" || "$display_backend" == "native-w
       sleep 0.05
     done
     if [[ ! -s "$scroll_trace" ]]; then
-      echo "$display_backend scroll-burst produced no scroll trace" >&2
+      echo "$display_backend $scenario produced no scroll trace" >&2
       exit 1
     fi
     if [[ "$reached_scroll_idle" -ne 1 ]]; then
-      echo "$display_backend scroll-burst did not settle before timeout" >&2
+      echo "$display_backend $scenario did not settle before timeout" >&2
       tail -n 20 "$scroll_trace" >&2 || true
       exit 1
     fi
@@ -281,7 +287,7 @@ case "$scenario" in
     xdotool keyup --window "$window_id" a
     sleep 0.5
     ;;
-  scroll|scroll-burst)
+  scroll|scroll-burst|scroll-sustain)
     xdotool type --window "$window_id" --delay 1 "for n in \$(seq 1 160); do echo SCROLL_PROFILE_\$n; done"
     xdotool key --window "$window_id" Return
     sleep 1.0
@@ -291,6 +297,11 @@ case "$scenario" in
     : > "$scroll_trace"
     if [[ "$scenario" == "scroll-burst" ]]; then
       xdotool click --repeat 8 --delay 0 4
+    elif [[ "$scenario" == "scroll-sustain" ]]; then
+      for _ in {1..6}; do
+        xdotool click --repeat 8 --delay 0 4
+        sleep 0.08
+      done
     else
       for _ in {1..8}; do
         xdotool click 4
@@ -327,7 +338,7 @@ if [[ -n "${app_pid:-}" ]]; then
   app_pid=""
 fi
 
-if [[ "$scenario" == "scroll-burst" ]] && grep -q $'^profile_scroll_burst_start\t' "$perf_trace" 2>/dev/null; then
+if [[ "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ]] && grep -q $'^profile_scroll_burst_start\t' "$perf_trace" 2>/dev/null; then
   filtered_perf_trace="$profile_root/perf-scroll-burst.tsv"
   awk -F '\t' '
     $1 == "profile_scroll_burst_start" { started = 1 }
@@ -505,8 +516,8 @@ if [[ -s "$scroll_trace" ]]; then
   ' "$scroll_trace"
 fi
 
-if [[ "$scenario" == "scroll-burst" ]]; then
-  awk -F '\t' '
+if [[ "$scenario" == "scroll-burst" || "$scenario" == "scroll-sustain" ]]; then
+  awk -F '\t' -v scenario="$scenario" '
     $1 == "enqueue" {
       enqueue_count++
       if (frame_count == 0) enqueues_before_first_frame++
@@ -518,21 +529,22 @@ if [[ "$scenario" == "scroll-burst" ]]; then
       if (absolute_step > max_line_step) max_line_step = absolute_step
     }
     END {
-      printf "%-24s enqueues=%-5d before_first_frame=%-5d max_pending_px=%7.2f max_line_step=%d\n", "scroll_burst", enqueue_count, enqueues_before_first_frame, max_pending_px, max_line_step
-      if (enqueue_count < 8) {
-        print "scroll-burst profile failed: did not record all wheel enqueues" > "/dev/stderr"
+      minimum_enqueues = scenario == "scroll-sustain" ? 48 : 8
+      printf "%-24s enqueues=%-5d before_first_frame=%-5d max_pending_px=%7.2f max_line_step=%d\n", scenario == "scroll-sustain" ? "scroll_sustain" : "scroll_burst", enqueue_count, enqueues_before_first_frame, max_pending_px, max_line_step
+      if (enqueue_count < minimum_enqueues) {
+        printf "%s profile failed: did not record all wheel enqueues\n", scenario > "/dev/stderr"
         exit 1
       }
       if (enqueues_before_first_frame < 4) {
-        print "scroll-burst profile failed: wheel events did not coalesce before the first animation frame" > "/dev/stderr"
+        printf "%s profile failed: wheel events did not coalesce before the first animation frame\n", scenario > "/dev/stderr"
         exit 1
       }
       if (max_pending_px < 200.0) {
-        printf "scroll-burst profile failed: pending target %.2fpx is too small to prove accumulated scrolling\n", max_pending_px > "/dev/stderr"
+        printf "%s profile failed: pending target %.2fpx is too small to prove accumulated scrolling\n", scenario, max_pending_px > "/dev/stderr"
         exit 1
       }
       if (max_line_step < 2) {
-        printf "scroll-burst profile failed: max line step %d did not accelerate with target distance\n", max_line_step > "/dev/stderr"
+        printf "%s profile failed: max line step %d did not accelerate with target distance\n", scenario, max_line_step > "/dev/stderr"
         exit 1
       }
     }
