@@ -4635,6 +4635,29 @@ if [ -z "$window_id" ]; then
 fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
+snapshot_count() {
+    find "$snapshot_dir" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l
+}
+latest_txt() {
+    ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
+}
+wait_latest_text_after() {
+    local before="$1"
+    local text="$2"
+    for _ in {1..160}; do
+        local count
+        count="$(snapshot_count)"
+        latest="$(latest_txt || true)"
+        if [ "$count" -gt "$before" ] && [ -n "$latest" ] && grep -F "$text" "$latest" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text after snapshot $before did not become: $text" >&2
+    latest="$(latest_txt || true)"
+    [ -n "$latest" ] && cat "$latest" >&2
+    return 1
+}
 xdotool type --window "$window_id" --delay 2 "abcdef"
 for _ in {1..100}; do
     if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
@@ -4667,14 +4690,9 @@ xdotool mousemove "$end_x" "$target_y"
 sleep 0.12
 xdotool mouseup 1
 sleep 0.2
+before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "X"
-for _ in {1..100}; do
-    if grep -R '❯ Xef' "$snapshot_dir" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 0.1
-done
-if ! grep -R '❯ Xef' "$snapshot_dir" >/dev/null 2>&1; then
+if ! wait_latest_text_after "$before" '❯ Xef'; then
     echo "selected input text was not replaced by typed text" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
@@ -4695,14 +4713,9 @@ word_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN 
 xdotool mousemove "$word_x" "$target_y"
 xdotool click --repeat 2 --delay 90 1
 sleep 0.1
+before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "X"
-for _ in {1..100}; do
-    if grep -R '❯ alpha X' "$snapshot_dir" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 0.1
-done
-if ! grep -R '❯ alpha X' "$snapshot_dir" >/dev/null 2>&1; then
+if ! wait_latest_text_after "$before" '❯ alpha X'; then
     echo "double-clicked input word was not replaced" >&2
     grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
     exit 1
@@ -4722,13 +4735,9 @@ line_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN 
 xdotool mousemove "$line_x" "$target_y"
 xdotool click --repeat 3 --delay 90 1
 sleep 0.1
+before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "Z"
-for _ in {1..100}; do
-    if grep -R '❯ Z' "$snapshot_dir" >/dev/null 2>&1; then
-        exit 0
-    fi
-    sleep 0.1
-done
+wait_latest_text_after "$before" '❯ Z' && exit 0
 echo "triple-clicked input line was not replaced as input-only text" >&2
 grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
 exit 1
@@ -5437,6 +5446,102 @@ fi
     assert!(
         output.status.success(),
         "gtk zoom persistence e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_respects_system_large_text_scale_under_xvfb() {
+    if !has_command("xvfb-run") {
+        eprintln!("skipping gtk large text scale e2e because xvfb-run is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-large-text-scale-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("large text scale e2e dir");
+    let base_geometry_trace = dir.join("base-geometry.env");
+    let scaled_geometry_trace = dir.join("scaled-geometry.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+base_geometry_trace="$2"
+scaled_geometry_trace="$3"
+
+launch_app() {
+    local scale="$1"
+    local geometry_trace="$2"
+    GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 GDK_DPI_SCALE="$scale" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+    app_pid="$!"
+    for _ in {1..80}; do
+        if [ -f "$geometry_trace" ]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "geometry did not appear for scale=$scale" >&2
+    return 1
+}
+
+read_cell_width() {
+    sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$1"
+}
+
+app_pid=""
+trap 'if [ -n "${app_pid:-}" ]; then kill "$app_pid" 2>/dev/null || true; fi' EXIT
+launch_app 1 "$base_geometry_trace"
+base_width="$(read_cell_width "$base_geometry_trace")"
+kill "$app_pid"
+wait "$app_pid" 2>/dev/null || true
+app_pid=""
+sleep 0.3
+
+launch_app 1.5 "$scaled_geometry_trace"
+scaled_width="$(read_cell_width "$scaled_geometry_trace")"
+
+if ! awk -v scaled="$scaled_width" -v base="$base_width" 'BEGIN { exit !(scaled > base * 1.35 && scaled < base * 1.70) }'; then
+    echo "large text scale did not produce expected terminal cell width: base=$base_width scaled=$scaled_width" >&2
+    cat "$base_geometry_trace" >&2 || true
+    cat "$scaled_geometry_trace" >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-large-text-scale-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            base_geometry_trace
+                .to_str()
+                .expect("base geometry trace path utf8"),
+            scaled_geometry_trace
+                .to_str()
+                .expect("scaled geometry trace path utf8"),
+        ])
+        .output()
+        .expect("run gtk large text scale e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk large text scale e2e failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

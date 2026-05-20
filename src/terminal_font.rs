@@ -7,6 +7,9 @@ const TERMINAL_FONT_SIZE_PT: f64 = 13.0;
 const MIN_FONT_SIZE_TENTHS: u32 = 80;
 const MAX_FONT_SIZE_TENTHS: u32 = 280;
 const DEFAULT_FONT_SIZE_TENTHS: u32 = (TERMINAL_FONT_SIZE_PT * 10.0) as u32;
+const DEFAULT_XFT_DPI: i32 = 96 * 1024;
+const MIN_TEXT_SCALE: f64 = 0.5;
+const MAX_TEXT_SCALE: f64 = 3.0;
 static FONT_SIZE_TENTHS: AtomicU32 = AtomicU32::new(DEFAULT_FONT_SIZE_TENTHS);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -16,8 +19,13 @@ pub struct TerminalFontMetrics {
 }
 
 pub fn description() -> pango::FontDescription {
+    description_for_text_scale(1.0)
+}
+
+pub fn description_for_text_scale(text_scale: f64) -> pango::FontDescription {
     let mut description = pango::FontDescription::from_string(TERMINAL_FONT);
-    description.set_size((font_size_pt() * pango::SCALE as f64).round() as i32);
+    let scaled_size = font_size_pt() * text_scale.clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE);
+    description.set_size((scaled_size * pango::SCALE as f64).round() as i32);
     description
 }
 
@@ -65,13 +73,15 @@ fn save_configured_size() {
 
 pub fn layout_for(widget: &gtk::DrawingArea, markup: &str) -> pango::Layout {
     let layout = widget.create_pango_layout(None);
-    layout.set_font_description(Some(&description()));
+    layout.set_font_description(Some(&description_for_text_scale(text_scale_for_widget(
+        widget,
+    ))));
     layout.set_markup(markup);
     layout
 }
 
 pub fn metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalFontMetrics> {
-    let description = description();
+    let description = description_for_text_scale(text_scale_for_widget(widget));
     let sample = "00000000000000000000000000000000";
     let layout = widget.create_pango_layout(Some(sample));
     layout.set_font_description(Some(&description));
@@ -85,6 +95,25 @@ pub fn metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalFontMetri
         cell_width,
         line_height,
     })
+}
+
+pub fn text_scale_for_xft_dpi(xft_dpi: i32) -> f64 {
+    if xft_dpi <= 0 {
+        return 1.0;
+    }
+    (xft_dpi as f64 / DEFAULT_XFT_DPI as f64).clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE)
+}
+
+pub fn runtime_text_scale(xft_dpi: i32) -> f64 {
+    std::env::var("GDK_DPI_SCALE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|value| value.clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE))
+        .unwrap_or_else(|| text_scale_for_xft_dpi(xft_dpi))
+}
+
+fn text_scale_for_widget(widget: &gtk::DrawingArea) -> f64 {
+    runtime_text_scale(widget.settings().property::<i32>("gtk-xft-dpi"))
 }
 
 #[cfg(test)]
@@ -115,6 +144,53 @@ mod tests {
         std::fs::write(dir.join("config"), "font_size_tenths=170\n").expect("write font config");
         load_configured_size();
         assert_eq!(font_size_pt(), 17.0);
+
+        zoom_reset();
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn xft_dpi_text_scale_tracks_system_font_scaling() {
+        assert_eq!(text_scale_for_xft_dpi(-1), 1.0);
+        assert_eq!(text_scale_for_xft_dpi(DEFAULT_XFT_DPI), 1.0);
+        assert_eq!(text_scale_for_xft_dpi(DEFAULT_XFT_DPI * 3 / 2), 1.5);
+    }
+
+    #[test]
+    #[serial]
+    fn runtime_text_scale_honors_gtk_dpi_scale_override() {
+        unsafe {
+            std::env::set_var("GDK_DPI_SCALE", "1.5");
+        }
+        assert_eq!(runtime_text_scale(DEFAULT_XFT_DPI), 1.5);
+        unsafe {
+            std::env::remove_var("GDK_DPI_SCALE");
+        }
+        assert_eq!(runtime_text_scale(DEFAULT_XFT_DPI), 1.0);
+    }
+
+    #[test]
+    #[serial]
+    fn font_description_applies_system_text_scale_on_top_of_terminal_zoom() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-font-scale-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        zoom_reset();
+        let unscaled = description_for_text_scale(1.0).size();
+        let scaled = description_for_text_scale(1.5).size();
+        assert_eq!(unscaled, 13 * pango::SCALE);
+        assert_eq!(scaled, (19.5 * pango::SCALE as f64).round() as i32);
 
         zoom_reset();
         unsafe {
