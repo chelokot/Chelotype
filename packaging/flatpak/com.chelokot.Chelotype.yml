@@ -56,6 +56,10 @@ modules:
       - install -Dm755 "$(find target/release/build/libghostty-vt-sys-*/out/ghostty-install/lib -name libghostty-vt.so.0.1.0 -print -quit)" /app/lib/libghostty-vt.so.0.1.0
       - ln -sf libghostty-vt.so.0.1.0 /app/lib/libghostty-vt.so.0
       - ln -sf libghostty-vt.so.0 /app/lib/libghostty-vt.so
+      - install -Dm644 "$(find zig-cache/p -name SymbolsNerdFontMono-Regular.ttf -print -quit)" /app/share/fonts/nerd-fonts/SymbolsNerdFontMono-Regular.ttf
+      - install -Dm644 "$(find zig-cache/p -name SymbolsNerdFont-Regular.ttf -print -quit)" /app/share/fonts/nerd-fonts/SymbolsNerdFont-Regular.ttf
+      - install -Dm644 "$(find zig-cache/p -name 10-nerd-font-symbols.conf -print -quit)" /app/etc/fonts/conf.d/10-nerd-font-symbols.conf
+      - fc-cache -f /app/share/fonts
       - PREFIX=/app scripts/install-desktop-metadata.sh
       - PREFIX=/app scripts/install-third-party-licenses.sh
     sources:

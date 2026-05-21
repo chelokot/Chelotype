@@ -4,8 +4,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const DEFAULT_TERMINAL_FONT: &str = "BlexMono Nerd Font Mono 13";
 const SYSTEM_TERMINAL_FONT: &str = "Monospace";
-const TERMINAL_FONT_FALLBACKS: &str =
-    "Symbols Nerd Font Mono, Symbols Nerd Font, Adwaita Mono, monospace";
 const TERMINAL_FONT_SIZE_PT: f64 = 13.0;
 const MIN_FONT_SIZE_TENTHS: u32 = 80;
 const MAX_FONT_SIZE_TENTHS: u32 = 280;
@@ -33,7 +31,7 @@ pub fn description_for_size_and_text_scale(
     font_size_pt: f64,
     text_scale: f64,
 ) -> pango::FontDescription {
-    let mut description = pango::FontDescription::from_string(&terminal_font_family_stack());
+    let mut description = terminal_font_description();
     let scaled_size = font_size_pt * text_scale.clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE);
     description.set_size((scaled_size * pango::SCALE as f64).round() as i32);
     description
@@ -93,15 +91,11 @@ pub fn load_configured_size() {
     FONT_SIZE_TENTHS.store(clamp_size(value), Ordering::Relaxed);
 }
 
-fn terminal_font_family_stack() -> String {
+fn terminal_font_description() -> pango::FontDescription {
     if use_system_font() {
-        return SYSTEM_TERMINAL_FONT.to_string();
+        return pango::FontDescription::from_string(SYSTEM_TERMINAL_FONT);
     }
-    let primary = pango::FontDescription::from_string(&custom_font())
-        .family()
-        .map(|family| family.to_string())
-        .unwrap_or_else(|| DEFAULT_TERMINAL_FONT.to_string());
-    format!("{primary}, {TERMINAL_FONT_FALLBACKS}")
+    pango::FontDescription::from_string(&custom_font())
 }
 
 fn adjust_font_size(delta: i32) {
@@ -239,10 +233,15 @@ mod tests {
         set_custom_font("BlexMono Nerd Font Mono 15");
         assert_eq!(custom_font(), "BlexMono Nerd Font Mono 15");
         assert_eq!(font_size_pt(), 15.0);
-        assert_eq!(terminal_font_family_stack(), SYSTEM_TERMINAL_FONT);
+        assert_eq!(
+            terminal_font_description().family().as_deref(),
+            Some(SYSTEM_TERMINAL_FONT)
+        );
         set_use_system_font(false);
-        assert!(terminal_font_family_stack().contains("BlexMono Nerd Font Mono"));
-        assert!(terminal_font_family_stack().contains("Symbols Nerd Font"));
+        assert_eq!(
+            terminal_font_description().family().as_deref(),
+            Some("BlexMono Nerd Font Mono")
+        );
 
         zoom_reset();
         unsafe {
