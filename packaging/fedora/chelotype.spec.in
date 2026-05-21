@@ -1,5 +1,5 @@
 Name:           chelotype
-Version:        0.1.2
+Version:        0.1.3
 Release:        1%{?dist}
 Summary:        Opinionated GTK terminal
 
@@ -46,6 +46,9 @@ appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/com.chelo
 %{_datadir}/icons/hicolor/symbolic/apps/com.chelokot.Chelotype-symbolic.svg
 
 %changelog
+* Thu May 21 2026 Chelotype contributors <noreply@example.invalid> - 0.1.3-1
+- Fix Flatpak repository publishing on GitHub Actions
+
 * Thu May 21 2026 Chelotype contributors <noreply@example.invalid> - 0.1.2-1
 - Pin rebased Flatpak repository release source
 
