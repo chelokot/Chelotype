@@ -2732,24 +2732,16 @@ fn issue_url(debug_info: &str) -> String {
 }
 
 fn release_notes() -> &'static str {
-    "<h3>Version 0.1.8</h3>
-    <p>Shows the full release history in the About dialog changelog.</p>
-    <h3>Version 0.1.7</h3>
-    <p>Adds the main menu, About dialog, issue reporting metadata, and release notes.</p>
-    <h3>Version 0.1.6</h3>
-    <p>Improves palette transitions across the terminal, window chrome, and preferences UI.</p>
-    <h3>Version 0.1.5</h3>
-    <p>Fixes host shell terminal width propagation for Flatpak launches.</p>
-    <h3>Version 0.1.4</h3>
-    <p>Sets a more compact default terminal font size for Flatpak installs.</p>
-    <h3>Version 0.1.3</h3>
-    <p>Fixes Flatpak repository publishing on GitHub Actions user remotes.</p>
-    <h3>Version 0.1.2</h3>
-    <p>Publishes the signed Flatpak repository from the rebased release source.</p>
-    <h3>Version 0.1.1</h3>
-    <p>Adds a signed self-hosted Flatpak repository with GitHub Pages publishing.</p>
-    <h3>Version 0.1.0</h3>
-    <p>Initial Flathub-ready release with GTK terminal UI, container launching, mouse-driven interaction, smooth scrolling, cursor animation, and practical customization.</p>"
+    "<p>Version 0.1.9: Fixes About dialog changelog rendering with AppStream-compatible release notes markup.</p>
+    <p>Version 0.1.8: Shows the full release history in the About dialog changelog.</p>
+    <p>Version 0.1.7: Adds the main menu, About dialog, issue reporting metadata, and release notes.</p>
+    <p>Version 0.1.6: Improves palette transitions across the terminal, window chrome, and preferences UI.</p>
+    <p>Version 0.1.5: Fixes host shell terminal width propagation for Flatpak launches.</p>
+    <p>Version 0.1.4: Sets a more compact default terminal font size for Flatpak installs.</p>
+    <p>Version 0.1.3: Fixes Flatpak repository publishing on GitHub Actions user remotes.</p>
+    <p>Version 0.1.2: Publishes the signed Flatpak repository from the rebased release source.</p>
+    <p>Version 0.1.1: Adds a signed self-hosted Flatpak repository with GitHub Pages publishing.</p>
+    <p>Version 0.1.0: Initial Flathub-ready release with GTK terminal UI, container launching, mouse-driven interaction, smooth scrolling, cursor animation, and practical customization.</p>"
 }
 
 fn debug_info(window: &adw::ApplicationWindow, tab_count: usize) -> String {
