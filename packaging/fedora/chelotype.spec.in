@@ -1,5 +1,5 @@
 Name:           chelotype
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        Opinionated GTK terminal
 
@@ -46,5 +46,8 @@ appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/com.chelo
 %{_datadir}/icons/hicolor/symbolic/apps/com.chelokot.Chelotype-symbolic.svg
 
 %changelog
+* Thu May 21 2026 Chelotype contributors <noreply@example.invalid> - 0.1.1-1
+- Add self-hosted Flatpak repository publishing
+
 * Thu May 21 2026 Chelotype contributors <noreply@example.invalid> - 0.1.0-1
 - Initial package draft

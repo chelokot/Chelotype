@@ -26,7 +26,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>Terminal window with cursor preferences open</caption>
-      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/chelokot/Chelotype/v0.1.0/data/screenshots/chelotype-preferences.webp</image>
+      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/chelokot/Chelotype/v0.1.1/data/screenshots/chelotype-preferences.webp</image>
     </screenshot>
   </screenshots>
   <categories>
@@ -37,6 +37,11 @@
     <binary>chelotype</binary>
   </provides>
   <releases>
+    <release version="0.1.1" date="2026-05-21">
+      <description>
+        <p>Adds a signed self-hosted Flatpak repository with GitHub Pages publishing.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-05-21">
       <description>
         <p>Initial Flathub-ready release with GTK terminal UI, container launching, mouse-driven interaction, smooth scrolling, cursor animation, and practical customization.</p>

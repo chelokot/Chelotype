@@ -1,0 +1,82 @@
+name: Publish Flatpak
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      FLATPAK_BASE_URL: https://chelokot.com/flatpak
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder gpg
+          flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Import Flatpak signing key
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          install -d -m 700 "$HOME/.gnupg"
+          printf '%s' "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Build Flatpak repository
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+        run: |
+          flatpak-builder \
+            --user \
+            --disable-rofiles-fuse \
+            --install-deps-from=flathub \
+            --force-clean \
+            --default-branch=stable \
+            --repo=public/flatpak/repo \
+            --gpg-sign="$FLATPAK_GPG_KEY_ID" \
+            build-dir \
+            com.chelokot.Chelotype.yml
+          flatpak build-update-repo \
+            --title=Chelotype \
+            --comment="Opinionated GTK terminal" \
+            --description="Chelotype is an opinionated GTK terminal for Linux desktops." \
+            --homepage=https://github.com/chelokot/Chelotype \
+            --icon="$FLATPAK_BASE_URL/com.chelokot.Chelotype.svg" \
+            --gpg-import=packaging/flatpak/chelotype-flatpak-public.gpg \
+            --gpg-sign="$FLATPAK_GPG_KEY_ID" \
+            --generate-static-deltas \
+            public/flatpak/repo
+
+      - name: Write install descriptors
+        run: |
+          scripts/write-flatpak-repo-files.sh public/flatpak "$FLATPAK_BASE_URL"
+          printf 'chelokot.com\n' > public/CNAME
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
