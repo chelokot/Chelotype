@@ -20,6 +20,10 @@ matching that behavior.
 The `com.chelokot.Chelotype` app ID also requires `https://chelokot.com` to be
 reachable with a certificate valid for `chelokot.com`.
 
+The upstream GitHub repository and the tagged screenshot URL must be public
+before submission, because Flathub fetches source archives and AppStream media
+without repository credentials.
+
 New app submissions must be opened against `flathub/flathub` branch `new-pr`
 by a human maintainer. Copy `com.chelokot.Chelotype.yml`,
 `cargo-sources.json`, and `zig-sources.json` into the submission branch.
