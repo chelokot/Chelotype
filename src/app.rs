@@ -2586,7 +2586,9 @@ fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCan
 
 fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().title("General").build();
-    let group = adw::PreferencesGroup::builder().title("Cursor").build();
+    let group = adw::PreferencesGroup::builder()
+        .title("Cursor animation")
+        .build();
     let cursor_shape_grid = gtk::Grid::builder()
         .column_spacing(10)
         .margin_top(8)
@@ -2602,30 +2604,12 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         .margin_start(6)
         .margin_end(6)
         .build();
-    let animation_settings = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(12)
-        .margin_top(8)
-        .margin_bottom(8)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
-    populate_cursor_animation_grid(
-        &cursor_animation_grid,
-        crate::config::cursor_shape(),
-        canvas.clone(),
-        animation_settings.clone(),
-    );
-    populate_animation_settings(
-        &animation_settings,
-        crate::config::cursor_style(),
-        canvas.clone(),
-    );
+    let animation_settings_group = AnimationSettingsGroup::new();
     populate_cursor_shape_grid(
         &cursor_shape_grid,
         canvas.clone(),
         cursor_animation_grid.clone(),
-        animation_settings.clone(),
+        animation_settings_group.clone(),
     );
 
     let shape_group = adw::PreferencesGroup::builder()
@@ -2635,13 +2619,19 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     page.add(&shape_group);
 
     group.add(&cursor_animation_grid);
+    populate_cursor_animation_grid(
+        &cursor_animation_grid,
+        crate::config::cursor_shape(),
+        canvas.clone(),
+        animation_settings_group.clone(),
+    );
+    populate_animation_settings(
+        &animation_settings_group,
+        crate::config::cursor_style(),
+        canvas.clone(),
+    );
+    group.add(&animation_settings_group.container);
     page.add(&group);
-
-    let animation_settings_group = adw::PreferencesGroup::builder()
-        .title("Animation settings")
-        .build();
-    animation_settings_group.add(&animation_settings);
-    page.add(&animation_settings_group);
     page
 }
 
@@ -2701,7 +2691,7 @@ fn populate_cursor_shape_grid(
     grid: &gtk::Grid,
     canvas: TerminalCanvas,
     cursor_animation_grid: gtk::Grid,
-    animation_settings: gtk::Box,
+    animation_settings: AnimationSettingsGroup,
 ) {
     while let Some(child) = grid.first_child() {
         grid.remove(&child);
@@ -2741,7 +2731,7 @@ fn populate_cursor_animation_grid(
     grid: &gtk::Grid,
     shape: crate::config::CursorShape,
     canvas: TerminalCanvas,
-    animation_settings: gtk::Box,
+    animation_settings: AnimationSettingsGroup,
 ) {
     while let Some(child) = grid.first_child() {
         grid.remove(&child);
@@ -2838,7 +2828,7 @@ fn cursor_animation_preview(
     shape: crate::config::CursorShape,
     style: crate::config::CursorStyle,
 ) -> gtk::DrawingArea {
-    let preview = terminal_preview_canvas(290, 163, style, shape);
+    let preview = terminal_preview_canvas(290, 163, style, shape, 6.5);
     preview.set_render(preview_render_frame(
         ANIMATION_PREVIEW_LINES,
         animation_preview_target(0),
@@ -2887,6 +2877,7 @@ fn terminal_preview_canvas(
     height: i32,
     style: crate::config::CursorStyle,
     shape: crate::config::CursorShape,
+    font_size_pt: f64,
 ) -> TerminalCanvas {
     let preview = TerminalCanvas::new();
     preview.widget().set_width_request(width);
@@ -2895,7 +2886,7 @@ fn terminal_preview_canvas(
     preview.widget().set_focusable(false);
     preview.widget().set_cursor_from_name(None);
     preview.set_cursor_options_override(Some((style, shape)));
-    preview.set_font_size_override(Some(10.0));
+    preview.set_font_size_override(Some(font_size_pt));
     preview
 }
 
@@ -3469,7 +3460,7 @@ const PREVIEW_SCROLL_LINES: &[PreviewScrollLine] = &[
 ];
 
 fn cursor_shape_preview(shape: crate::config::CursorShape) -> gtk::DrawingArea {
-    let preview = terminal_preview_canvas(290, 46, crate::config::CursorStyle::Steady, shape);
+    let preview = terminal_preview_canvas(290, 46, crate::config::CursorStyle::Steady, shape, 10.0);
     preview.set_render(preview_render_frame(
         &["let cursor = shape"],
         PreviewCursorTarget {
@@ -3481,25 +3472,57 @@ fn cursor_shape_preview(shape: crate::config::CursorShape) -> gtk::DrawingArea {
     preview.widget().clone()
 }
 
+#[derive(Clone)]
+struct AnimationSettingsGroup {
+    container: gtk::Box,
+}
+
+impl AnimationSettingsGroup {
+    fn new() -> Self {
+        Self {
+            container: gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(12)
+                .margin_top(4)
+                .margin_bottom(12)
+                .margin_start(12)
+                .margin_end(12)
+                .build(),
+        }
+    }
+
+    fn clear(&self) {
+        while let Some(child) = self.container.first_child() {
+            self.container.remove(&child);
+        }
+    }
+
+    fn add(&self, row: &impl IsA<gtk::Widget>) {
+        self.container.append(row);
+    }
+}
+
 fn populate_animation_settings(
-    container: &gtk::Box,
+    container: &AnimationSettingsGroup,
     style: crate::config::CursorStyle,
     canvas: TerminalCanvas,
 ) {
-    while let Some(child) = container.first_child() {
-        container.remove(&child);
-    }
+    container.clear();
     if style == crate::config::CursorStyle::Steady {
         let label = gtk::Label::builder()
             .label("No animation parameters for steady cursor")
             .halign(gtk::Align::Start)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
             .build();
-        container.append(&label);
+        container.add(&label);
         return;
     }
-    container.append(&animation_slider_row(
+    container.add(&animation_slider_row(
         AnimationSliderSpec {
-            title: "Duration",
+            title: "Animation speed",
             key: "cursor_animation_duration_ms",
             value: f64::from(crate::config::cursor_animation_duration_ms()),
             min: 40.0,
@@ -3511,9 +3534,14 @@ fn populate_animation_settings(
         },
         canvas.clone(),
     ));
+    let advanced_expander = adw::ExpanderRow::builder()
+        .title("Advanced animation settings")
+        .expanded(false)
+        .build();
+    let mut has_advanced_settings = false;
     match style {
         crate::config::CursorStyle::Neovide => {
-            container.append(&animation_slider_row(
+            advanced_expander.add_row(&animation_slider_row(
                 AnimationSliderSpec {
                     title: "Trail size",
                     key: "cursor_neovide_trail_size",
@@ -3527,9 +3555,10 @@ fn populate_animation_settings(
                 },
                 canvas,
             ));
+            has_advanced_settings = true;
         }
         crate::config::CursorStyle::Smear => {
-            container.append(&animation_slider_row(
+            advanced_expander.add_row(&animation_slider_row(
                 AnimationSliderSpec {
                     title: "Head stiffness",
                     key: "cursor_smear_stiffness",
@@ -3543,7 +3572,7 @@ fn populate_animation_settings(
                 },
                 canvas.clone(),
             ));
-            container.append(&animation_slider_row(
+            advanced_expander.add_row(&animation_slider_row(
                 AnimationSliderSpec {
                     title: "Tail stiffness",
                     key: "cursor_smear_trailing_stiffness",
@@ -3557,7 +3586,7 @@ fn populate_animation_settings(
                 },
                 canvas.clone(),
             ));
-            container.append(&animation_slider_row(
+            advanced_expander.add_row(&animation_slider_row(
                 AnimationSliderSpec {
                     title: "Damping",
                     key: "cursor_smear_damping",
@@ -3571,8 +3600,17 @@ fn populate_animation_settings(
                 },
                 canvas,
             ));
+            has_advanced_settings = true;
         }
         crate::config::CursorStyle::Smooth | crate::config::CursorStyle::Steady => {}
+    }
+    if has_advanced_settings {
+        let advanced_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
+        advanced_list.append(&advanced_expander);
+        container.add(&advanced_list);
     }
 }
 
@@ -3592,35 +3630,54 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(5)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
         .build();
     let header = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
+        .height_request(34)
         .build();
     let label = gtk::Label::builder()
         .label(spec.title)
         .halign(gtk::Align::Start)
+        .valign(gtk::Align::Center)
         .hexpand(true)
         .build();
-    let value_label = gtk::Label::builder().halign(gtk::Align::End).build();
+    let value_label = gtk::Label::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Center)
+        .build();
     set_slider_value_label(&value_label, spec.value, spec.digits, spec.unit);
-    let reset = gtk::Button::builder().label("Reset").build();
+    let reset = gtk::Button::builder().css_classes(["flat"]).build();
+    reset.set_tooltip_text(Some("Reset"));
+    reset.update_property(&[gtk::accessible::Property::Label("Reset to default")]);
+    let reset_icon = gtk::Image::builder()
+        .icon_name("edit-undo-symbolic")
+        .pixel_size(16)
+        .build();
+    reset_icon.set_can_target(false);
+    reset.set_child(Some(&reset_icon));
+    reset.set_visible(!slider_value_is_default(
+        spec.value,
+        spec.default,
+        spec.step,
+    ));
     set_pointer_cursor(&reset);
+    let reset_slot = gtk::Box::builder()
+        .width_request(34)
+        .height_request(34)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    reset_slot.append(&reset);
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, spec.min, spec.max, spec.step);
     set_pointer_cursor(&scale);
     scale.set_value(spec.value);
     scale.set_digits(spec.digits);
     scale.set_hexpand(true);
-    scale.add_mark(
-        spec.min,
-        gtk::PositionType::Bottom,
-        Some(&format_slider_mark(spec.min, spec.digits, spec.unit)),
-    );
-    scale.add_mark(
-        spec.max,
-        gtk::PositionType::Bottom,
-        Some(&format_slider_mark(spec.max, spec.digits, spec.unit)),
-    );
     {
         let scale = scale.clone();
         reset.connect_clicked(move |_| {
@@ -3628,6 +3685,7 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
         });
     }
     {
+        let reset = reset.clone();
         let value_label = value_label.clone();
         scale.connect_value_changed(move |scale| {
             let value = scale.value();
@@ -3638,15 +3696,20 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
             };
             crate::config::write_value(spec.key, &formatted);
             set_slider_value_label(&value_label, value, spec.digits, spec.unit);
+            reset.set_visible(!slider_value_is_default(value, spec.default, spec.step));
             canvas.widget().queue_draw();
         });
     }
     header.append(&label);
     header.append(&value_label);
-    header.append(&reset);
+    header.append(&reset_slot);
     row.append(&header);
     row.append(&scale);
     row
+}
+
+fn slider_value_is_default(value: f64, default: f64, step: f64) -> bool {
+    (value - default).abs() < (step / 2.0).max(f64::EPSILON)
 }
 
 fn set_slider_value_label(label: &gtk::Label, value: f64, digits: i32, unit: &str) {
