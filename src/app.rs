@@ -2732,16 +2732,20 @@ fn issue_url(debug_info: &str) -> String {
 }
 
 fn release_notes() -> &'static str {
-    "<p>Version 0.1.9: Fixes About dialog changelog rendering with AppStream-compatible release notes markup.</p>
-    <p>Version 0.1.8: Shows the full release history in the About dialog changelog.</p>
-    <p>Version 0.1.7: Adds the main menu, About dialog, issue reporting metadata, and release notes.</p>
-    <p>Version 0.1.6: Improves palette transitions across the terminal, window chrome, and preferences UI.</p>
-    <p>Version 0.1.5: Fixes host shell terminal width propagation for Flatpak launches.</p>
-    <p>Version 0.1.4: Sets a more compact default terminal font size for Flatpak installs.</p>
-    <p>Version 0.1.3: Fixes Flatpak repository publishing on GitHub Actions user remotes.</p>
-    <p>Version 0.1.2: Publishes the signed Flatpak repository from the rebased release source.</p>
-    <p>Version 0.1.1: Adds a signed self-hosted Flatpak repository with GitHub Pages publishing.</p>
-    <p>Version 0.1.0: Initial Flathub-ready release with GTK terminal UI, container launching, mouse-driven interaction, smooth scrolling, cursor animation, and practical customization.</p>"
+    "<p>Polishes the What's New release history layout in the About dialog.</p>
+    <p>Earlier releases:</p>
+    <ul>
+      <li>0.1.9: AppStream-compatible About dialog changelog markup.</li>
+      <li>0.1.8: Full release history in About.</li>
+      <li>0.1.7: Main menu, About dialog, issue reporting metadata, and release notes.</li>
+      <li>0.1.6: Palette transitions across the terminal, window chrome, and preferences UI.</li>
+      <li>0.1.5: Host shell terminal width propagation for Flatpak launches.</li>
+      <li>0.1.4: Compact default terminal font size for Flatpak installs.</li>
+      <li>0.1.3: Flatpak repository publishing on GitHub Actions user remotes.</li>
+      <li>0.1.2: Signed Flatpak repository from the rebased release source.</li>
+      <li>0.1.1: Signed self-hosted Flatpak repository with GitHub Pages publishing.</li>
+      <li>0.1.0: Initial Flathub-ready release.</li>
+    </ul>"
 }
 
 fn debug_info(window: &adw::ApplicationWindow, tab_count: usize) -> String {

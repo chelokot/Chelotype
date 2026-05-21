@@ -26,7 +26,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>Terminal window with cursor preferences open</caption>
-      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/chelokot/Chelotype/v0.1.9/data/screenshots/chelotype-preferences.webp</image>
+      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/chelokot/Chelotype/v0.1.10/data/screenshots/chelotype-preferences.webp</image>
     </screenshot>
   </screenshots>
   <categories>
@@ -37,6 +37,11 @@
     <binary>chelotype</binary>
   </provides>
   <releases>
+    <release version="0.1.10" date="2026-05-21">
+      <description>
+        <p>Polishes the What's New release history layout in the About dialog.</p>
+      </description>
+    </release>
     <release version="0.1.9" date="2026-05-21">
       <description>
         <p>Fixes About dialog changelog rendering with AppStream-compatible release notes markup.</p>
