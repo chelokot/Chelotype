@@ -2,11 +2,15 @@
 
 <!-- chelotype-media-start -->
 <p align="center">
-  <video src="docs/media/chelotype-preferences.webm" autoplay loop muted playsinline controls width="960"></video>
+  <a href="docs/media/chelotype-preferences.webm">
+    <img src="docs/media/chelotype-preferences.webp" alt="Chelotype preferences preview" width="960">
+  </a>
 </p>
 <!-- chelotype-media-end -->
 
-Chelotype is an opinionated GTK terminal for Linux desktops. It is built in Rust, uses `libghostty-vt` as its terminal core, and focuses on container-first shell work, mouse-driven interaction, smooth scrolling, cursor animation, and practical customization.
+Chelotype is an opinionated GTK terminal. It supports mouse-driven interaction, smooth scrolling, direct launching into containers, Neovide-inspired cursor animations, customization, and more.
+
+It is written in Rust and uses `libghostty-vt` as its terminal core.
 
 ## Highlights
 

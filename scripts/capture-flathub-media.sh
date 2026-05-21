@@ -15,6 +15,7 @@ Usage: scripts/capture-flathub-media.sh [--backend mutter|x11] [--release] [--no
 Captures Flathub/README media:
 - data/screenshots/chelotype-preferences.webp
 - docs/media/chelotype-preferences.webm
+- docs/media/chelotype-preferences.webp
 
 The default backend is a nested headless Wayland compositor:
 host Mutter + virtual monitor + Mutter ScreenCast/PipeWire.
@@ -117,6 +118,7 @@ fi
 
 output_screenshot="$root/data/screenshots/chelotype-preferences.webp"
 output_video="$root/docs/media/chelotype-preferences.webm"
+output_preview="$root/docs/media/chelotype-preferences.webp"
 mkdir -p "$(dirname "$output_screenshot")" "$(dirname "$output_video")"
 
 workdir="$(mktemp -d)"
@@ -168,7 +170,9 @@ write_readme_media_block() {
   cat > "$readme_block" <<'EOF'
 <!-- chelotype-media-start -->
 <p align="center">
-  <video src="docs/media/chelotype-preferences.webm" autoplay loop muted playsinline controls width="960"></video>
+  <a href="docs/media/chelotype-preferences.webm">
+    <img src="docs/media/chelotype-preferences.webp" alt="Chelotype preferences preview" width="960">
+  </a>
 </p>
 <!-- chelotype-media-end -->
 EOF
@@ -283,6 +287,13 @@ capture_x11() {
     -f x11grab -draw_mouse 0 -framerate 30 -video_size 1920x1080 \
     -i "$display_input" -t "$capture_duration" \
     -c:v libvpx-vp9 -pix_fmt yuv444p -b:v 0 -crf 6 "$output_video"
+}
+
+write_animated_preview() {
+  ffmpeg -y -hide_banner -loglevel warning \
+    -i "$output_video" -vf "fps=30,scale=1440:-1:flags=lanczos" \
+    -loop 0 -c:v libwebp_anim -quality 95 -compression_level 6 -preset text \
+    "$output_preview"
 }
 
 write_pipewire_capture_helper() {
@@ -501,7 +512,9 @@ else
   capture_x11
 fi
 
+write_animated_preview
 write_readme_media_block
 
 printf 'Wrote %s\n' "$output_screenshot"
 printf 'Wrote %s\n' "$output_video"
+printf 'Wrote %s\n' "$output_preview"
