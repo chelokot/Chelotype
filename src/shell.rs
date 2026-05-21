@@ -205,7 +205,7 @@ mod tests {
     #[serial_test::serial]
     fn flatpak_shell_command_runs_host_shell_through_flatpak_spawn() {
         unsafe {
-            std::env::set_var("FLATPAK_ID", "com.chelotype.Terminal");
+            std::env::set_var("FLATPAK_ID", "com.chelokot.Chelotype");
             std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
         }
 

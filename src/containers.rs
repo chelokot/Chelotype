@@ -237,7 +237,7 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     #[serial_test::serial]
     fn toolbox_launch_runs_through_host_when_flatpaked() {
         unsafe {
-            std::env::set_var("FLATPAK_ID", "com.chelotype.Terminal");
+            std::env::set_var("FLATPAK_ID", "com.chelokot.Chelotype");
             std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
         }
 
@@ -274,7 +274,7 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     #[serial_test::serial]
     fn podman_launch_runs_through_host_shell_when_flatpaked() {
         unsafe {
-            std::env::set_var("FLATPAK_ID", "com.chelotype.Terminal");
+            std::env::set_var("FLATPAK_ID", "com.chelokot.Chelotype");
             std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
         }
 

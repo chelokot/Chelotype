@@ -4,7 +4,7 @@ set -euo pipefail
 prefix="${PREFIX:-/usr}"
 destdir="${DESTDIR:-}"
 datadir="$destdir$prefix/share"
-app_id="com.chelotype.Terminal"
+app_id="com.chelokot.Chelotype"
 
 install -Dm644 "data/$app_id.desktop" "$datadir/applications/$app_id.desktop"
 install -Dm644 "data/$app_id.metainfo.xml" "$datadir/metainfo/$app_id.metainfo.xml"

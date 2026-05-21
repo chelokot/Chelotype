@@ -2,7 +2,7 @@
 Name=Chelotype
 Comment=A GTK terminal backed by one PTY and libghostty-vt
 Exec=chelotype
-Icon=com.chelotype.Terminal
+Icon=com.chelokot.Chelotype
 StartupNotify=true
 Terminal=false
 Type=Application

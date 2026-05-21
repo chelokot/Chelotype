@@ -1,4 +1,4 @@
-app-id: com.chelotype.Terminal
+app-id: com.chelokot.Chelotype
 runtime: org.gnome.Platform
 runtime-version: "49"
 sdk: org.gnome.Sdk
@@ -22,7 +22,7 @@ cleanup:
   - /lib/zig-0.15.2
   - /share/cmake
   - /share/doc
-  - /share/licenses/com.chelotype.Terminal/zig
+  - /share/licenses/com.chelokot.Chelotype/zig
   - /share/man
   - /share/pkgconfig
   - "*.a"

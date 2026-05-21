@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.chelotype.Terminal</id>
+  <id>com.chelokot.Chelotype</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
   <name>Chelotype</name>
@@ -16,13 +16,13 @@
       toolbox and podman containers.
     </p>
   </description>
-  <developer id="com.chelotype">
+  <developer id="com.chelokot">
     <name>Chelotype contributors</name>
   </developer>
   <url type="homepage">https://github.com/chelokot/Chelotype</url>
   <url type="bugtracker">https://github.com/chelokot/Chelotype/issues</url>
   <url type="vcs-browser">https://github.com/chelokot/Chelotype</url>
-  <launchable type="desktop-id">com.chelotype.Terminal.desktop</launchable>
+  <launchable type="desktop-id">com.chelokot.Chelotype.desktop</launchable>
   <categories>
     <category>System</category>
     <category>TerminalEmulator</category>

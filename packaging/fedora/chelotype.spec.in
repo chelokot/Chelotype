@@ -32,15 +32,15 @@ PREFIX=%{_prefix} DESTDIR=%{buildroot} ./scripts/install-desktop-metadata.sh
 
 %check
 %cargo_test
-desktop-file-validate %{buildroot}%{_datadir}/applications/com.chelotype.Terminal.desktop
-appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/com.chelotype.Terminal.metainfo.xml
+desktop-file-validate %{buildroot}%{_datadir}/applications/com.chelokot.Chelotype.desktop
+appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/com.chelokot.Chelotype.metainfo.xml
 
 %files
 %{_bindir}/chelotype
-%{_datadir}/applications/com.chelotype.Terminal.desktop
-%{_datadir}/metainfo/com.chelotype.Terminal.metainfo.xml
-%{_datadir}/icons/hicolor/scalable/apps/com.chelotype.Terminal.svg
-%{_datadir}/icons/hicolor/symbolic/apps/com.chelotype.Terminal-symbolic.svg
+%{_datadir}/applications/com.chelokot.Chelotype.desktop
+%{_datadir}/metainfo/com.chelokot.Chelotype.metainfo.xml
+%{_datadir}/icons/hicolor/scalable/apps/com.chelokot.Chelotype.svg
+%{_datadir}/icons/hicolor/symbolic/apps/com.chelokot.Chelotype-symbolic.svg
 
 %changelog
 * Wed May 20 2026 Chelotype contributors <noreply@example.invalid> - 0.1.0-1

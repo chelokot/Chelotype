@@ -34,7 +34,7 @@ use gtk::{gio, glib};
 
 pub fn run_app() -> glib::ExitCode {
     let app = Application::builder()
-        .application_id("com.chelotype.Terminal")
+        .application_id("com.chelokot.Chelotype")
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.connect_activate(build_ui);

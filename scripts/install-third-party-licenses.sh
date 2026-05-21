@@ -3,7 +3,7 @@ set -eu
 
 prefix="${PREFIX:-/usr}"
 destdir="${DESTDIR:-}"
-app_id="${APP_ID:-com.chelotype.Terminal}"
+app_id="${APP_ID:-com.chelokot.Chelotype}"
 license_root="$destdir$prefix/share/licenses/$app_id"
 
 install_license_files() {

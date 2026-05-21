@@ -90,7 +90,7 @@ mod tests {
     #[serial]
     fn command_builder_uses_flatpak_spawn_inside_flatpak() {
         unsafe {
-            std::env::set_var("FLATPAK_ID", "com.chelotype.Terminal");
+            std::env::set_var("FLATPAK_ID", "com.chelokot.Chelotype");
         }
 
         assert_eq!(

@@ -29,13 +29,13 @@ Desktop metadata lives under `data/` and can be installed with:
 PREFIX=/usr DESTDIR=/tmp/chelotype-root scripts/install-desktop-metadata.sh
 ```
 
-The Flatpak manifest is `packaging/flatpak/com.chelotype.Terminal.yml`. It
+The Flatpak manifest is `packaging/flatpak/com.chelokot.Chelotype.yml`. It
 follows the same terminal-oriented sandbox shape as Ptyxis: the UI runs inside
 the Flatpak, while host shells and container commands are launched through
 `flatpak-spawn --host`.
 
 ```sh
-flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean build-dir packaging/flatpak/com.chelotype.Terminal.yml
+flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean build-dir packaging/flatpak/com.chelokot.Chelotype.yml
 ```
 
 Fedora packaging notes and a draft spec template are in `packaging/fedora/`.
