@@ -1,3 +1,4 @@
+use crate::backend::ScreenSize;
 use portable_pty::CommandBuilder;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -37,14 +38,18 @@ impl LaunchTarget {
     }
 
     pub fn command(&self) -> CommandBuilder {
+        self.command_with_size(None)
+    }
+
+    pub fn command_with_size(&self, size: Option<ScreenSize>) -> CommandBuilder {
         match self {
-            Self::Host => shell_command(),
+            Self::Host => shell_command(size),
             Self::Distrobox {
                 name,
                 has_unshared_groups,
-            } => distrobox_command(name, *has_unshared_groups),
-            Self::Toolbox { name } => podman_exec_command(name, true),
-            Self::Podman { name } => podman_exec_command(name, false),
+            } => distrobox_command(name, *has_unshared_groups, size),
+            Self::Toolbox { name } => podman_exec_command(name, true, size),
+            Self::Podman { name } => podman_exec_command(name, false, size),
         }
     }
 }
@@ -92,12 +97,16 @@ fn select_startup_launch_target(
         .unwrap_or(LaunchTarget::Host)
 }
 
-fn shell_command() -> CommandBuilder {
-    crate::shell::default_shell_command()
+fn shell_command(size: Option<ScreenSize>) -> CommandBuilder {
+    crate::shell::default_shell_command_with_size(size)
 }
 
-fn distrobox_command(name: &str, has_unshared_groups: bool) -> CommandBuilder {
-    let mut command = crate::host::command_builder("distrobox");
+fn distrobox_command(
+    name: &str,
+    has_unshared_groups: bool,
+    size: Option<ScreenSize>,
+) -> CommandBuilder {
+    let mut command = crate::host::command_builder_with_size("distrobox", size);
     command.arg("enter");
     if !has_unshared_groups {
         command.arg("--no-tty");
@@ -116,8 +125,12 @@ fn distrobox_command(name: &str, has_unshared_groups: bool) -> CommandBuilder {
     command
 }
 
-fn podman_exec_command(name: &str, is_toolbox_like: bool) -> CommandBuilder {
-    let mut command = crate::host::command_builder("/bin/sh");
+fn podman_exec_command(
+    name: &str,
+    is_toolbox_like: bool,
+    size: Option<ScreenSize>,
+) -> CommandBuilder {
+    let mut command = crate::host::command_builder_with_size("/bin/sh", size);
     command.arg("-lc");
     let mut exec = format!(
         "podman start {name} >/dev/null 2>&1 || true; exec podman exec --privileged --interactive --tty --detach-keys= ",
@@ -389,8 +402,8 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     #[test]
     #[serial_test::serial]
     fn toolbox_launch_runs_through_host_when_flatpaked() {
+        crate::host::set_flatpak_test_override(Some(true));
         unsafe {
-            std::env::set_var("FLATPAK_ID", "com.chelokot.Chelotype");
             std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
         }
 
@@ -413,15 +426,15 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
 
         unsafe {
             std::env::remove_var("CHELOTYPE_SHELL");
-            std::env::remove_var("FLATPAK_ID");
         }
+        crate::host::set_flatpak_test_override(None);
     }
 
     #[test]
     #[serial_test::serial]
     fn podman_launch_runs_through_host_shell_when_flatpaked() {
+        crate::host::set_flatpak_test_override(Some(true));
         unsafe {
-            std::env::set_var("FLATPAK_ID", "com.chelokot.Chelotype");
             std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
         }
 
@@ -443,8 +456,8 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
 
         unsafe {
             std::env::remove_var("CHELOTYPE_SHELL");
-            std::env::remove_var("FLATPAK_ID");
         }
+        crate::host::set_flatpak_test_override(None);
     }
 
     #[test]

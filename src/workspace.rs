@@ -71,9 +71,16 @@ impl TerminalWorkspace {
     }
 
     pub fn spawn_launch_target(target: LaunchTarget) -> io::Result<Self> {
+        Self::spawn_launch_target_with_size(target, None)
+    }
+
+    pub fn spawn_launch_target_with_size(
+        target: LaunchTarget,
+        size: Option<ScreenSize>,
+    ) -> io::Result<Self> {
         let title = target.title();
-        let command = target.command();
-        Self::spawn_titled_with_target(title, command, target)
+        let command = target.command_with_size(size);
+        Self::spawn_titled_with_target_size(title, command, target, size)
     }
 
     pub fn spawn_with(command: CommandBuilder) -> io::Result<Self> {
@@ -85,6 +92,15 @@ impl TerminalWorkspace {
         command: CommandBuilder,
         launch_target: LaunchTarget,
     ) -> io::Result<Self> {
+        Self::spawn_titled_with_target_size(title, command, launch_target, None)
+    }
+
+    fn spawn_titled_with_target_size(
+        title: impl Into<String>,
+        command: CommandBuilder,
+        launch_target: LaunchTarget,
+        size: Option<ScreenSize>,
+    ) -> io::Result<Self> {
         let first_tab_id = TabId(1);
         let first_pane_id = PaneId(1);
         Ok(Self {
@@ -94,7 +110,7 @@ impl TerminalWorkspace {
                 launch_target,
                 panes: vec![TerminalPane {
                     id: first_pane_id,
-                    backend: TerminalBackend::spawn(command)?,
+                    backend: spawn_backend(command, size)?,
                     width_weight: DEFAULT_PANE_WEIGHT,
                 }],
                 active_pane: first_pane_id,
@@ -130,9 +146,17 @@ impl TerminalWorkspace {
     }
 
     pub fn add_launch_target_tab(&mut self, target: LaunchTarget) -> io::Result<TabId> {
+        self.add_launch_target_tab_with_size(target, None)
+    }
+
+    pub fn add_launch_target_tab_with_size(
+        &mut self,
+        target: LaunchTarget,
+        size: Option<ScreenSize>,
+    ) -> io::Result<TabId> {
         let title = target.title();
-        let command = target.command();
-        self.add_titled_tab_with_target(title, command, target)
+        let command = target.command_with_size(size);
+        self.add_titled_tab_with_target_size(title, command, target, size)
     }
 
     pub fn add_titled_tab_with_target(
@@ -140,6 +164,16 @@ impl TerminalWorkspace {
         title: impl Into<String>,
         command: CommandBuilder,
         launch_target: LaunchTarget,
+    ) -> io::Result<TabId> {
+        self.add_titled_tab_with_target_size(title, command, launch_target, None)
+    }
+
+    fn add_titled_tab_with_target_size(
+        &mut self,
+        title: impl Into<String>,
+        command: CommandBuilder,
+        launch_target: LaunchTarget,
+        size: Option<ScreenSize>,
     ) -> io::Result<TabId> {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
@@ -151,7 +185,7 @@ impl TerminalWorkspace {
             launch_target,
             panes: vec![TerminalPane {
                 id: pane_id,
-                backend: TerminalBackend::spawn(command)?,
+                backend: spawn_backend(command, size)?,
                 width_weight: DEFAULT_PANE_WEIGHT,
             }],
             active_pane: pane_id,
@@ -160,12 +194,20 @@ impl TerminalWorkspace {
     }
 
     pub fn split_active_with(&mut self, command: CommandBuilder) -> io::Result<PaneId> {
+        self.split_active_with_size(command, None)
+    }
+
+    fn split_active_with_size(
+        &mut self,
+        command: CommandBuilder,
+        size: Option<ScreenSize>,
+    ) -> io::Result<PaneId> {
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         let tab = self.active_tab_mut();
         tab.panes.push(TerminalPane {
             id,
-            backend: TerminalBackend::spawn(command)?,
+            backend: spawn_backend(command, size)?,
             width_weight: DEFAULT_PANE_WEIGHT,
         });
         tab.active_pane = id;
@@ -173,11 +215,37 @@ impl TerminalWorkspace {
     }
 
     pub fn split_shell_active(&mut self) -> io::Result<PaneId> {
-        self.split_active_with(crate::shell::default_shell_command())
+        self.split_shell_active_with_size(None)
+    }
+
+    pub fn split_shell_active_with_size(&mut self, size: Option<ScreenSize>) -> io::Result<PaneId> {
+        let command = crate::shell::default_shell_command_with_size(size);
+        let id = self.split_active_with_size(command, size)?;
+        if let Some(size) = size {
+            self.resize_active_tab(size)?;
+        }
+        Ok(id)
     }
 
     pub fn add_shell_tab(&mut self) -> io::Result<TabId> {
         self.add_tab_with(crate::shell::default_shell_command())
+    }
+
+    pub fn respawn_active_tab_with_size(&mut self, size: ScreenSize) -> io::Result<()> {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == self.active_tab) else {
+            return Ok(());
+        };
+        let pane_id = PaneId(self.next_pane_id);
+        self.next_pane_id += 1;
+        let target = self.tabs[index].launch_target.clone();
+        let command = target.command_with_size(Some(size));
+        self.tabs[index].panes = vec![TerminalPane {
+            id: pane_id,
+            backend: TerminalBackend::spawn_with_size(command, size)?,
+            width_weight: DEFAULT_PANE_WEIGHT,
+        }];
+        self.tabs[index].active_pane = pane_id;
+        Ok(())
     }
 
     pub fn close(&mut self, id: TabId) -> bool {
@@ -494,6 +562,13 @@ impl TerminalWorkspace {
         let count = tab.panes.len() as isize;
         let next = (current as isize + delta).rem_euclid(count) as usize;
         tab.active_pane = tab.panes[next].id;
+    }
+}
+
+fn spawn_backend(command: CommandBuilder, size: Option<ScreenSize>) -> io::Result<TerminalBackend> {
+    match size {
+        Some(size) => TerminalBackend::spawn_with_size(command, size),
+        None => TerminalBackend::spawn(command),
     }
 }
 

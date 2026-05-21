@@ -454,7 +454,11 @@ fn build_ui(app: &Application) {
                         }
                     }
                     KeyAction::SplitPane => {
-                        if workspace.borrow_mut().split_shell_active().is_ok() {
+                        if workspace
+                            .borrow_mut()
+                            .split_shell_active_with_size(last_size.get())
+                            .is_ok()
+                        {
                             *content.borrow_mut() = None;
                             canvas_widget.grab_focus();
                             force_active_workspace_snapshot(
@@ -1426,9 +1430,15 @@ fn build_ui(app: &Application) {
         }
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
             && last_size.get() != Some(size)
-            && workspace_rc.borrow_mut().resize_active_tab(size).is_ok()
         {
-            last_size.set(Some(size));
+            let resize_result = if last_size.get().is_none() && crate::host::is_flatpak() {
+                workspace_rc.borrow_mut().respawn_active_tab_with_size(size)
+            } else {
+                workspace_rc.borrow_mut().resize_active_tab(size)
+            };
+            if resize_result.is_ok() {
+                last_size.set(Some(size));
+            }
         }
         let cursor_tick_started = std::time::Instant::now();
         tick_canvas.tick_cursor_visual();
@@ -1989,7 +1999,7 @@ fn add_launch_target_tab(target: LaunchTarget, context: &LaunchMenuContext) {
         .tabs
         .workspace
         .borrow_mut()
-        .add_launch_target_tab(target.clone())
+        .add_launch_target_tab_with_size(target.clone(), context.last_size.get())
     else {
         return;
     };

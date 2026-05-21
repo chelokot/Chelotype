@@ -74,8 +74,13 @@ impl TerminalBackend {
     }
 
     pub fn spawn(cmd: CommandBuilder) -> std::io::Result<Self> {
+        Self::spawn_with_size(cmd, ScreenSize::default())
+    }
+
+    pub fn spawn_with_size(mut cmd: CommandBuilder, size: ScreenSize) -> std::io::Result<Self> {
+        cmd.env("COLUMNS", size.cols.to_string());
+        cmd.env("LINES", size.rows.to_string());
         let pty_system = native_pty_system();
-        let size = ScreenSize::default();
         let pair = pty_system
             .openpty(size.pty_size())
             .map_err(|error| std::io::Error::other(error.to_string()))?;

@@ -26,7 +26,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>Terminal window with cursor preferences open</caption>
-      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/chelokot/Chelotype/v0.1.4/data/screenshots/chelotype-preferences.webp</image>
+      <image type="source" width="1920" height="1080">https://raw.githubusercontent.com/chelokot/Chelotype/v0.1.5/data/screenshots/chelotype-preferences.webp</image>
     </screenshot>
   </screenshots>
   <categories>
@@ -37,6 +37,11 @@
     <binary>chelotype</binary>
   </provides>
   <releases>
+    <release version="0.1.5" date="2026-05-21">
+      <description>
+        <p>Fixes host shell terminal width propagation for Flatpak launches.</p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-05-21">
       <description>
         <p>Sets a more compact default terminal font size for Flatpak installs.</p>

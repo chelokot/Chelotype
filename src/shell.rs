@@ -1,3 +1,4 @@
+use crate::backend::ScreenSize;
 use portable_pty::CommandBuilder;
 
 const FISH_CANDIDATES: [&str; 2] = ["/usr/bin/fish", "/bin/fish"];
@@ -51,7 +52,11 @@ bind \\e\\[57346u __chelotype_redo
 bind -M insert \\e\\[57346u __chelotype_redo";
 
 pub fn default_shell_command() -> CommandBuilder {
-    shell_command_for_path(&default_shell_path())
+    default_shell_command_with_size(None)
+}
+
+pub fn default_shell_command_with_size(size: Option<ScreenSize>) -> CommandBuilder {
+    shell_command_for_path_with_size(&default_shell_path(), size)
 }
 
 pub fn default_shell_argv() -> Vec<String> {
@@ -95,9 +100,9 @@ fn resolve_default_shell(
         .to_string()
 }
 
-fn shell_command_for_path(path: &str) -> CommandBuilder {
+fn shell_command_for_path_with_size(path: &str, size: Option<ScreenSize>) -> CommandBuilder {
     let argv = shell_argv_for_path(path);
-    let mut command = crate::host::command_builder(&argv[0]);
+    let mut command = crate::host::command_builder_with_size(&argv[0], size);
     command.args(&argv[1..]);
     command
 }
@@ -159,7 +164,7 @@ mod tests {
 
     #[test]
     fn fish_command_installs_chelotype_undo_redo_bindings() {
-        let command = shell_command_for_path("/usr/bin/fish");
+        let command = shell_command_for_path_with_size("/usr/bin/fish", None);
         let argv = command
             .get_argv()
             .iter()
@@ -178,7 +183,7 @@ mod tests {
 
     #[test]
     fn non_fish_command_is_not_modified() {
-        let command = shell_command_for_path("/bin/bash");
+        let command = shell_command_for_path_with_size("/bin/bash", None);
         let argv = command
             .get_argv()
             .iter()
@@ -204,8 +209,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn flatpak_shell_command_runs_host_shell_through_flatpak_spawn() {
+        crate::host::set_flatpak_test_override(Some(true));
         unsafe {
-            std::env::set_var("FLATPAK_ID", "com.chelokot.Chelotype");
             std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
         }
 
@@ -227,7 +232,7 @@ mod tests {
 
         unsafe {
             std::env::remove_var("CHELOTYPE_SHELL");
-            std::env::remove_var("FLATPAK_ID");
         }
+        crate::host::set_flatpak_test_override(None);
     }
 }
