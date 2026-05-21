@@ -1,7 +1,7 @@
 Name:           chelotype
 Version:        0.1.0
 Release:        1%{?dist}
-Summary:        PTY-backed GTK terminal
+Summary:        Opinionated GTK terminal
 
 License:        MIT OR Apache-2.0
 URL:            https://github.com/chelokot/Chelotype
@@ -16,8 +16,10 @@ BuildRequires:  rust-packaging
 BuildRequires:  zig >= 0.15
 
 %description
-Chelotype is a GTK terminal experiment backed by one real PTY and libghostty-vt
-as the terminal-core state.
+Chelotype is an opinionated GTK terminal for Linux desktops. It uses
+libghostty-vt as its terminal core and focuses on container-first shell work,
+mouse-driven interaction, smooth scrolling, cursor animation, and practical
+customization.
 
 %prep
 %autosetup -n Chelotype-%{version}
@@ -36,6 +38,7 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/com.chelokot.Chelotyp
 appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/com.chelokot.Chelotype.metainfo.xml
 
 %files
+%license LICENSE-APACHE LICENSE-MIT
 %{_bindir}/chelotype
 %{_datadir}/applications/com.chelokot.Chelotype.desktop
 %{_datadir}/metainfo/com.chelokot.Chelotype.metainfo.xml
@@ -43,5 +46,5 @@ appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/com.chelo
 %{_datadir}/icons/hicolor/symbolic/apps/com.chelokot.Chelotype-symbolic.svg
 
 %changelog
-* Wed May 20 2026 Chelotype contributors <noreply@example.invalid> - 0.1.0-1
+* Thu May 21 2026 Chelotype contributors <noreply@example.invalid> - 0.1.0-1
 - Initial package draft

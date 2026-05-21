@@ -8,9 +8,9 @@
 </p>
 <!-- chelotype-media-end -->
 
-Chelotype is an opinionated GTK terminal. It supports mouse-driven interaction, smooth scrolling, direct launching into containers, Neovide-inspired cursor animations, customization, and more.
+Chelotype is an opinionated GTK terminal for Linux desktops. It is built in Rust, uses `libghostty-vt` as its terminal core, and focuses on container-first shell work, mouse-driven interaction, smooth scrolling, cursor animation, and practical customization.
 
-It is written in Rust and uses `libghostty-vt` as its terminal core.
+It supports direct launching into containers, customization, and more.
 
 ## Highlights
 
@@ -54,10 +54,8 @@ Desktop/AppStream metadata lives in `data/`.
 PREFIX=/usr DESTDIR=/tmp/chelotype-root scripts/install-desktop-metadata.sh
 ```
 
-Flatpak packaging lives in `packaging/flatpak/`.
-
 ```sh
-flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean build-dir packaging/flatpak/com.chelokot.Chelotype.yml
+flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean build-dir com.chelokot.Chelotype.yml
 ```
 
 Fedora packaging notes and the draft spec live in `packaging/fedora/`.

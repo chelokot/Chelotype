@@ -1,6 +1,6 @@
 app-id: com.chelokot.Chelotype
 runtime: org.gnome.Platform
-runtime-version: "49"
+runtime-version: "50"
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -8,7 +8,6 @@ command: chelotype
 finish-args:
   - --allow=devel
   - --device=dri
-  - --filesystem=host
   - --share=ipc
   - --share=network
   - --socket=fallback-x11
@@ -41,6 +40,12 @@ modules:
         strip-components: 1
         only-arches:
           - x86_64
+      - type: archive
+        url: https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz
+        sha256: 958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f
+        strip-components: 1
+        only-arches:
+          - aarch64
 
   - name: chelotype
     buildsystem: simple
@@ -51,6 +56,7 @@ modules:
         ZIG_GLOBAL_CACHE_DIR: /run/build/chelotype/zig-cache
         PATH: /usr/lib/sdk/rust-stable/bin:/app/bin:/usr/bin
     build-commands:
+      - rm -rf .git
       - cargo --offline build --release --locked
       - install -Dm755 target/release/chelotype /app/bin/chelotype
       - install -Dm755 "$(find target/release/build/libghostty-vt-sys-*/out/ghostty-install/lib -name libghostty-vt.so.0.1.0 -print -quit)" /app/lib/libghostty-vt.so.0.1.0
@@ -71,10 +77,6 @@ modules:
         sha256: 91035e9deb5b66e905307101ac763fb47d2aded15dda71fcee463bf1e3e7766e
         dest: ghostty-src
         strip-components: 1
-      - type: dir
-        path: ../..
-        skip:
-          - .git
-          - .tools
-          - target
-          - cargo-sources.tmp.json
+      - type: git
+        url: https://github.com/chelokot/Chelotype.git
+        tag: v0.1.0

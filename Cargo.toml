@@ -2,11 +2,11 @@
 name = "chelotype"
 version = "0.1.0"
 edition = "2024"
-description = "PTY-backed GTK terminal"
+description = "Opinionated GTK terminal"
 repository = "https://github.com/chelokot/Chelotype"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
-keywords = ["terminal", "gtk", "pty", "shell"]
+keywords = ["terminal", "gtk", "containers", "pty", "shell"]
 categories = ["command-line-utilities"]
 
 [dependencies]

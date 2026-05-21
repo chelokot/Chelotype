@@ -6,6 +6,8 @@ Chelotype uses the Rust ecosystem's common permissive license expression:
 The distro package should install:
 
 - `/usr/bin/chelotype`
+- `LICENSE-APACHE`
+- `LICENSE-MIT`
 - `data/com.chelokot.Chelotype.desktop`
 - `data/com.chelokot.Chelotype.metainfo.xml`
 - `data/icons/hicolor/scalable/apps/com.chelokot.Chelotype.svg`
