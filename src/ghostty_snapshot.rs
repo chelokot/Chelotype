@@ -2,6 +2,7 @@ use crate::terminal_grid::{
     MouseMode, TerminalCell, TerminalColors, TerminalContent, TerminalLineMetadata,
     TerminalSemanticPrompt,
 };
+use crate::terminal_palette::default_terminal_palette;
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::screen::{CellWide, RowSemanticPrompt};
 use libghostty_vt::style::{RgbColor, Underline};
@@ -67,9 +68,12 @@ impl GhosttySnapshotter {
                 .saturating_sub(scrollbar.len)
                 .saturating_sub(scrollbar.offset) as usize,
             colors: TerminalColors {
-                foreground: rgb_to_hex(colors.foreground),
-                background: rgb_to_hex(colors.background),
-                cursor: colors.cursor.map(rgb_to_hex),
+                foreground: rgb_to_terminal_foreground(colors.foreground),
+                background: rgb_to_terminal_background(colors.background),
+                cursor: colors
+                    .cursor
+                    .map(rgb_to_hex)
+                    .or_else(|| Some(default_terminal_palette().cursor.to_string())),
             },
             mouse: mouse_mode(terminal),
         })
@@ -156,6 +160,20 @@ fn rgb_to_hex(color: RgbColor) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
 }
 
+fn rgb_to_terminal_foreground(color: RgbColor) -> String {
+    if color.r == 0xff && color.g == 0xff && color.b == 0xff {
+        return default_terminal_palette().foreground.to_string();
+    }
+    rgb_to_hex(color)
+}
+
+fn rgb_to_terminal_background(color: RgbColor) -> String {
+    if color.r == 0 && color.g == 0 && color.b == 0 {
+        return default_terminal_palette().background.to_string();
+    }
+    rgb_to_hex(color)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +192,22 @@ mod tests {
         let snapshot = snapshotter.snapshot(&terminal).expect("snapshot");
         assert!(snapshot.line_metadata[0].wrapped);
         assert!(snapshot.line_metadata[1].wrap_continuation);
+    }
+
+    #[test]
+    fn snapshot_uses_app_palette_for_raw_vt_default_colors() {
+        let terminal = Terminal::new(TerminalOptions {
+            cols: 4,
+            rows: 3,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        let mut snapshotter = GhosttySnapshotter::new().expect("snapshotter");
+        let snapshot = snapshotter.snapshot(&terminal).expect("snapshot");
+        assert_eq!(
+            snapshot.colors.background,
+            default_terminal_palette().background
+        );
+        assert_eq!(snapshot.colors.cursor.as_deref(), Some("#ffffff"));
     }
 }

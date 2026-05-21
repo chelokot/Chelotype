@@ -1,3 +1,4 @@
+use crate::terminal_palette::default_terminal_palette;
 use serde::Serialize;
 use std::borrow::Cow;
 
@@ -41,10 +42,11 @@ pub struct TerminalColors {
 
 impl Default for TerminalColors {
     fn default() -> Self {
+        let palette = default_terminal_palette();
         Self {
-            foreground: "#e5e7eb".to_string(),
-            background: "#0f1115".to_string(),
-            cursor: None,
+            foreground: palette.foreground.to_string(),
+            background: palette.background.to_string(),
+            cursor: Some(palette.cursor.to_string()),
         }
     }
 }

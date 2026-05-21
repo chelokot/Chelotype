@@ -9,6 +9,7 @@ use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderLine, Renderer};
 use crate::selection::{GridPoint, SelectionRange, selected_text_with_metadata};
 use crate::snapshot::{write_snapshot, write_workspace_render_snapshot};
+use crate::terminal_palette::default_terminal_palette;
 use crate::workspace::TerminalWorkspace;
 use crate::workspace_render::{WorkspaceRenderFrame, WorkspaceRenderLayout};
 use gtk::gdk;
@@ -707,8 +708,10 @@ fn write_render_dump(
     } else {
         format!("\n{input}")
     };
+    let palette = default_terminal_palette();
     let html = format!(
-        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">{history}{input_html}</body></html>"
+        "<html><body style=\"background:{};color:{};font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">{history}{input_html}</body></html>",
+        palette.background, palette.foreground
     );
     if let Some(parent) = base.parent() {
         create_dir_all(parent)?;

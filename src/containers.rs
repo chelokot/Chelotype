@@ -1,23 +1,36 @@
 use portable_pty::CommandBuilder;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchTarget {
     Host,
-    Toolbox { name: String },
-    Podman { name: String },
+    Distrobox {
+        name: String,
+        has_unshared_groups: bool,
+    },
+    Toolbox {
+        name: String,
+    },
+    Podman {
+        name: String,
+    },
 }
 
 impl LaunchTarget {
     pub fn title(&self) -> String {
         match self {
             Self::Host => "My Computer".to_string(),
-            Self::Toolbox { name } | Self::Podman { name } => name.clone(),
+            Self::Distrobox { name, .. } | Self::Toolbox { name } | Self::Podman { name } => {
+                name.clone()
+            }
         }
     }
 
     pub fn id(&self) -> String {
         match self {
             Self::Host => "host".to_string(),
+            Self::Distrobox { name, .. } => format!("distrobox:{name}"),
             Self::Toolbox { name } => format!("toolbox:{name}"),
             Self::Podman { name } => format!("podman:{name}"),
         }
@@ -26,24 +39,12 @@ impl LaunchTarget {
     pub fn command(&self) -> CommandBuilder {
         match self {
             Self::Host => shell_command(),
-            Self::Toolbox { name } => {
-                let mut command = crate::host::command_builder("toolbox");
-                command.arg("enter");
-                command.arg("--container");
-                command.arg(name);
-                command.args(crate::shell::default_shell_argv());
-                command
-            }
-            Self::Podman { name } => {
-                let mut command = crate::host::command_builder("/bin/sh");
-                command.arg("-lc");
-                command.arg(format!(
-                    "podman start {name} >/dev/null 2>&1 || true; exec podman exec -it {name} {shell}",
-                    name = shell_quote(name),
-                    shell = crate::shell::default_shell_command_line()
-                ));
-                command
-            }
+            Self::Distrobox {
+                name,
+                has_unshared_groups,
+            } => distrobox_command(name, *has_unshared_groups),
+            Self::Toolbox { name } => podman_exec_command(name, true),
+            Self::Podman { name } => podman_exec_command(name, false),
         }
     }
 }
@@ -59,24 +60,18 @@ pub fn remember_startup_launch_target(target: &LaunchTarget) {
 
 pub fn available_launch_targets() -> Vec<LaunchTarget> {
     let mut targets = vec![LaunchTarget::Host];
+    let podman_targets = podman_containers();
+    let podman_names = podman_targets
+        .iter()
+        .map(LaunchTarget::title)
+        .collect::<HashSet<_>>();
     targets.extend(
         toolbox_containers()
             .into_iter()
+            .filter(|name| !podman_names.contains(name.as_str()))
             .map(|name| LaunchTarget::Toolbox { name }),
     );
-    let toolbox_names = targets
-        .iter()
-        .filter_map(|target| match target {
-            LaunchTarget::Toolbox { name } => Some(name.clone()),
-            _ => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
-    targets.extend(
-        podman_running_containers()
-            .into_iter()
-            .filter(|name| !toolbox_names.contains(name.as_str()))
-            .map(|name| LaunchTarget::Podman { name }),
-    );
+    targets.extend(podman_targets);
     targets
 }
 
@@ -101,6 +96,54 @@ fn shell_command() -> CommandBuilder {
     crate::shell::default_shell_command()
 }
 
+fn distrobox_command(name: &str, has_unshared_groups: bool) -> CommandBuilder {
+    let mut command = crate::host::command_builder("distrobox");
+    command.arg("enter");
+    if !has_unshared_groups {
+        command.arg("--no-tty");
+    }
+    command.arg(name);
+    if !has_unshared_groups {
+        command.arg("--additional-flags");
+        command.arg("--tty");
+    }
+    command.arg("--");
+    command.arg("env");
+    if let Some(directory) = launch_working_directory() {
+        command.arg(format!("--chdir={directory}"));
+    }
+    command.args(crate::shell::default_shell_argv());
+    command
+}
+
+fn podman_exec_command(name: &str, is_toolbox_like: bool) -> CommandBuilder {
+    let mut command = crate::host::command_builder("/bin/sh");
+    command.arg("-lc");
+    let mut exec = format!(
+        "podman start {name} >/dev/null 2>&1 || true; exec podman exec --privileged --interactive --tty --detach-keys= ",
+        name = shell_quote(name),
+    );
+    if is_toolbox_like {
+        if let Some(user) = crate::host::environment_value("USER") {
+            exec.push_str(&format!("--user={} ", shell_quote(&user)));
+        }
+        if let Some(directory) = launch_working_directory() {
+            exec.push_str(&format!("--workdir={} ", shell_quote(&directory)));
+        }
+    }
+    exec.push_str(&shell_quote(name));
+    exec.push(' ');
+    exec.push_str(&crate::shell::default_shell_command_line());
+    command.arg(exec);
+    command
+}
+
+fn launch_working_directory() -> Option<String> {
+    crate::host::environment_value("PWD")
+        .filter(|path| !path.trim().is_empty())
+        .or_else(|| crate::host::environment_value("HOME"))
+}
+
 fn toolbox_containers() -> Vec<String> {
     let Ok(output) = crate::host::command("toolbox")
         .args(["list", "--containers"])
@@ -114,9 +157,9 @@ fn toolbox_containers() -> Vec<String> {
     parse_toolbox_list(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn podman_running_containers() -> Vec<String> {
+fn podman_containers() -> Vec<LaunchTarget> {
     let Ok(output) = crate::host::command("podman")
-        .args(["ps", "-a", "--format", "{{.Names}}"])
+        .args(["ps", "-a", "--format=json"])
         .output()
     else {
         return Vec::new();
@@ -124,20 +167,11 @@ fn podman_running_containers() -> Vec<String> {
     if !output.status.success() {
         return Vec::new();
     }
-    parse_names(&String::from_utf8_lossy(&output.stdout))
+    parse_podman_targets(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn parse_names(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn parse_toolbox_list(output: &str) -> Vec<String> {
@@ -155,6 +189,46 @@ fn parse_toolbox_list(output: &str) -> Vec<String> {
             columns.get(1).copied().or_else(|| columns.first().copied())
         })
         .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PodmanContainerJson {
+    is_infra: Option<bool>,
+    labels: Option<HashMap<String, String>>,
+    names: Vec<String>,
+}
+
+fn parse_podman_targets(output: &str) -> Vec<LaunchTarget> {
+    let Ok(containers) = serde_json::from_str::<Vec<PodmanContainerJson>>(output) else {
+        return Vec::new();
+    };
+    containers
+        .into_iter()
+        .filter(|container| container.is_infra != Some(true))
+        .filter_map(|container| {
+            let name = container.names.into_iter().next()?;
+            let labels = container.labels.unwrap_or_default();
+            if labels
+                .get("manager")
+                .is_some_and(|value| value == "distrobox")
+                || labels.get("manager").is_some_and(|value| value == "apx")
+            {
+                return Some(LaunchTarget::Distrobox {
+                    name,
+                    has_unshared_groups: labels
+                        .get("distrobox.unshare_groups")
+                        .is_some_and(|value| value == "1"),
+                });
+            }
+            if labels.contains_key("com.github.containers.toolbox")
+                || labels.contains_key("org.containers.toolbox")
+            {
+                return Some(LaunchTarget::Toolbox { name });
+            }
+            Some(LaunchTarget::Podman { name })
+        })
         .collect()
 }
 
@@ -176,21 +250,102 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     }
 
     #[test]
-    fn parses_plain_podman_names() {
-        assert_eq!(
-            parse_names("fedora-toolbox-sha-b719027\norn-clickhouse-local\n"),
-            vec!["fedora-toolbox-sha-b719027", "orn-clickhouse-local"]
-        );
-    }
-
-    #[test]
     fn shell_quotes_container_names() {
         assert_eq!(shell_quote("fedora-toolbox"), "'fedora-toolbox'");
         assert_eq!(shell_quote("bad'name"), "'bad'\\''name'");
     }
 
     #[test]
-    fn toolbox_launch_runs_configured_shell_inside_container() {
+    fn parses_podman_json_with_ptyxis_label_priority() {
+        let output = r#"[
+          {
+            "IsInfra": false,
+            "Names": ["fedora-toolbox"],
+            "Labels": {
+              "manager": "distrobox",
+              "com.github.containers.toolbox": "true",
+              "distrobox.unshare_groups": "0"
+            }
+          },
+          {
+            "IsInfra": false,
+            "Names": ["fedora-toolbox-raw"],
+            "Labels": {
+              "com.github.containers.toolbox": "true"
+            }
+          },
+          {
+            "IsInfra": false,
+            "Names": ["postgres"],
+            "Labels": {}
+          },
+          {
+            "IsInfra": true,
+            "Names": ["infra"],
+            "Labels": {}
+          }
+        ]"#;
+
+        assert_eq!(
+            parse_podman_targets(output),
+            vec![
+                LaunchTarget::Distrobox {
+                    name: "fedora-toolbox".to_string(),
+                    has_unshared_groups: false,
+                },
+                LaunchTarget::Toolbox {
+                    name: "fedora-toolbox-raw".to_string(),
+                },
+                LaunchTarget::Podman {
+                    name: "postgres".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn distrobox_launch_uses_distrobox_enter_without_root_podman_exec() {
+        let old_pwd = std::env::var_os("PWD");
+        unsafe {
+            std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
+            std::env::set_var("PWD", "/var/home/chelokot");
+        }
+
+        let command = LaunchTarget::Distrobox {
+            name: "fedora-toolbox".to_string(),
+            has_unshared_groups: false,
+        }
+        .command();
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(argv[0], "distrobox");
+        assert_eq!(argv[1], "enter");
+        assert!(argv.contains(&"--no-tty".to_string()));
+        assert!(argv.contains(&"fedora-toolbox".to_string()));
+        assert!(argv.contains(&"--additional-flags".to_string()));
+        assert!(argv.contains(&"--tty".to_string()));
+        assert!(argv.contains(&"--".to_string()));
+        assert!(argv.contains(&"env".to_string()));
+        assert!(argv.contains(&"--chdir=/var/home/chelokot".to_string()));
+        assert_eq!(argv.last().map(String::as_str), Some("/bin/sh"));
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_SHELL");
+            if let Some(old_pwd) = old_pwd {
+                std::env::set_var("PWD", old_pwd);
+            } else {
+                std::env::remove_var("PWD");
+            }
+        }
+    }
+
+    #[test]
+    fn toolbox_launch_runs_as_user_in_working_directory() {
         let command = LaunchTarget::Toolbox {
             name: "fedora-toolbox-latest".to_string(),
         }
@@ -201,16 +356,12 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
             .map(|argument| argument.to_string_lossy().to_string())
             .collect::<Vec<_>>();
 
-        assert!(argv.starts_with(&[
-            "toolbox".to_string(),
-            "enter".to_string(),
-            "--container".to_string(),
-            "fedora-toolbox-latest".to_string(),
-        ]));
-        assert!(
-            argv.iter().any(|argument| argument == "--init-command")
-                || !argv.iter().any(|argument| argument.ends_with("fish"))
-        );
+        assert_eq!(argv[0], "/bin/sh");
+        assert_eq!(argv[1], "-lc");
+        assert!(argv[2].contains("podman start 'fedora-toolbox-latest'"));
+        assert!(argv[2].contains("podman exec --privileged --interactive --tty"));
+        assert!(argv[2].contains("--user="));
+        assert!(argv[2].contains("--workdir="));
     }
 
     #[test]
@@ -227,7 +378,9 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
 
         assert_eq!(argv[0], "/bin/sh");
         assert_eq!(argv[1], "-lc");
-        assert!(argv[2].contains("podman exec -it 'fedora-toolbox'"));
+        assert!(argv[2].contains("podman exec --privileged --interactive --tty"));
+        assert!(!argv[2].contains("--user="));
+        assert!(!argv[2].contains("--workdir="));
         if argv[2].contains("fish") {
             assert!(argv[2].contains("'--init-command'"));
         }
@@ -251,18 +404,12 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
             .map(|argument| argument.to_string_lossy().to_string())
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            &argv[..6],
-            [
-                "flatpak-spawn",
-                "--host",
-                "toolbox",
-                "enter",
-                "--container",
-                "fedora-toolbox-latest",
-            ]
-        );
-        assert_eq!(argv[6], "/bin/sh");
+        assert_eq!(argv[0], "flatpak-spawn");
+        assert_eq!(argv[1], "--host");
+        assert_eq!(argv[2], "/bin/sh");
+        assert_eq!(argv[3], "-lc");
+        assert!(argv[4].contains("podman start 'fedora-toolbox-latest'"));
+        assert!(argv[4].contains("--user="));
 
         unsafe {
             std::env::remove_var("CHELOTYPE_SHELL");
@@ -292,7 +439,7 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
         assert_eq!(argv[1], "--host");
         assert_eq!(argv[2], "/bin/sh");
         assert_eq!(argv[3], "-lc");
-        assert!(argv[4].contains("podman exec -it 'fedora-toolbox'"));
+        assert!(argv[4].contains("podman exec --privileged --interactive --tty"));
 
         unsafe {
             std::env::remove_var("CHELOTYPE_SHELL");
@@ -303,6 +450,14 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     #[test]
     fn launch_target_ids_are_stable() {
         assert_eq!(LaunchTarget::Host.id(), "host");
+        assert_eq!(
+            LaunchTarget::Distrobox {
+                name: "fedora-toolbox".to_string(),
+                has_unshared_groups: false
+            }
+            .id(),
+            "distrobox:fedora-toolbox"
+        );
         assert_eq!(
             LaunchTarget::Toolbox {
                 name: "fedora-toolbox-latest".to_string()

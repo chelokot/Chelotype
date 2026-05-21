@@ -1,4 +1,5 @@
 use chelotype::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
+use chelotype::terminal_palette::default_terminal_palette;
 use portable_pty::CommandBuilder;
 use serial_test::serial;
 use std::thread::sleep;
@@ -125,7 +126,11 @@ fn backend_preserves_ansi_foreground_colors_in_cells() {
         .iter()
         .flat_map(|line| line.iter())
         .find(|cell| {
-            cell.text == "C" && cell.fg.as_deref().is_some_and(|color| color != "#e5e7eb")
+            cell.text == "C"
+                && cell
+                    .fg
+                    .as_deref()
+                    .is_some_and(|color| color != default_terminal_palette().foreground)
         });
     assert!(red_cell.is_some(), "red output cell was not colorized");
 }

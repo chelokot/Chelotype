@@ -74,6 +74,7 @@ pub struct RenderStyle {
 pub struct RenderFrame {
     pub history_markup: String,
     pub input_markup: String,
+    pub background: String,
     pub cursor: RenderCursor,
     pub preedit: Option<RenderPreedit>,
     pub input_text: String,
@@ -129,7 +130,7 @@ impl Renderer {
                 line: content.cursor_line,
                 column: content.cursor_col,
                 visible: content.cursor_visible,
-                color: "#7dd3fc".to_string(),
+                color: cursor_color(content),
             },
             input_text,
         }
@@ -190,11 +191,12 @@ impl Renderer {
         RenderFrame {
             history_markup,
             input_markup,
+            background: content.colors.background.clone(),
             cursor: RenderCursor {
                 line: content.cursor_line,
                 column: content.cursor_col,
                 visible: content.cursor_visible,
-                color: "#7dd3fc".to_string(),
+                color: cursor_color(content),
             },
             preedit: None,
             input_text,
@@ -202,6 +204,15 @@ impl Renderer {
             command_blocks: detail.command_blocks(content),
         }
     }
+}
+
+fn cursor_color(content: &RenderableContentOwned) -> String {
+    content
+        .colors
+        .cursor
+        .as_ref()
+        .unwrap_or(&content.colors.foreground)
+        .clone()
 }
 
 impl RenderLine {

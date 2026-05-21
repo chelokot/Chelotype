@@ -1,5 +1,6 @@
 use crate::canvas::{CursorDrawPath, CursorDrawPosition, draw_cursor_visual};
 use crate::config::{CursorShape, CursorStyle};
+use crate::terminal_palette::default_terminal_palette;
 use gtk::cairo;
 use std::time::Duration;
 
@@ -26,7 +27,12 @@ fn draw_demo_terminal(
     style: CursorStyle,
     frame: usize,
 ) {
-    context.set_source_rgb(15.0 / 255.0, 17.0 / 255.0, 21.0 / 255.0);
+    let background = default_terminal_palette().background_rgb();
+    context.set_source_rgb(
+        background.red_unit(),
+        background.green_unit(),
+        background.blue_unit(),
+    );
     context.rectangle(0.0, 0.0, PREVIEW_WIDTH as f64, PREVIEW_HEIGHT as f64);
     let _ = context.fill();
 

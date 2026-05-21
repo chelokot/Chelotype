@@ -1,3 +1,4 @@
+use chelotype::terminal_palette::default_terminal_palette;
 use serial_test::serial;
 use std::fs::{read_dir, read_to_string};
 use std::process::Command;
@@ -69,6 +70,63 @@ exit 1
     }
 }
 
+fn write_fake_podman(bin_dir: &std::path::Path, log_path: &std::path::Path, container_name: &str) {
+    let fake_podman = bin_dir.join("podman");
+    std::fs::write(
+        &fake_podman,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+log={log:?}
+container_name={container_name:?}
+if [ "${{1:-}}" = "ps" ] && [ "${{2:-}}" = "-a" ] && [ "${{3:-}}" = "--format=json" ]; then
+    printf '[{{"IsInfra":false,"Names":["%s"],"Labels":{{"com.github.containers.toolbox":"true"}}}}]\n' "$container_name"
+    exit 0
+fi
+if [ "${{1:-}}" = "start" ]; then
+    exit 0
+fi
+if [ "${{1:-}}" = "exec" ]; then
+    shift
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --user|--workdir|--detach-keys)
+                shift 2
+                ;;
+            --user=*|--workdir=*|--detach-keys=*|--privileged|--interactive|--tty)
+                shift
+                ;;
+            --*)
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    container="$1"
+    shift
+    printf 'enter\t%s\t%s\n' "$container" "$*" >> "$log"
+    exec "$@"
+fi
+printf 'unexpected\t%s\n' "$*" >> "$log"
+exit 1
+"#,
+            log = log_path.to_string_lossy(),
+            container_name = container_name,
+        ),
+    )
+    .expect("fake podman script");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&fake_podman)
+            .expect("fake podman metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_podman, permissions).expect("fake podman executable");
+    }
+}
+
 fn json_snapshots(dir: &std::path::Path) -> Vec<serde_json::Value> {
     snapshot_paths(dir)
         .into_iter()
@@ -96,7 +154,9 @@ fn snapshot_has_colored_text(snapshot: &serde_json::Value, needle: &str) -> bool
         line_text.trim_end() == needle
             && cells.iter().any(|cell| {
                 cell["text"].as_str().is_some_and(|text| !text.is_empty())
-                    && cell["fg"].as_str().is_some_and(|color| color != "#e5e7eb")
+                    && cell["fg"]
+                        .as_str()
+                        .is_some_and(|color| color != default_terminal_palette().foreground)
             })
     })
 }
@@ -2826,6 +2886,7 @@ fn gtk_e2e_starts_first_tab_in_available_toolbox_container_under_xvfb() {
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     let toolbox_log = dir.join("toolbox.tsv");
     write_fake_toolbox(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
+    write_fake_podman(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
 
     let snapshot_dir = dir.join("snapshots");
     std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
@@ -2947,6 +3008,7 @@ fn gtk_e2e_opens_toolbox_container_from_launch_menu_under_xvfb() {
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     let toolbox_log = dir.join("toolbox.tsv");
     write_fake_toolbox(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
+    write_fake_podman(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
 
     let snapshot_dir = dir.join("snapshots");
     std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
@@ -3097,6 +3159,7 @@ fn gtk_e2e_remembers_single_toolbox_tab_after_window_close_under_xvfb() {
     std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
     let toolbox_log = dir.join("toolbox.tsv");
     write_fake_toolbox(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
+    write_fake_podman(&fake_bin, &toolbox_log, "fedora-toolbox-latest");
 
     let first_snapshot_dir = dir.join("first-snapshots");
     let second_snapshot_dir = dir.join("second-snapshots");

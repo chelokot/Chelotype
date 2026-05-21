@@ -3,6 +3,7 @@ use crate::cell_text::lines_to_text;
 use crate::render::RenderFrame;
 use crate::selection::{SelectionRange, selected_text_with_metadata};
 use crate::terminal_grid::{TerminalCell, TerminalLineMetadata, TerminalSemanticPrompt};
+use crate::terminal_palette::default_terminal_palette;
 use crate::workspace_render::WorkspaceRenderFrame;
 use serde::Serialize;
 use std::fs::{File, create_dir_all};
@@ -192,19 +193,21 @@ pub fn write_render_frame_snapshot(snapshot: &RenderFrame, label: &str) -> Optio
     } else {
         format!("\n{}", snapshot.input_markup)
     };
+    let palette = default_terminal_palette();
     let preedit_html = snapshot
         .preedit
         .as_ref()
         .map(|preedit| {
             format!(
-                "\n<span style=\"color:#e5e7eb;text-decoration:underline;\">{}</span>",
+                "\n<span style=\"color:{};text-decoration:underline;\">{}</span>",
+                palette.foreground,
                 escape_text(&preedit.text)
             )
         })
         .unwrap_or_default();
     let html = format!(
-        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">{}{}{}</body></html>",
-        snapshot.history_markup, input_html, preedit_html
+        "<html><body style=\"background:{};color:{};font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">{}{}{}</body></html>",
+        palette.background, palette.foreground, snapshot.history_markup, input_html, preedit_html
     );
     let _ = write_file(base.with_extension("render.html"), html.into_bytes());
     Some(base)
@@ -227,8 +230,10 @@ fn semantic_prompt_name(metadata: TerminalLineMetadata) -> &'static str {
 }
 
 fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
-    let mut out = String::from(
-        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">",
+    let palette = default_terminal_palette();
+    let mut out = format!(
+        "<html><body style=\"background:{};color:{};font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">",
+        palette.background, palette.foreground
     );
     for (line_idx, line) in snapshot.lines.iter().enumerate() {
         for (col_idx, cell) in line.cells.iter().enumerate() {
@@ -239,7 +244,10 @@ fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
                 && snapshot.cursor_line == line_idx as i32
                 && snapshot.cursor_col == col_idx as i32
             {
-                out.push_str("<span style=\"color:#7dd3fc\">|</span>");
+                out.push_str(&format!(
+                    "<span style=\"color:{}\">|</span>",
+                    palette.cursor
+                ));
             }
             let mut span = String::from("<span style=\"");
             span.push_str(&format!("color:{};", cell.fg));
@@ -264,7 +272,10 @@ fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
             && snapshot.cursor_line == line_idx as i32
             && snapshot.cursor_col == line.cells.len() as i32
         {
-            out.push_str("<span style=\"color:#7dd3fc\">|</span>");
+            out.push_str(&format!(
+                "<span style=\"color:{}\">|</span>",
+                palette.cursor
+            ));
         }
         if line_idx + 1 != snapshot.lines.len() {
             out.push('\n');
@@ -275,8 +286,10 @@ fn snapshot_to_html(snapshot: &SnapshotJson) -> String {
 }
 
 fn workspace_render_to_html(snapshot: &WorkspaceRenderFrame) -> String {
-    let mut out = String::from(
-        "<html><body style=\"background:#0f1115;color:#e5e7eb;font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">",
+    let palette = default_terminal_palette();
+    let mut out = format!(
+        "<html><body style=\"background:{};color:{};font-family:'Source Code Pro',monospace;font-size:13px;white-space:pre;\">",
+        palette.background, palette.foreground
     );
     for pane in &snapshot.panes {
         out.push_str(&format!(
@@ -388,9 +401,12 @@ mod tests {
             }],
         };
         let html = snapshot_to_html(&snapshot);
+        let cursor = default_terminal_palette().cursor;
         assert!(
-            html.find(">a</span><span style=\"color:#7dd3fc\">|</span><span")
-                .is_some(),
+            html.find(&format!(
+                ">a</span><span style=\"color:{cursor}\">|</span><span"
+            ))
+            .is_some(),
             "{html}"
         );
     }

@@ -105,8 +105,8 @@ fn build_ui(app: &Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Chelotype Terminal")
-        .default_width(1100)
-        .default_height(760)
+        .default_width(1760)
+        .default_height(990)
         .content(&content)
         .build();
     {
@@ -2523,8 +2523,8 @@ fn show_canvas_context_menu(
 fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCanvas) {
     let window = adw::Window::builder()
         .title("Settings")
-        .default_width(760)
-        .default_height(760)
+        .default_width(960)
+        .default_height(960)
         .transient_for(parent)
         .modal(true)
         .build();
@@ -2977,7 +2977,12 @@ fn draw_scrolling_preview_panel(context: &gtk::cairo::Context, panel: PreviewScr
         .floor()
         .max(1.0);
     let visible_height = visible_rows * line_height + terminal_padding_y * 2.0;
-    context.set_source_rgb(15.0 / 255.0, 17.0 / 255.0, 21.0 / 255.0);
+    let background = crate::terminal_palette::default_terminal_palette().background_rgb();
+    context.set_source_rgb(
+        background.red_unit(),
+        background.green_unit(),
+        background.blue_unit(),
+    );
     context.rectangle(panel.x, panel.y, panel.width, visible_height);
     let _ = context.fill();
 
@@ -3383,7 +3388,12 @@ fn draw_cursor_shape_preview(
     width: i32,
     height: i32,
 ) {
-    context.set_source_rgb(15.0 / 255.0, 17.0 / 255.0, 21.0 / 255.0);
+    let background = crate::terminal_palette::default_terminal_palette().background_rgb();
+    context.set_source_rgb(
+        background.red_unit(),
+        background.green_unit(),
+        background.blue_unit(),
+    );
     context.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
     let _ = context.fill();
     context.select_font_face(
@@ -4141,9 +4151,6 @@ fn trace_clipboard_export(kind: &str, text: &str) {
 
 fn apply_style(canvas: &gtk::DrawingArea) {
     let css = "
-        .term-root {
-            background: #0f1115;
-        }
         .terminal-header {
             background: #303033;
             border-bottom: none;
@@ -4155,7 +4162,6 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             padding-right: 0.5rem;
         }
         drawingarea.term-canvas {
-            color: #e5e7eb;
             background: transparent;
         }
         .term-tab-bar {

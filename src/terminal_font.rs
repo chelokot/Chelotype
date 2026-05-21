@@ -2,7 +2,8 @@ use gtk::pango;
 use gtk::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub const TERMINAL_FONT: &str = "Adwaita Mono";
+pub const TERMINAL_FONT: &str =
+    "Adwaita Mono, Symbols Nerd Font Mono, Symbols Nerd Font, BlexMono Nerd Font Mono";
 const TERMINAL_FONT_SIZE_PT: f64 = 13.0;
 const MIN_FONT_SIZE_TENTHS: u32 = 80;
 const MAX_FONT_SIZE_TENTHS: u32 = 280;

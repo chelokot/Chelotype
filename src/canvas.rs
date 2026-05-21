@@ -1,6 +1,7 @@
 use crate::config::{CursorShape, CursorStyle};
 use crate::render::{RenderFrame, RenderRegion, RenderRun, RenderStyle};
 use crate::terminal_font::{TerminalFontMetrics, layout_for, metrics_for_widget};
+use crate::terminal_palette::default_terminal_palette;
 use crate::workspace_render::WorkspaceRenderFrame;
 use gtk::prelude::*;
 use gtk::{cairo, pango};
@@ -28,10 +29,6 @@ impl TerminalCanvas {
         area.set_focusable(true);
         area.set_hexpand(true);
         area.set_vexpand(true);
-        area.set_margin_start(14);
-        area.set_margin_end(10);
-        area.set_margin_top(8);
-        area.set_margin_bottom(12);
         area.add_css_class("term-canvas");
         area.set_cursor_from_name(Some("text"));
 
@@ -60,8 +57,9 @@ impl TerminalCanvas {
                 );
             }
             let now = Instant::now();
-            draw_background(context, width, height);
-            if let Some(render) = draw_render.borrow().as_ref() {
+            let render = draw_render.borrow();
+            if let Some(render) = render.as_ref() {
+                draw_background(context, width, height, render.background());
                 let mut text_layout_cache = draw_text_layout_cache.borrow_mut();
                 let mut row_surface_cache = draw_row_surface_cache.borrow_mut();
                 let mut paint_resources = PaintResources {
@@ -103,7 +101,7 @@ impl TerminalCanvas {
     }
 
     pub fn set_render(&self, render: RenderFrame) {
-        self.set_canvas_render(CanvasRenderFrame::Single(render));
+        self.set_canvas_render(CanvasRenderFrame::Single(Box::new(render)));
     }
 
     pub fn set_workspace_render(&self, render: WorkspaceRenderFrame) {
@@ -190,11 +188,23 @@ impl TerminalCanvas {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CanvasRenderFrame {
-    Single(RenderFrame),
+    Single(Box<RenderFrame>),
     Workspace(WorkspaceRenderFrame),
 }
 
 impl CanvasRenderFrame {
+    fn background(&self) -> Option<&str> {
+        match self {
+            Self::Single(render) => Some(render.background.as_str()),
+            Self::Workspace(render) => render
+                .panes
+                .iter()
+                .find(|pane| pane.active)
+                .or_else(|| render.panes.first())
+                .map(|pane| pane.frame.background.as_str()),
+        }
+    }
+
     fn active_cursor_identity(&self) -> Option<CursorIdentity> {
         match self {
             Self::Single(render) => Some(CursorIdentity {
@@ -230,8 +240,11 @@ impl Default for TerminalCanvas {
     }
 }
 
-fn draw_background(context: &cairo::Context, width: i32, height: i32) {
-    context.set_source_rgb(15.0 / 255.0, 17.0 / 255.0, 21.0 / 255.0);
+fn draw_background(context: &cairo::Context, width: i32, height: i32, color: Option<&str>) {
+    let Some(color) = color.and_then(parse_hex_color) else {
+        return;
+    };
+    context.set_source_rgb(color.red, color.green, color.blue);
     context.rectangle(0.0, 0.0, width as f64, height as f64);
     let _ = context.fill();
 }
@@ -2240,7 +2253,7 @@ fn draw_preedit(
     let _ = context.fill();
 
     let style = RenderStyle {
-        fg: Some("#e5e7eb".to_string()),
+        fg: Some(default_terminal_palette().foreground.to_string()),
         bg: None,
         bold: false,
         italic: false,
@@ -2372,7 +2385,7 @@ mod tests {
     #[test]
     fn row_surface_key_reuses_same_line_content_after_row_shift() {
         let style = RenderStyle {
-            fg: Some("#e5e7eb".to_string()),
+            fg: Some(default_terminal_palette().foreground.to_string()),
             bg: None,
             bold: false,
             italic: false,
