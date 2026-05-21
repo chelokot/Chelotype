@@ -12,7 +12,8 @@ use crate::input_selection::{
     keyboard_cursor_target, keyboard_selection_collapse_target,
 };
 use crate::interaction::{
-    InteractionEffect, PointerInteraction, cursor_movement_bytes_for_content,
+    InteractionEffect, PointerInteraction, cursor_movement_bytes_between_input_points,
+    cursor_movement_bytes_for_content, input_position_in_active_input,
 };
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderFrame, RenderPreedit, Renderer};
@@ -112,8 +113,9 @@ fn build_ui(app: &Application) {
     {
         let window = window.clone();
         let canvas = canvas.clone();
+        let force_snapshot = force_snapshot.clone();
         settings_button.connect_clicked(move |_| {
-            show_preferences_dialog(&window, &canvas);
+            show_preferences_dialog(&window, &canvas, force_snapshot.clone());
         });
     }
     apply_style(canvas.widget());
@@ -157,6 +159,7 @@ fn build_ui(app: &Application) {
     let drag_gesture_moved = std::rc::Rc::new(std::cell::Cell::new(false));
     let drag_gesture_active = std::rc::Rc::new(std::cell::Cell::new(false));
     let left_pointer_down = std::rc::Rc::new(std::cell::Cell::new(false));
+    let input_selection_drag = std::rc::Rc::new(std::cell::Cell::new(None::<InputSelectionDrag>));
     let smooth_scroll = std::rc::Rc::new(std::cell::RefCell::new(
         crate::smooth_scroll::SmoothScroll::default(),
     ));
@@ -289,8 +292,8 @@ fn build_ui(app: &Application) {
         let pending_input_latency = pending_input_latency.clone();
         let window = window.clone();
         let canvas = canvas.clone();
-        key_controller.connect_key_pressed(move |_ctrl, key, _code, state| {
-            if let Some(action) = key_to_action(key, state) {
+        key_controller.connect_key_pressed(move |_ctrl, key, keycode, state| {
+            if let Some(action) = key_to_action(key, keycode, state) {
                 match action {
                     KeyAction::Write(data) => {
                         if data.as_slice() == [0x03] && selection_text.borrow().is_some() {
@@ -354,7 +357,18 @@ fn build_ui(app: &Application) {
                         let _ = workspace.borrow_mut().scroll_active(lines);
                     }
                     KeyAction::CopySelection => {
-                        copy_selection_to_clipboard(&canvas_widget, &selection_text);
+                        if !copy_selection_to_clipboard(&canvas_widget, &selection_text) {
+                            mark_pending_input_latency(&pending_input_latency);
+                            write_key_with_selection(
+                                &workspace,
+                                &content,
+                                &selection,
+                                &selection_text,
+                                &selection_dirty,
+                                &keyboard_selection,
+                                vec![0x03],
+                            );
+                        }
                     }
                     KeyAction::CutSelection => {
                         if copy_selection_to_clipboard(&canvas_widget, &selection_text) {
@@ -367,6 +381,17 @@ fn build_ui(app: &Application) {
                                 &selection_dirty,
                                 &keyboard_selection,
                                 b"\x1b[3~".to_vec(),
+                            );
+                        } else {
+                            mark_pending_input_latency(&pending_input_latency);
+                            write_key_with_selection(
+                                &workspace,
+                                &content,
+                                &selection,
+                                &selection_text,
+                                &selection_dirty,
+                                &keyboard_selection,
+                                vec![0x18],
                             );
                         }
                     }
@@ -472,7 +497,7 @@ fn build_ui(app: &Application) {
                         );
                     }
                     KeyAction::OpenSettings => {
-                        show_preferences_dialog(&window, &canvas);
+                        show_preferences_dialog(&window, &canvas, force_snapshot.clone());
                     }
                 }
                 glib::Propagation::Stop
@@ -501,6 +526,7 @@ fn build_ui(app: &Application) {
         let drag_gesture_moved = drag_gesture_moved.clone();
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
+        let input_selection_drag = input_selection_drag.clone();
         let canvas_widget = canvas.widget().clone();
         let pending_input_latency = pending_input_latency.clone();
         let context_menu = CanvasContextMenuContext {
@@ -518,6 +544,7 @@ fn build_ui(app: &Application) {
             left_pointer_down.set(false);
             drag_gesture_active.set(false);
             drag_gesture_moved.set(false);
+            input_selection_drag.set(None);
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
             if split_resize_boundary_at(metrics.get(), &pane_hits.borrow(), x).is_some() {
                 pointer_pane_capture.set(None);
@@ -603,6 +630,11 @@ fn build_ui(app: &Application) {
                     pointer_interaction
                         .borrow_mut()
                         .press(current_mode, button, target.position);
+                if button == MouseButton::Left && !current_mode.sends_press_release() {
+                    input_selection_drag.set(content.borrow().as_ref().and_then(|content| {
+                        input_selection_drag_for_content(content, target.position)
+                    }));
+                }
                 crate::logging::debug_log(&format!("mouse press effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
@@ -632,10 +664,12 @@ fn build_ui(app: &Application) {
         let drag_gesture_moved = drag_gesture_moved.clone();
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
+        let input_selection_drag = input_selection_drag.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
             left_pointer_down.set(false);
             drag_gesture_active.set(false);
+            input_selection_drag.set(None);
             let current_mode = current_mouse_mode(&content, mode.get());
             if drag_gesture_moved.get() && !current_mode.sends_press_release() {
                 pointer_pane_capture.set(None);
@@ -724,7 +758,9 @@ fn build_ui(app: &Application) {
         let pointer_pane_capture = pointer_pane_capture.clone();
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
+        let input_selection_drag = input_selection_drag.clone();
         gtk::prelude::GestureExt::connect_cancel(&click_controller, move |_gesture, _sequence| {
+            input_selection_drag.set(None);
             let effects = cancel_click_gesture(
                 &drag_gesture_active,
                 &left_pointer_down,
@@ -766,6 +802,7 @@ fn build_ui(app: &Application) {
         let drag_gesture_moved = drag_gesture_moved.clone();
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
+        let input_selection_drag = input_selection_drag.clone();
         let canvas_widget = canvas.widget().clone();
         drag_controller.connect_drag_begin(move |_gesture, x, y| {
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
@@ -818,6 +855,9 @@ fn build_ui(app: &Application) {
                     MouseButton::Left,
                     target.position,
                 );
+                input_selection_drag.set(content.borrow().as_ref().and_then(|content| {
+                    input_selection_drag_for_content(content, target.position)
+                }));
                 crate::logging::debug_log(&format!("drag begin effects={effects:?}"));
                 apply_interaction_effects(
                     effects,
@@ -867,6 +907,7 @@ fn build_ui(app: &Application) {
         let pointer_pane_capture = pointer_pane_capture.clone();
         let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
+        let input_selection_drag = input_selection_drag.clone();
         let canvas_widget = canvas.widget().clone();
         drag_controller.connect_drag_update(move |gesture, offset_x, offset_y| {
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
@@ -938,10 +979,10 @@ fn build_ui(app: &Application) {
                 let effects = pointer_interaction
                     .borrow_mut()
                     .motion(MouseMode::default(), target.position);
-                if effects
+                let selection_changed = effects
                     .iter()
-                    .any(|effect| matches!(effect, InteractionEffect::SelectionChanged(Some(_))))
-                {
+                    .any(|effect| matches!(effect, InteractionEffect::SelectionChanged(Some(_))));
+                if selection_changed {
                     drag_gesture_moved.set(true);
                 }
                 crate::logging::debug_log(&format!("drag update effects={effects:?}"));
@@ -954,6 +995,17 @@ fn build_ui(app: &Application) {
                     &keyboard_selection,
                     &content,
                 );
+                if selection_changed
+                    && follow_input_selection_cursor(
+                        &input_selection_drag,
+                        &workspace,
+                        &content,
+                        target.position,
+                    )
+                {
+                    force_snapshot.set(true);
+                    canvas_widget.queue_draw();
+                }
             }
         });
     }
@@ -973,9 +1025,11 @@ fn build_ui(app: &Application) {
         let drag_gesture_moved = drag_gesture_moved.clone();
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
+        let input_selection_drag = input_selection_drag.clone();
         drag_controller.connect_drag_end(move |gesture, offset_x, offset_y| {
             left_pointer_down.set(false);
             drag_gesture_active.set(false);
+            input_selection_drag.set(None);
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
                 return;
             }
@@ -1033,10 +1087,12 @@ fn build_ui(app: &Application) {
         let drag_gesture_moved = drag_gesture_moved.clone();
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
+        let input_selection_drag = input_selection_drag.clone();
         gtk::prelude::GestureExt::connect_cancel(&drag_controller, move |_gesture, _sequence| {
             left_pointer_down.set(false);
             drag_gesture_active.set(false);
             drag_gesture_moved.set(false);
+            input_selection_drag.set(None);
             pointer_pane_capture.set(None);
             split_resize_drag.set(None);
             let effects = pointer_interaction.borrow_mut().cancel();
@@ -1059,6 +1115,7 @@ fn build_ui(app: &Application) {
         let workspace = workspace_rc.clone();
         let metrics = cell_metrics.clone();
         let pane_hits = pane_hits.clone();
+        let force_snapshot = force_snapshot.clone();
         let mode = mouse_mode.clone();
         let selection = selection.clone();
         let selection_text = selection_text.clone();
@@ -1070,6 +1127,8 @@ fn build_ui(app: &Application) {
         let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         let left_pointer_down = left_pointer_down.clone();
+        let input_selection_drag = input_selection_drag.clone();
+        let canvas_widget = canvas.widget().clone();
         motion_controller.connect_motion(move |controller, x, y| {
             crate::logging::debug_log(&format!("mouse motion x={x:.1} y={y:.1}"));
             if split_resize_drag.get().is_some()
@@ -1099,9 +1158,10 @@ fn build_ui(app: &Application) {
                     let effects = pointer_interaction
                         .borrow_mut()
                         .motion(MouseMode::default(), target.position);
-                    if effects.iter().any(|effect| {
+                    let selection_changed = effects.iter().any(|effect| {
                         matches!(effect, InteractionEffect::SelectionChanged(Some(_)))
-                    }) {
+                    });
+                    if selection_changed {
                         drag_gesture_moved.set(true);
                     }
                     crate::logging::debug_log(&format!(
@@ -1116,6 +1176,17 @@ fn build_ui(app: &Application) {
                         &keyboard_selection,
                         &content,
                     );
+                    if selection_changed
+                        && follow_input_selection_cursor(
+                            &input_selection_drag,
+                            &workspace,
+                            &content,
+                            target.position,
+                        )
+                    {
+                        force_snapshot.set(true);
+                        canvas_widget.queue_draw();
+                    }
                 }
                 return;
             }
@@ -1289,6 +1360,7 @@ fn build_ui(app: &Application) {
             glib::ControlFlow::Continue
         });
     }
+    let media_preferences_force_snapshot = force_snapshot.clone();
     let tick_canvas = canvas.clone();
     let trace_window = window.clone();
     let tick_last_completed_frame_timing = last_completed_frame_timing.clone();
@@ -1678,6 +1750,19 @@ fn build_ui(app: &Application) {
     });
 
     window.present();
+
+    if std::env::var("CHELOTYPE_MEDIA_OPEN_PREFERENCES")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        let window = window.clone();
+        let canvas = canvas.clone();
+        let force_snapshot = media_preferences_force_snapshot.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(450), move || {
+            show_preferences_dialog(&window, &canvas, force_snapshot);
+        });
+    }
 }
 
 fn configure_launch_menu(
@@ -2520,7 +2605,11 @@ fn show_canvas_context_menu(
     popover.popup();
 }
 
-fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCanvas) {
+fn show_preferences_dialog(
+    parent: &adw::ApplicationWindow,
+    canvas: &TerminalCanvas,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+) {
     let window = adw::Window::builder()
         .title("Settings")
         .default_width(960)
@@ -2545,7 +2634,7 @@ fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCan
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
     let cursor_page = cursor_preferences_page(canvas);
-    let appearance_page = appearance_preferences_page(parent, canvas);
+    let appearance_page = appearance_preferences_page(parent, canvas, force_snapshot);
     stack.add_named(&cursor_page, Some("cursor"));
     stack.add_named(&appearance_page, Some("appearance"));
     stack.set_visible_child_name("cursor");
@@ -2638,6 +2727,7 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
 fn appearance_preferences_page(
     parent: &adw::ApplicationWindow,
     canvas: &TerminalCanvas,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().title("Appearance").build();
     let font_group = adw::PreferencesGroup::builder().title("Font").build();
@@ -2663,7 +2753,312 @@ fn appearance_preferences_page(
     grid.attach(&smooth_tile, 1, 0, 1, 1);
     group.add(&grid);
     page.add(&group);
+
+    let palette_group = palette_preferences_group(canvas.clone(), force_snapshot);
+    page.add(&palette_group);
     page
+}
+
+fn palette_preferences_group(
+    canvas: TerminalCanvas,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+) -> adw::PreferencesGroup {
+    let show_all = std::rc::Rc::new(std::cell::Cell::new(false));
+    let selected_palette = std::rc::Rc::new(std::cell::RefCell::new(
+        crate::terminal_palette::default_terminal_palette()
+            .id
+            .to_string(),
+    ));
+    let previews = std::rc::Rc::new(std::cell::RefCell::new(Vec::<gtk::DrawingArea>::new()));
+    let cards = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(gtk::Button, bool)>::new()));
+    let toggle = gtk::Button::new();
+    set_pointer_cursor(&toggle);
+    set_palette_visibility_toggle(&toggle, show_all.get());
+    let group = adw::PreferencesGroup::builder().build();
+    let container = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .build();
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .build();
+    let title = gtk::Label::builder()
+        .label("Palette")
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .css_classes(["heading"])
+        .build();
+    header.append(&title);
+    header.append(&toggle);
+    container.append(&header);
+    let flow = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(true)
+        .min_children_per_line(3)
+        .max_children_per_line(3)
+        .row_spacing(12)
+        .column_spacing(12)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
+    for palette in crate::terminal_palette::PALETTES {
+        let card = palette_preview_card(
+            palette,
+            selected_palette.clone(),
+            previews.clone(),
+            canvas.clone(),
+            force_snapshot.clone(),
+        );
+        card.set_visible(palette.primary);
+        flow.append(&card);
+        cards.borrow_mut().push((card, palette.primary));
+    }
+    {
+        let show_all = show_all.clone();
+        let cards = cards.clone();
+        toggle.connect_clicked(move |button| {
+            let expanded = !show_all.get();
+            show_all.set(expanded);
+            set_palette_visibility_toggle(button, expanded);
+            for (card, primary) in cards.borrow().iter() {
+                card.set_visible(expanded || *primary);
+            }
+        });
+    }
+    container.append(&flow);
+    group.add(&container);
+    group
+}
+
+fn set_palette_visibility_toggle(button: &gtk::Button, show_all: bool) {
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .build();
+    let icon = gtk::Image::builder()
+        .icon_name(if show_all {
+            "pan-up-symbolic"
+        } else {
+            "pan-down-symbolic"
+        })
+        .pixel_size(14)
+        .build();
+    let label = gtk::Label::builder()
+        .label(if show_all {
+            "Show Fewer Palettes"
+        } else {
+            "Show All Palettes"
+        })
+        .build();
+    content.append(&icon);
+    content.append(&label);
+    button.set_child(Some(&content));
+}
+
+fn palette_preview_card(
+    palette: &'static crate::terminal_palette::TerminalPalette,
+    selected_palette: std::rc::Rc<std::cell::RefCell<String>>,
+    previews: std::rc::Rc<std::cell::RefCell<Vec<gtk::DrawingArea>>>,
+    canvas: TerminalCanvas,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+) -> gtk::Button {
+    let preview = gtk::DrawingArea::builder()
+        .width_request(188)
+        .height_request(154)
+        .build();
+    preview.set_can_target(false);
+    {
+        let selected_palette = selected_palette.clone();
+        preview.set_draw_func(move |_, context, width, height| {
+            draw_palette_preview(
+                context,
+                PalettePreview {
+                    palette,
+                    selected: selected_palette.borrow().as_str() == palette.id,
+                    width: f64::from(width),
+                    height: f64::from(height),
+                },
+            );
+        });
+    }
+    previews.borrow_mut().push(preview.clone());
+    let button = gtk::Button::builder()
+        .css_classes(["palette-card-button"])
+        .tooltip_text(palette.name)
+        .build();
+    button.update_property(&[gtk::accessible::Property::Label(palette.name)]);
+    set_pointer_cursor(&button);
+    button.set_child(Some(&preview));
+    button.connect_clicked(move |_| {
+        crate::terminal_palette::set_default_terminal_palette(palette.id);
+        *selected_palette.borrow_mut() = palette.id.to_string();
+        for preview in previews.borrow().iter() {
+            preview.queue_draw();
+        }
+        force_snapshot.set(true);
+        canvas.widget().queue_draw();
+    });
+    button
+}
+
+struct PalettePreview {
+    palette: &'static crate::terminal_palette::TerminalPalette,
+    selected: bool,
+    width: f64,
+    height: f64,
+}
+
+fn draw_palette_preview(context: &gtk::cairo::Context, preview: PalettePreview) {
+    rounded_rectangle(
+        context,
+        0.5,
+        0.5,
+        preview.width - 1.0,
+        preview.height - 1.0,
+        9.0,
+    );
+    set_source_hex(context, preview.palette.background);
+    let _ = context.fill_preserve();
+    if preview.selected {
+        context.set_source_rgb(53.0 / 255.0, 132.0 / 255.0, 228.0 / 255.0);
+        context.set_line_width(2.0);
+        let _ = context.stroke();
+    } else {
+        context.new_path();
+    }
+
+    let foreground = crate::terminal_palette::TerminalRgb::from_hex(preview.palette.foreground);
+    context.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    context.set_font_size(18.0);
+    set_source_rgb_alpha(context, foreground, 1.0);
+    context.move_to(12.0, 28.0);
+    let _ = context.show_text(&ellipsize_palette_title(preview.palette.name));
+
+    context.select_font_face(
+        "monospace",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Normal,
+    );
+    context.set_font_size(16.0);
+    set_source_rgb_alpha(context, foreground, 0.82);
+    for (index, text) in ["The quick brown", "fox jumps over", "the lazy dog"]
+        .iter()
+        .enumerate()
+    {
+        context.move_to(12.0, 62.0 + index as f64 * 21.0);
+        let _ = context.show_text(text);
+    }
+
+    let swatch_width = 24.0;
+    let swatch_height = 16.0;
+    let swatch_gap = 4.0;
+    let swatch_y = preview.height - 28.0;
+    for (index, color) in preview.palette.indexed[1..=6].iter().enumerate() {
+        set_source_hex(context, color);
+        rounded_rectangle(
+            context,
+            12.0 + index as f64 * (swatch_width + swatch_gap),
+            swatch_y,
+            swatch_width,
+            swatch_height,
+            4.0,
+        );
+        let _ = context.fill();
+    }
+
+    if preview.selected {
+        draw_palette_check(context, preview.width - 20.0, 20.0);
+    }
+}
+
+fn ellipsize_palette_title(title: &str) -> String {
+    const MAX_COLUMNS: usize = 14;
+    if title.chars().count() <= MAX_COLUMNS {
+        return title.to_string();
+    }
+    let mut value = title.chars().take(MAX_COLUMNS).collect::<String>();
+    value.push_str("...");
+    value
+}
+
+fn draw_palette_check(context: &gtk::cairo::Context, x: f64, y: f64) {
+    context.arc(x, y, 9.0, 0.0, std::f64::consts::TAU);
+    context.set_source_rgb(53.0 / 255.0, 132.0 / 255.0, 228.0 / 255.0);
+    let _ = context.fill();
+    context.set_source_rgb(1.0, 1.0, 1.0);
+    context.set_line_width(2.0);
+    context.move_to(x - 4.0, y);
+    context.line_to(x - 1.0, y + 3.0);
+    context.line_to(x + 5.0, y - 5.0);
+    let _ = context.stroke();
+}
+
+fn rounded_rectangle(
+    context: &gtk::cairo::Context,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    radius: f64,
+) {
+    let right = x + width;
+    let bottom = y + height;
+    context.new_sub_path();
+    context.arc(
+        right - radius,
+        y + radius,
+        radius,
+        -std::f64::consts::FRAC_PI_2,
+        0.0,
+    );
+    context.arc(
+        right - radius,
+        bottom - radius,
+        radius,
+        0.0,
+        std::f64::consts::FRAC_PI_2,
+    );
+    context.arc(
+        x + radius,
+        bottom - radius,
+        radius,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    context.arc(
+        x + radius,
+        y + radius,
+        radius,
+        std::f64::consts::PI,
+        std::f64::consts::PI * 1.5,
+    );
+    context.close_path();
+}
+
+fn set_source_hex(context: &gtk::cairo::Context, color: &str) {
+    set_source_rgb_alpha(
+        context,
+        crate::terminal_palette::TerminalRgb::from_hex(color),
+        1.0,
+    );
+}
+
+fn set_source_rgb_alpha(
+    context: &gtk::cairo::Context,
+    color: crate::terminal_palette::TerminalRgb,
+    alpha: f64,
+) {
+    context.set_source_rgba(
+        color.red_unit(),
+        color.green_unit(),
+        color.blue_unit(),
+        alpha,
+    );
 }
 
 fn font_rows(
@@ -3639,10 +4034,18 @@ fn populate_animation_settings(
         .title("Advanced animation settings")
         .expanded(false)
         .build();
+    let advanced_content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
     let mut has_advanced_settings = false;
     match style {
         crate::config::CursorStyle::Neovide => {
-            advanced_expander.add_row(&animation_slider_row(
+            advanced_content.append(&animation_slider_row(
                 AnimationSliderSpec {
                     title: "Trail size",
                     key: "cursor_neovide_trail_size",
@@ -3659,7 +4062,7 @@ fn populate_animation_settings(
             has_advanced_settings = true;
         }
         crate::config::CursorStyle::Smear => {
-            advanced_expander.add_row(&animation_slider_row(
+            advanced_content.append(&animation_slider_row(
                 AnimationSliderSpec {
                     title: "Head stiffness",
                     key: "cursor_smear_stiffness",
@@ -3673,7 +4076,7 @@ fn populate_animation_settings(
                 },
                 canvas.clone(),
             ));
-            advanced_expander.add_row(&animation_slider_row(
+            advanced_content.append(&animation_slider_row(
                 AnimationSliderSpec {
                     title: "Tail stiffness",
                     key: "cursor_smear_trailing_stiffness",
@@ -3687,7 +4090,7 @@ fn populate_animation_settings(
                 },
                 canvas.clone(),
             ));
-            advanced_expander.add_row(&animation_slider_row(
+            advanced_content.append(&animation_slider_row(
                 AnimationSliderSpec {
                     title: "Damping",
                     key: "cursor_smear_damping",
@@ -3706,6 +4109,7 @@ fn populate_animation_settings(
         crate::config::CursorStyle::Smooth | crate::config::CursorStyle::Steady => {}
     }
     if has_advanced_settings {
+        advanced_expander.add_row(&advanced_content);
         let advanced_list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
             .css_classes(["boxed-list"])
@@ -4454,6 +4858,14 @@ fn apply_style(canvas: &gtk::DrawingArea) {
         .settings-bottom-navigation-button:checked {
             background: #56565d;
         }
+        button.palette-card-button {
+            min-width: 0;
+            min-height: 0;
+            padding: 0;
+            background: transparent;
+            border: none;
+            box-shadow: none;
+        }
     ";
     let provider = gtk::CssProvider::new();
     provider.load_from_data(css);
@@ -4890,6 +5302,65 @@ fn apply_interaction_effects(
     }
 }
 
+fn input_selection_drag_for_content(
+    content: &RenderableContentOwned,
+    position: MouseGridPosition,
+) -> Option<InputSelectionDrag> {
+    input_position_in_active_input(content, position).then_some(InputSelectionDrag {
+        anchor: position,
+        cursor: None,
+    })
+}
+
+fn input_selection_cursor_target(
+    anchor: MouseGridPosition,
+    focus: MouseGridPosition,
+) -> MouseGridPosition {
+    let anchor_point = GridPoint::from(anchor);
+    let focus_point = GridPoint::from(focus);
+    if point_le(anchor_point, focus_point) {
+        MouseGridPosition {
+            row: focus.row,
+            column: focus.column.saturating_add(1),
+        }
+    } else {
+        focus
+    }
+}
+
+fn follow_input_selection_cursor(
+    drag: &std::rc::Rc<std::cell::Cell<Option<InputSelectionDrag>>>,
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+    focus: MouseGridPosition,
+) -> bool {
+    let Some(mut state) = drag.get() else {
+        return false;
+    };
+    let target = input_selection_cursor_target(state.anchor, focus);
+    let Some(content) = content.borrow().as_ref().cloned() else {
+        return false;
+    };
+    if !input_position_in_active_input(&content, target) {
+        return false;
+    }
+    let bytes = state
+        .cursor
+        .and_then(|cursor| cursor_movement_bytes_between_input_points(&content, cursor, target))
+        .or_else(|| cursor_movement_bytes_for_content(&content, target));
+    state.cursor = Some(target);
+    drag.set(Some(state));
+    let Some(bytes) = bytes else {
+        return false;
+    };
+    let _ = workspace.borrow_mut().write_active(&bytes);
+    true
+}
+
+fn point_le(left: GridPoint, right: GridPoint) -> bool {
+    left.row < right.row || (left.row == right.row && left.column <= right.column)
+}
+
 #[derive(Clone, Copy)]
 struct TerminalMetrics {
     size: ScreenSize,
@@ -4927,6 +5398,12 @@ struct SplitResizeDrag {
     boundary_index: usize,
     start_x: f64,
     applied_delta_cols: i16,
+}
+
+#[derive(Clone, Copy)]
+struct InputSelectionDrag {
+    anchor: MouseGridPosition,
+    cursor: Option<MouseGridPosition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5174,6 +5651,31 @@ mod tests {
         assert!(cached.matches(800, 480));
         assert!(!cached.matches(801, 480));
         assert!(!cached.matches(800, 481));
+    }
+
+    #[test]
+    fn input_selection_cursor_target_tracks_drag_focus_edge() {
+        assert_eq!(
+            input_selection_cursor_target(
+                MouseGridPosition { row: 0, column: 3 },
+                MouseGridPosition { row: 0, column: 7 },
+            ),
+            MouseGridPosition { row: 0, column: 8 }
+        );
+        assert_eq!(
+            input_selection_cursor_target(
+                MouseGridPosition { row: 0, column: 7 },
+                MouseGridPosition { row: 0, column: 3 },
+            ),
+            MouseGridPosition { row: 0, column: 3 }
+        );
+        assert_eq!(
+            input_selection_cursor_target(
+                MouseGridPosition { row: 0, column: 7 },
+                MouseGridPosition { row: 1, column: 2 },
+            ),
+            MouseGridPosition { row: 1, column: 3 }
+        );
     }
 
     #[test]

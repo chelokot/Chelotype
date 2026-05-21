@@ -40,7 +40,23 @@ pub enum CursorUnit {
     Word,
 }
 
-pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyAction> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PhysicalKey {
+    A,
+    C,
+    E,
+    T,
+    V,
+    W,
+    X,
+    Z,
+    Comma,
+    Minus,
+    Equal,
+    Digit0,
+}
+
+pub fn key_to_action(key: gdk::Key, keycode: u32, state: gdk::ModifierType) -> Option<KeyAction> {
     let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
     let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
     if matches!(key, gdk::Key::Left | gdk::Key::Right) {
@@ -67,83 +83,59 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
             },
         ));
     }
-    if ctrl
-        && !shift
-        && key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'a'))
-    {
+    if ctrl && !shift && key_matches(key, keycode, PhysicalKey::A, &['a']) {
         return Some(KeyAction::SelectInput);
     }
     if ctrl {
-        match key {
-            gdk::Key::Page_Down => return Some(KeyAction::NextTab),
-            gdk::Key::Page_Up => return Some(KeyAction::PreviousTab),
-            gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add => return Some(KeyAction::ZoomIn),
-            gdk::Key::minus | gdk::Key::KP_Subtract => return Some(KeyAction::ZoomOut),
-            gdk::Key::_0 | gdk::Key::KP_0 => return Some(KeyAction::ZoomReset),
-            gdk::Key::comma => return Some(KeyAction::OpenSettings),
-            _ => {}
+        if key == gdk::Key::Page_Down {
+            return Some(KeyAction::NextTab);
+        }
+        if key == gdk::Key::Page_Up {
+            return Some(KeyAction::PreviousTab);
+        }
+        if matches!(key, gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add)
+            || physical_key(keycode) == Some(PhysicalKey::Equal)
+        {
+            return Some(KeyAction::ZoomIn);
+        }
+        if matches!(key, gdk::Key::minus | gdk::Key::KP_Subtract)
+            || physical_key(keycode) == Some(PhysicalKey::Minus)
+        {
+            return Some(KeyAction::ZoomOut);
+        }
+        if matches!(key, gdk::Key::_0 | gdk::Key::KP_0)
+            || physical_key(keycode) == Some(PhysicalKey::Digit0)
+        {
+            return Some(KeyAction::ZoomReset);
+        }
+        if key == gdk::Key::comma || physical_key(keycode) == Some(PhysicalKey::Comma) {
+            return Some(KeyAction::OpenSettings);
         }
     }
-    if ctrl
-        && shift
-        && key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'c'))
-    {
+    if ctrl && shift && key_matches(key, keycode, PhysicalKey::C, &['c']) {
         return Some(KeyAction::CopySelection);
     }
-    if ctrl
-        && shift
-        && key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'t'))
-    {
+    if ctrl && shift && key_matches(key, keycode, PhysicalKey::T, &['t']) {
         return Some(KeyAction::NewTab);
     }
-    if ctrl
-        && shift
-        && key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'w'))
-    {
+    if ctrl && shift && key_matches(key, keycode, PhysicalKey::W, &['w']) {
         return Some(KeyAction::CloseTab);
     }
-    if ctrl
-        && shift
-        && key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'e'))
-    {
+    if ctrl && shift && key_matches(key, keycode, PhysicalKey::E, &['e']) {
         return Some(KeyAction::SplitPane);
     }
     if ctrl && !shift {
-        if key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'x'))
-        {
+        if key_matches(key, keycode, PhysicalKey::X, &['x']) {
             return Some(KeyAction::CutSelection);
         }
-        if key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'v'))
-        {
+        if key_matches(key, keycode, PhysicalKey::V, &['v']) {
             return Some(KeyAction::PasteClipboard);
         }
-        if key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'z'))
-        {
+        if key_matches(key, keycode, PhysicalKey::Z, &['z']) {
             return Some(KeyAction::UndoInput);
         }
     }
-    if ctrl
-        && shift
-        && key
-            .to_unicode()
-            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'z'))
-    {
+    if ctrl && shift && key_matches(key, keycode, PhysicalKey::Z, &['z']) {
         return Some(KeyAction::RedoInput);
     }
     if state.contains(gdk::ModifierType::SHIFT_MASK) {
@@ -153,10 +145,14 @@ pub fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyActio
             _ => {}
         }
     }
-    key_to_terminal_bytes(key, state).map(KeyAction::Write)
+    key_to_terminal_bytes(key, keycode, state).map(KeyAction::Write)
 }
 
-pub fn key_to_terminal_bytes(key: gdk::Key, state: gdk::ModifierType) -> Option<Vec<u8>> {
+pub fn key_to_terminal_bytes(
+    key: gdk::Key,
+    keycode: u32,
+    state: gdk::ModifierType,
+) -> Option<Vec<u8>> {
     let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
     let alt = state.intersects(
         gdk::ModifierType::ALT_MASK | gdk::ModifierType::META_MASK | gdk::ModifierType::SUPER_MASK,
@@ -186,12 +182,15 @@ pub fn key_to_terminal_bytes(key: gdk::Key, state: gdk::ModifierType) -> Option<
         gdk::Key::Home => Some(b"\x1b[H".to_vec()),
         gdk::Key::End => Some(b"\x1b[F".to_vec()),
         gdk::Key::Delete => Some(b"\x1b[3~".to_vec()),
-        _ => printable_key_to_bytes(key, state),
+        _ => printable_key_to_bytes(key, keycode, state),
     }
 }
 
-fn printable_key_to_bytes(key: gdk::Key, state: gdk::ModifierType) -> Option<Vec<u8>> {
-    let ch = key.to_unicode()?;
+fn printable_key_to_bytes(
+    key: gdk::Key,
+    keycode: u32,
+    state: gdk::ModifierType,
+) -> Option<Vec<u8>> {
     let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
     let alt = state.intersects(
         gdk::ModifierType::ALT_MASK | gdk::ModifierType::META_MASK | gdk::ModifierType::SUPER_MASK,
@@ -199,9 +198,11 @@ fn printable_key_to_bytes(key: gdk::Key, state: gdk::ModifierType) -> Option<Vec
     let mut buf = [0u8; 4];
     let mut out = Vec::new();
     if ctrl {
-        let upper = ch.to_ascii_uppercase();
-        out.push((upper as u8) & 0x1f);
+        let control = physical_control_byte(keycode)
+            .or_else(|| key.to_unicode().and_then(control_byte_for_char))?;
+        out.push(control);
     } else {
+        let ch = key.to_unicode()?;
         out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
     }
     if alt {
@@ -212,9 +213,71 @@ fn printable_key_to_bytes(key: gdk::Key, state: gdk::ModifierType) -> Option<Vec
     Some(out)
 }
 
+fn key_matches(
+    key: gdk::Key,
+    keycode: u32,
+    physical: PhysicalKey,
+    fallback_chars: &[char],
+) -> bool {
+    physical_key(keycode) == Some(physical)
+        || key.to_unicode().is_some_and(|ch| {
+            fallback_chars
+                .iter()
+                .any(|fallback| ch.eq_ignore_ascii_case(fallback))
+        })
+}
+
+fn control_byte_for_char(ch: char) -> Option<u8> {
+    if ch.is_ascii_alphabetic() {
+        Some((ch.to_ascii_uppercase() as u8) & 0x1f)
+    } else {
+        None
+    }
+}
+
+fn physical_control_byte(keycode: u32) -> Option<u8> {
+    match physical_key(keycode)? {
+        PhysicalKey::A => Some(0x01),
+        PhysicalKey::C => Some(0x03),
+        PhysicalKey::E => Some(0x05),
+        PhysicalKey::T => Some(0x14),
+        PhysicalKey::V => Some(0x16),
+        PhysicalKey::W => Some(0x17),
+        PhysicalKey::X => Some(0x18),
+        PhysicalKey::Z => Some(0x1a),
+        PhysicalKey::Comma | PhysicalKey::Minus | PhysicalKey::Equal | PhysicalKey::Digit0 => None,
+    }
+}
+
+fn physical_key(keycode: u32) -> Option<PhysicalKey> {
+    match keycode {
+        38 => Some(PhysicalKey::A),
+        54 => Some(PhysicalKey::C),
+        26 => Some(PhysicalKey::E),
+        28 => Some(PhysicalKey::T),
+        55 => Some(PhysicalKey::V),
+        25 => Some(PhysicalKey::W),
+        53 => Some(PhysicalKey::X),
+        52 => Some(PhysicalKey::Z),
+        59 => Some(PhysicalKey::Comma),
+        20 => Some(PhysicalKey::Minus),
+        21 => Some(PhysicalKey::Equal),
+        19 => Some(PhysicalKey::Digit0),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key_to_action(key: gdk::Key, state: gdk::ModifierType) -> Option<KeyAction> {
+        super::key_to_action(key, 0, state)
+    }
+
+    fn key_to_terminal_bytes(key: gdk::Key, state: gdk::ModifierType) -> Option<Vec<u8>> {
+        super::key_to_terminal_bytes(key, 0, state)
+    }
 
     #[test]
     fn maps_enter_backspace_and_tab() {
@@ -441,6 +504,88 @@ mod tests {
         assert_eq!(
             key_to_action(gdk::Key::comma, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::OpenSettings)
+        );
+    }
+
+    #[test]
+    fn maps_physical_shortcuts_under_cyrillic_layout() {
+        assert_eq!(
+            super::key_to_action(
+                gdk::Key::Cyrillic_es,
+                54,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::CopySelection)
+        );
+        assert_eq!(
+            super::key_to_action(gdk::Key::Cyrillic_ef, 38, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::SelectInput)
+        );
+        assert_eq!(
+            super::key_to_action(gdk::Key::Cyrillic_che, 53, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::CutSelection)
+        );
+        assert_eq!(
+            super::key_to_action(gdk::Key::Cyrillic_em, 55, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::PasteClipboard)
+        );
+        assert_eq!(
+            super::key_to_action(gdk::Key::Cyrillic_ya, 52, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::UndoInput)
+        );
+        assert_eq!(
+            super::key_to_action(
+                gdk::Key::Cyrillic_ya,
+                52,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::RedoInput)
+        );
+        assert_eq!(
+            super::key_to_action(
+                gdk::Key::Cyrillic_ie,
+                28,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::NewTab)
+        );
+        assert_eq!(
+            super::key_to_action(
+                gdk::Key::Cyrillic_tse,
+                25,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::CloseTab)
+        );
+        assert_eq!(
+            super::key_to_action(
+                gdk::Key::Cyrillic_u,
+                26,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::SplitPane)
+        );
+        assert_eq!(
+            super::key_to_action(gdk::Key::Cyrillic_be, 59, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::OpenSettings)
+        );
+        assert_eq!(
+            super::key_to_terminal_bytes(
+                gdk::Key::Cyrillic_es,
+                54,
+                gdk::ModifierType::CONTROL_MASK
+            )
+            .as_deref(),
+            Some(&[0x03][..])
+        );
+        assert_eq!(
+            super::key_to_terminal_bytes(
+                gdk::Key::Cyrillic_che,
+                53,
+                gdk::ModifierType::CONTROL_MASK
+            )
+            .as_deref(),
+            Some(&[0x18][..])
         );
     }
 }

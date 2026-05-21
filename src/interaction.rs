@@ -152,6 +152,48 @@ pub fn cursor_movement_bytes_for_content(
     arrow_bytes_for_delta(delta)
 }
 
+pub fn cursor_movement_bytes_between_input_points(
+    content: &TerminalContent,
+    source: MouseGridPosition,
+    target: MouseGridPosition,
+) -> Option<Vec<u8>> {
+    let cursor_row = usize::try_from(content.cursor_line).ok()?;
+    let input_rows = active_input_rows(content, cursor_row)?;
+    let source_absolute = absolute_input_column(
+        content,
+        input_rows.clone(),
+        usize::from(source.row),
+        usize::from(source.column),
+    )?;
+    let target_absolute = absolute_input_column(
+        content,
+        input_rows,
+        usize::from(target.row),
+        usize::from(target.column),
+    )?;
+    let delta = target_absolute as i32 - source_absolute as i32;
+    arrow_bytes_for_delta(delta)
+}
+
+pub fn input_position_in_active_input(
+    content: &TerminalContent,
+    position: MouseGridPosition,
+) -> bool {
+    let Some(cursor_row) = usize::try_from(content.cursor_line).ok() else {
+        return false;
+    };
+    let Some(input_rows) = active_input_rows(content, cursor_row) else {
+        return false;
+    };
+    absolute_input_column(
+        content,
+        input_rows,
+        usize::from(position.row),
+        usize::from(position.column),
+    )
+    .is_some()
+}
+
 fn active_input_rows(
     content: &TerminalContent,
     cursor_row: usize,
@@ -443,6 +485,53 @@ mod tests {
             Some(&b"\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"[..])
         );
         assert_eq!(cursor_movement_bytes_for_content(&content, pos(1, 3)), None);
+    }
+
+    #[test]
+    fn cursor_movement_between_input_points_uses_input_absolute_columns() {
+        let content = TerminalContent {
+            lines: vec![
+                vec![TerminalCell::blank(); 4],
+                vec![TerminalCell::blank(); 4],
+                vec![TerminalCell::blank(); 4],
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata {
+                    wrapped: true,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    wrapped: true,
+                    wrap_continuation: true,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    wrap_continuation: true,
+                    ..TerminalLineMetadata::default()
+                },
+            ],
+            cursor_line: 2,
+            cursor_col: 1,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        };
+
+        assert!(input_position_in_active_input(&content, pos(2, 0)));
+        assert_eq!(
+            cursor_movement_bytes_between_input_points(&content, pos(2, 0), pos(2, 1)).as_deref(),
+            Some(&b"\x1b[C\x1b[C\x1b[C\x1b[C"[..])
+        );
+        assert_eq!(
+            cursor_movement_bytes_between_input_points(&content, pos(3, 1), pos(2, 0)).as_deref(),
+            Some(&b"\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"[..])
+        );
+        assert_eq!(
+            cursor_movement_bytes_between_input_points(&content, pos(1, 3), pos(9, 3)),
+            None
+        );
+        assert!(!input_position_in_active_input(&content, pos(9, 3)));
     }
 
     #[test]

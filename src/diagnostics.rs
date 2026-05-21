@@ -149,7 +149,7 @@ impl HeadlessAction {
         match self {
             Self::Split | Self::PaneNext | Self::PanePrevious | Self::PaneResize { .. } => true,
             Self::Key(key) => matches!(
-                key_to_action(key.key, key.modifiers),
+                key_to_action(key.key, 0, key.modifiers),
                 Some(
                     KeyAction::NewTab
                         | KeyAction::NextTab
@@ -190,7 +190,7 @@ impl WorkspaceHeadlessRuntime {
         match action {
             HeadlessAction::Write(text) => workspace.write_active(text.as_bytes()),
             HeadlessAction::Key(key) => {
-                if let Some(action) = key_to_action(key.key, key.modifiers) {
+                if let Some(action) = key_to_action(key.key, 0, key.modifiers) {
                     match action {
                         KeyAction::Write(bytes) => workspace.write_active(&bytes),
                         KeyAction::CursorMove {
@@ -343,7 +343,7 @@ impl HeadlessRuntime {
         match action {
             HeadlessAction::Write(text) => backend.write(text.as_bytes()),
             HeadlessAction::Key(key) => {
-                if let Some(action) = key_to_action(key.key, key.modifiers) {
+                if let Some(action) = key_to_action(key.key, 0, key.modifiers) {
                     match action {
                         KeyAction::Write(bytes) => backend.write(&bytes),
                         KeyAction::CursorMove {
