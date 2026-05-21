@@ -2734,9 +2734,10 @@ fn issue_url(debug_info: &str) -> String {
 }
 
 fn release_notes() -> &'static str {
-    "<p>Improves the palette picker with a curated default set, alphabetical expanded view, and search.</p>
+    "<p>Polishes preference preview cards, scrolling previews, and palette layout.</p>
     <p>Earlier releases:</p>
     <ul>
+      <li>0.1.11: Curated palette picker with alphabetical expanded view and search.</li>
       <li>0.1.10: Polished What's New release history layout.</li>
       <li>0.1.9: AppStream-compatible About dialog changelog markup.</li>
       <li>0.1.8: Full release history in About.</li>
@@ -3024,11 +3025,9 @@ fn appearance_preferences_page(
 
     let group = adw::PreferencesGroup::builder().title("Scrolling").build();
     let grid = gtk::Grid::builder()
-        .column_spacing(10)
+        .column_spacing(12)
         .margin_top(8)
         .margin_bottom(8)
-        .margin_start(6)
-        .margin_end(6)
         .build();
     let off_tile = scrolling_preview_tile(false, canvas.clone());
     let smooth_tile = scrolling_preview_tile(true, canvas.clone());
@@ -3096,6 +3095,7 @@ fn palette_preferences_group(
         .margin_top(8)
         .margin_bottom(8)
         .build();
+    let sort_all_palettes = std::rc::Rc::new(std::cell::Cell::new(false));
     for palette in crate::terminal_palette::terminal_palette_display_order(true) {
         let card = palette_preview_card(
             palette,
@@ -3108,6 +3108,7 @@ fn palette_preferences_group(
         let flow_child = gtk::FlowBoxChild::builder()
             .child(&card)
             .visible(palette.primary)
+            .css_classes(["palette-flow-child"])
             .build();
         flow.append(&flow_child);
         cards.borrow_mut().push(PaletteCard {
@@ -3116,16 +3117,29 @@ fn palette_preferences_group(
         });
     }
     {
+        let sort_all_palettes = sort_all_palettes.clone();
+        let cards = cards.clone();
+        flow.set_sort_func(move |first, second| {
+            let cards = cards.borrow();
+            let first_palette = palette_for_flow_child(&cards, first);
+            let second_palette = palette_for_flow_child(&cards, second);
+            palette_card_order(first_palette, second_palette, sort_all_palettes.get())
+        });
+    }
+    flow.invalidate_sort();
+    {
         let show_all = show_all.clone();
         let cards = cards.clone();
         let flow = flow.clone();
+        let sort_all_palettes = sort_all_palettes.clone();
         let search = search.clone();
         let title = title.clone();
         toggle.connect_clicked(move |button| {
             let expanded = !show_all.get();
             show_all.set(expanded);
             set_palette_visibility_toggle(button, expanded);
-            reorder_palette_cards(&flow, &cards.borrow(), expanded);
+            sort_all_palettes.set(expanded);
+            flow.invalidate_sort();
             title.set_visible(!expanded);
             search.set_visible(expanded);
             if expanded {
@@ -3154,16 +3168,28 @@ struct PaletteCard {
     palette: &'static crate::terminal_palette::TerminalPalette,
 }
 
-fn reorder_palette_cards(flow: &gtk::FlowBox, cards: &[PaletteCard], show_all: bool) {
-    for card in cards {
-        flow.remove(&card.child);
-    }
-    for palette in crate::terminal_palette::terminal_palette_display_order(show_all) {
-        let card = cards
-            .iter()
-            .find(|card| card.palette.id == palette.id)
-            .expect("palette card");
-        flow.append(&card.child);
+fn palette_for_flow_child(
+    cards: &[PaletteCard],
+    child: &gtk::FlowBoxChild,
+) -> &'static crate::terminal_palette::TerminalPalette {
+    cards
+        .iter()
+        .find(|card| card.child == *child)
+        .map(|card| card.palette)
+        .expect("palette card")
+}
+
+fn palette_card_order(
+    first: &crate::terminal_palette::TerminalPalette,
+    second: &crate::terminal_palette::TerminalPalette,
+    show_all: bool,
+) -> gtk::Ordering {
+    let first_index = crate::terminal_palette::terminal_palette_display_index(first.id, show_all);
+    let second_index = crate::terminal_palette::terminal_palette_display_index(second.id, show_all);
+    match first_index.cmp(&second_index) {
+        std::cmp::Ordering::Less => gtk::Ordering::Smaller,
+        std::cmp::Ordering::Equal => gtk::Ordering::Equal,
+        std::cmp::Ordering::Greater => gtk::Ordering::Larger,
     }
 }
 
@@ -3621,6 +3647,10 @@ fn populate_cursor_animation_grid(
 }
 
 fn cursor_shape_tile(shape: crate::config::CursorShape) -> gtk::ToggleButton {
+    preference_preview_tile(shape.label(), &cursor_shape_preview(shape))
+}
+
+fn preference_preview_tile(label: &str, preview: &impl IsA<gtk::Widget>) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::builder()
         .hexpand(true)
         .vexpand(false)
@@ -3628,16 +3658,18 @@ fn cursor_shape_tile(shape: crate::config::CursorShape) -> gtk::ToggleButton {
     set_pointer_cursor(&button);
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(5)
-        .margin_top(7)
-        .margin_bottom(7)
+        .spacing(8)
+        .halign(gtk::Align::Center)
+        .margin_top(8)
+        .margin_bottom(8)
         .margin_start(8)
         .margin_end(8)
         .build();
     content.set_can_target(false);
-    content.append(&cursor_shape_preview(shape));
+    preview.set_can_target(false);
+    content.append(preview);
     let label = gtk::Label::builder()
-        .label(shape.label())
+        .label(label)
         .halign(gtk::Align::Center)
         .build();
     label.set_can_target(false);
@@ -3650,36 +3682,14 @@ fn cursor_animation_tile(
     shape: crate::config::CursorShape,
     style: crate::config::CursorStyle,
 ) -> gtk::ToggleButton {
-    let button = gtk::ToggleButton::builder()
-        .hexpand(true)
-        .vexpand(false)
-        .build();
-    set_pointer_cursor(&button);
-    let content = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(7)
-        .margin_top(8)
-        .margin_bottom(8)
-        .margin_start(8)
-        .margin_end(8)
-        .build();
-    content.set_can_target(false);
-    content.append(&cursor_animation_preview(shape, style));
-    let label = gtk::Label::builder()
-        .label(style.label())
-        .halign(gtk::Align::Center)
-        .build();
-    label.set_can_target(false);
-    content.append(&label);
-    button.set_child(Some(&content));
-    button
+    preference_preview_tile(style.label(), &cursor_animation_preview(shape, style))
 }
 
 fn cursor_animation_preview(
     shape: crate::config::CursorShape,
     style: crate::config::CursorStyle,
 ) -> gtk::DrawingArea {
-    let preview = terminal_preview_canvas(290, 163, style, shape, 6.5);
+    let preview = terminal_preview_canvas(290, 169, style, shape, 6.5);
     preview.set_render(preview_render_frame(
         ANIMATION_PREVIEW_LINES,
         animation_preview_target(0),
@@ -3736,6 +3746,8 @@ fn terminal_preview_canvas(
     preview.widget().set_can_target(false);
     preview.widget().set_focusable(false);
     preview.widget().set_cursor_from_name(None);
+    preview.widget().set_overflow(gtk::Overflow::Hidden);
+    preview.add_preview_corners();
     preview.set_cursor_options_override(Some((style, shape)));
     preview.set_font_size_override(Some(font_size_pt));
     preview
@@ -3822,28 +3834,10 @@ fn preview_cells(line: &str) -> Vec<crate::terminal_grid::TerminalCell> {
 }
 
 fn scrolling_preview_tile(enabled: bool, canvas: TerminalCanvas) -> gtk::ToggleButton {
-    let button = gtk::ToggleButton::builder()
-        .hexpand(true)
-        .vexpand(false)
-        .build();
-    set_pointer_cursor(&button);
-    let content = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(7)
-        .margin_top(8)
-        .margin_bottom(8)
-        .margin_start(8)
-        .margin_end(8)
-        .build();
-    content.set_can_target(false);
-    content.append(&scrolling_preview_panel(enabled));
-    let label = gtk::Label::builder()
-        .label(if enabled { "Smooth" } else { "Off" })
-        .halign(gtk::Align::Center)
-        .build();
-    label.set_can_target(false);
-    content.append(&label);
-    button.set_child(Some(&content));
+    let button = preference_preview_tile(
+        if enabled { "Smooth" } else { "Instant" },
+        &scrolling_preview_panel(enabled),
+    );
     button.connect_toggled(move |button| {
         if !button.is_active() {
             return;
@@ -3858,7 +3852,7 @@ fn scrolling_preview_panel(smooth: bool) -> gtk::DrawingArea {
     let state = std::rc::Rc::new(std::cell::RefCell::new(ScrollingPreviewState::new()));
     let preview = gtk::DrawingArea::builder()
         .width_request(290)
-        .height_request(135)
+        .height_request(169)
         .build();
     {
         let state = state.clone();
@@ -3918,12 +3912,15 @@ fn draw_scrolling_preview_panel(context: &gtk::cairo::Context, panel: PreviewScr
         .max(1.0);
     let visible_height = visible_rows * line_height + terminal_padding_y * 2.0;
     let background = crate::terminal_palette::default_terminal_palette().background_rgb();
+    let _ = context.save();
+    rounded_rectangle(context, panel.x, panel.y, panel.width, panel.height, 6.0);
+    context.clip();
     context.set_source_rgb(
         background.red_unit(),
         background.green_unit(),
         background.blue_unit(),
     );
-    context.rectangle(panel.x, panel.y, panel.width, visible_height);
+    context.rectangle(panel.x, panel.y, panel.width, panel.height);
     let _ = context.fill();
 
     let max_scroll_lines = (PREVIEW_SCROLL_LINES.len() as f64 - visible_rows).max(0.0);
@@ -3966,6 +3963,7 @@ fn draw_scrolling_preview_panel(context: &gtk::cairo::Context, panel: PreviewScr
             }
         }
     }
+    let _ = context.restore();
     let _ = context.restore();
 }
 
@@ -4359,12 +4357,10 @@ fn populate_animation_settings(
     container.clear();
     if style == crate::config::CursorStyle::Steady {
         let label = gtk::Label::builder()
-            .label("No animation parameters for steady cursor")
+            .label("No animation parameters for instant cursor")
             .halign(gtk::Align::Start)
             .margin_top(12)
             .margin_bottom(12)
-            .margin_start(12)
-            .margin_end(12)
             .build();
         container.add(&label);
         return;
@@ -4523,7 +4519,6 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
     ));
     set_pointer_cursor(&reset);
     let reset_slot = gtk::Box::builder()
-        .width_request(34)
         .height_request(34)
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
@@ -5264,9 +5259,14 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
             min-width: 0;
             min-height: 0;
             padding: 0;
+            margin: 0;
             background-color: transparent;
             border: none;
             box-shadow: none;
+        }
+        flowboxchild.palette-flow-child {
+            padding: 0;
+            margin: 0;
         }
     ";
     css.replace("__BACKGROUND__", palette.background)

@@ -3045,6 +3045,21 @@ pub fn terminal_palette_display_order(show_all: bool) -> Vec<&'static TerminalPa
     primary_terminal_palettes().collect()
 }
 
+pub fn terminal_palette_display_index(id: &str, show_all: bool) -> usize {
+    if let Some(index) = terminal_palette_display_order(show_all)
+        .iter()
+        .position(|palette| palette.id == id)
+    {
+        return index;
+    }
+
+    PRIMARY_TERMINAL_PALETTE_IDS.len()
+        + terminal_palette_display_order(true)
+            .iter()
+            .position(|palette| palette.id == id)
+            .unwrap_or(usize::MAX - PRIMARY_TERMINAL_PALETTE_IDS.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3092,6 +3107,27 @@ mod tests {
         assert_eq!(
             PALETTES.iter().filter(|palette| palette.primary).count(),
             PRIMARY_TERMINAL_PALETTE_IDS.len()
+        );
+    }
+
+    #[test]
+    fn palette_display_index_orders_all_cards_without_panicking() {
+        let mut collapsed_indexes = std::collections::HashSet::new();
+        let mut expanded_indexes = std::collections::HashSet::new();
+        for palette in PALETTES {
+            assert!(collapsed_indexes.insert(terminal_palette_display_index(palette.id, false)));
+            assert!(expanded_indexes.insert(terminal_palette_display_index(palette.id, true)));
+        }
+        for (index, id) in PRIMARY_TERMINAL_PALETTE_IDS.iter().enumerate() {
+            assert_eq!(terminal_palette_display_index(id, false), index);
+        }
+        let first_hidden_palette = PALETTES
+            .iter()
+            .find(|palette| !palette.primary)
+            .expect("hidden palette");
+        assert!(
+            terminal_palette_display_index(first_hidden_palette.id, false)
+                >= PRIMARY_TERMINAL_PALETTE_IDS.len()
         );
     }
 

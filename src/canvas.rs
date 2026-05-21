@@ -15,6 +15,7 @@ const PALETTE_TRANSITION_DURATION: Duration = Duration::from_millis(300);
 const MAX_TEXT_LAYOUT_CACHE_ENTRIES: usize = 4096;
 const MAX_ROW_SURFACE_CACHE_ENTRIES: usize = 512;
 const TERMINAL_CANVAS_PADDING_PX: f64 = 6.0;
+const TERMINAL_PREVIEW_RADIUS_PX: f64 = 6.0;
 
 #[derive(Clone, Copy)]
 pub struct TerminalCanvasPadding {
@@ -221,6 +222,10 @@ impl TerminalCanvas {
     pub fn set_font_size_override(&self, font_size_pt: Option<f64>) {
         self.font_size_override.set(font_size_pt);
         self.area.queue_draw();
+    }
+
+    pub fn add_preview_corners(&self) {
+        self.area.add_css_class("term-preview-canvas");
     }
 
     pub fn refresh_cursor_options(&self) {
@@ -458,6 +463,49 @@ fn draw_background(context: &cairo::Context, width: i32, height: i32, color: Opt
     let _ = context.fill();
 }
 
+fn draw_rounded_rectangle(
+    context: &cairo::Context,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    radius: f64,
+) {
+    let radius = radius.min(width / 2.0).min(height / 2.0);
+    let right = x + width;
+    let bottom = y + height;
+    context.new_sub_path();
+    context.arc(
+        right - radius,
+        y + radius,
+        radius,
+        -std::f64::consts::FRAC_PI_2,
+        0.0,
+    );
+    context.arc(
+        right - radius,
+        bottom - radius,
+        radius,
+        0.0,
+        std::f64::consts::FRAC_PI_2,
+    );
+    context.arc(
+        x + radius,
+        bottom - radius,
+        radius,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    context.arc(
+        x + radius,
+        y + radius,
+        radius,
+        std::f64::consts::PI,
+        std::f64::consts::PI * 1.5,
+    );
+    context.close_path();
+}
+
 fn ease_out_progress(progress: f64) -> f64 {
     1.0 - (1.0 - progress).powi(3)
 }
@@ -486,6 +534,17 @@ fn draw_canvas_render_layer(
     }
     let alpha = alpha.min(1.0);
     let _ = context.save();
+    if widget.has_css_class("term-preview-canvas") {
+        draw_rounded_rectangle(
+            context,
+            0.0,
+            0.0,
+            width as f64,
+            height as f64,
+            TERMINAL_PREVIEW_RADIUS_PX,
+        );
+        context.clip();
+    }
     if alpha < 1.0 {
         context.push_group();
     }
@@ -2818,7 +2877,12 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn cursor_motion_settles_when_animation_duration_elapses() {
+        let dir = temp_config_dir("cursor-motion-settles");
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
         let start = Instant::now();
         let first = CursorIdentity {
             pane_id: 0,

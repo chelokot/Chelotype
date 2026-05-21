@@ -34,7 +34,7 @@ impl CursorStyle {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Steady => "Steady",
+            Self::Steady => "Instant",
             Self::Smooth => "Smooth",
             Self::Smear => "Smear",
             Self::Neovide => "Neovide",
