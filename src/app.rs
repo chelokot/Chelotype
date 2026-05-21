@@ -33,11 +33,16 @@ use adw::Application;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+const APP_ID: &str = "com.chelokot.Chelotype";
+const APP_NAME: &str = "Chelotype";
+const GITHUB_REPO_URL: &str = "https://github.com/chelokot/Chelotype";
+
 pub fn run_app() -> glib::ExitCode {
     let app = Application::builder()
-        .application_id("com.chelokot.Chelotype")
+        .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
+    install_app_accelerators(&app);
     app.connect_activate(build_ui);
     app.run()
 }
@@ -84,15 +89,16 @@ fn build_ui(app: &Application) {
             .build(),
     );
     launcher.append(&launch_menu_button);
-    let settings_button = gtk::Button::builder()
-        .icon_name("emblem-system-symbolic")
-        .tooltip_text("Settings")
+    let app_menu_button = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Main menu")
+        .menu_model(&main_menu_model())
         .build();
     let header = adw::HeaderBar::new();
     header.add_css_class("terminal-header");
     header.pack_start(&launcher);
     header.set_title_widget(Some(&tab_bar));
-    header.pack_end(&settings_button);
+    header.pack_end(&app_menu_button);
 
     let canvas = TerminalCanvas::new();
     let style_provider = gtk::CssProvider::new();
@@ -111,20 +117,14 @@ fn build_ui(app: &Application) {
         .default_height(990)
         .content(&content)
         .build();
-    {
-        let window = window.clone();
-        let canvas = canvas.clone();
-        let force_snapshot = force_snapshot.clone();
-        let pending_style_refresh = pending_style_refresh.clone();
-        settings_button.connect_clicked(move |_| {
-            show_preferences_dialog(
-                &window,
-                &canvas,
-                force_snapshot.clone(),
-                pending_style_refresh.clone(),
-            );
-        });
-    }
+    install_window_actions(
+        &window,
+        app,
+        canvas.clone(),
+        workspace_rc.clone(),
+        force_snapshot.clone(),
+        pending_style_refresh.clone(),
+    );
     install_style(canvas.widget(), &style_provider);
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
     let render_snapshot_enabled =
@@ -456,6 +456,11 @@ fn build_ui(app: &Application) {
                             },
                         );
                     }
+                    KeyAction::NewWindow => {
+                        if let Some(app) = window.application().and_downcast::<Application>() {
+                            build_ui(&app);
+                        }
+                    }
                     KeyAction::CloseTab => {
                         if let Some(id) = active_tab_id(&tabs) {
                             close_tab(&tabs, id);
@@ -515,6 +520,9 @@ fn build_ui(app: &Application) {
                             force_snapshot.clone(),
                             pending_style_refresh.clone(),
                         );
+                    }
+                    KeyAction::OpenAbout => {
+                        show_about_dialog(&window, workspace.borrow().tabs().len());
                     }
                 }
                 glib::Propagation::Stop
@@ -2637,6 +2645,228 @@ fn show_canvas_context_menu(
     popover.popup();
 }
 
+fn install_app_accelerators(app: &Application) {
+    app.set_accels_for_action("win.new-window", &["<Control><Shift>n"]);
+    app.set_accels_for_action("win.preferences", &["<Control>comma"]);
+    app.set_accels_for_action("win.about", &["F1"]);
+}
+
+fn main_menu_model() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("New Window"), Some("win.new-window"));
+    menu.append(Some("Preferences"), Some("win.preferences"));
+    menu.append(Some("About"), Some("win.about"));
+    menu
+}
+
+fn install_window_actions(
+    window: &adw::ApplicationWindow,
+    app: &Application,
+    canvas: TerminalCanvas,
+    workspace: std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
+) {
+    let new_window = gio::SimpleAction::new("new-window", None);
+    {
+        let app = app.clone();
+        new_window.connect_activate(move |_, _| build_ui(&app));
+    }
+    window.add_action(&new_window);
+
+    let preferences = gio::SimpleAction::new("preferences", None);
+    {
+        let window = window.clone();
+        let canvas = canvas.clone();
+        let force_snapshot = force_snapshot.clone();
+        let pending_style_refresh = pending_style_refresh.clone();
+        preferences.connect_activate(move |_, _| {
+            show_preferences_dialog(
+                &window,
+                &canvas,
+                force_snapshot.clone(),
+                pending_style_refresh.clone(),
+            );
+        });
+    }
+    window.add_action(&preferences);
+
+    let about = gio::SimpleAction::new("about", None);
+    {
+        let window = window.clone();
+        about.connect_activate(move |_, _| {
+            show_about_dialog(&window, workspace.borrow().tabs().len());
+        });
+    }
+    window.add_action(&about);
+}
+
+fn show_about_dialog(parent: &adw::ApplicationWindow, tab_count: usize) {
+    let debug_info = debug_info(parent, tab_count);
+    let dialog = adw::AboutDialog::builder()
+        .application_icon(APP_ID)
+        .application_name(APP_NAME)
+        .developer_name("chelokot")
+        .version(env!("CARGO_PKG_VERSION"))
+        .copyright("Copyright 2026 Andrii Vlasenko")
+        .developers(["Andrii Vlasenko"])
+        .license_type(gtk::License::Custom)
+        .license("MIT OR Apache-2.0")
+        .website(GITHUB_REPO_URL)
+        .issue_url(issue_url(&debug_info))
+        .release_notes_version(env!("CARGO_PKG_VERSION"))
+        .release_notes(release_notes())
+        .build();
+    dialog.present(Some(parent));
+}
+
+fn issue_url(debug_info: &str) -> String {
+    let body = format!(
+        "### Describe the issue\n\n\n\n### Steps to reproduce\n\n1. \n\n### Debug information\n\n```text\n{}\n```",
+        debug_info
+    );
+    format!(
+        "{GITHUB_REPO_URL}/issues/new?body={}",
+        url_query_value(&body)
+    )
+}
+
+fn release_notes() -> &'static str {
+    "<p>Improves palette transitions across the terminal, window chrome, and preferences UI.</p>"
+}
+
+fn debug_info(window: &adw::ApplicationWindow, tab_count: usize) -> String {
+    let display = gtk::prelude::WidgetExt::display(window);
+    let display_type = display.type_().name();
+    let renderer_type = window
+        .renderer()
+        .map(|renderer| renderer.type_().name().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let monitor = window
+        .surface()
+        .and_then(|surface| display.monitor_at_surface(&surface));
+    let monitor_info = monitor
+        .map(|monitor| {
+            let geometry = monitor.geometry();
+            let scale_factor =
+                <gtk::gdk::Monitor as gtk::gdk::prelude::MonitorExt>::scale_factor(&monitor);
+            format!(
+                "window[0].scale = {:.6}\nwindow[0].scale_factor = {}\nwindow[0].monitor.geometry = {},{} {}x{}\nwindow[0].monitor.refresh_rate = {}",
+                f64::from(scale_factor),
+                scale_factor,
+                geometry.x(),
+                geometry.y(),
+                geometry.width(),
+                geometry.height(),
+                <gtk::gdk::Monitor as gtk::gdk::prelude::MonitorExt>::refresh_rate(&monitor)
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "window[0].scale_factor = {}\nwindow[0].monitor = unknown",
+                window.scale_factor()
+            )
+        });
+
+    format!(
+        "{APP_NAME} {version} ({version})\n\nOperating System: {os}\n\n{uname}\n\nAgent: {agent}\n\nDesktop Session: {session}\n\nGTK: {gtk_version}\n\nDisplay: {display_type}\nAccessibility: {accessibility}\n\nGTK Theme: {gtk_theme}\nSystem Font: {system_font}\nFont: {font}\n\nwindow[0].n_tabs = {tab_count}\nwindow[0].renderer = {renderer_type}\n{monitor_info}\n\nApp ID: {APP_ID}\n\nContainers:\n{containers}\n\n{os_release}",
+        version = env!("CARGO_PKG_VERSION"),
+        os = glib::os_info("PRETTY_NAME").unwrap_or_else(|| "unknown".into()),
+        uname = uname_info(),
+        agent = agent_info(),
+        session = environment_value("XDG_CURRENT_DESKTOP")
+            .or_else(|| environment_value("DESKTOP_SESSION"))
+            .unwrap_or_else(|| "unknown".to_string()),
+        gtk_version = gtk_version(),
+        accessibility = "unknown",
+        gtk_theme = gtk_setting("gtk-theme-name"),
+        system_font = gtk_setting("gtk-font-name"),
+        font = terminal_font_info(),
+        containers = containers_info(),
+        os_release = os_release_info(),
+    )
+}
+
+fn gtk_version() -> String {
+    format!(
+        "{}.{}.{}",
+        gtk::major_version(),
+        gtk::minor_version(),
+        gtk::micro_version()
+    )
+}
+
+fn uname_info() -> String {
+    let Ok(output) = std::process::Command::new("uname").arg("-smrv").output() else {
+        return "uname: unavailable".to_string();
+    };
+    if !output.status.success() {
+        return "uname: unavailable".to_string();
+    }
+    let output = String::from_utf8_lossy(&output.stdout);
+    format!("uname = {}", output.trim())
+}
+
+fn agent_info() -> String {
+    if std::env::var_os("FLATPAK_ID").is_some() {
+        "running in Flatpak".to_string()
+    } else if let Some(container) = environment_value("container") {
+        format!("running in {container}")
+    } else {
+        "running on host".to_string()
+    }
+}
+
+fn gtk_setting(name: &str) -> String {
+    gtk::Settings::default()
+        .map(|settings| settings.property::<String>(name))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn terminal_font_info() -> String {
+    environment_value("CHELOTYPE_FONT_SIZE")
+        .map(|size| format!("system font scaled to {size}px"))
+        .unwrap_or_else(|| "-- Using System Font --".to_string())
+}
+
+fn containers_info() -> String {
+    let targets = available_launch_targets()
+        .into_iter()
+        .filter(|target| !matches!(target, LaunchTarget::Host))
+        .map(|target| format!("  - {}", target.id()))
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        "  none".to_string()
+    } else {
+        targets.join("\n")
+    }
+}
+
+fn os_release_info() -> String {
+    std::fs::read_to_string("/etc/os-release")
+        .map(|text| text.trim().to_string())
+        .unwrap_or_else(|_| "/etc/os-release unavailable".to_string())
+}
+
+fn environment_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn url_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 fn show_preferences_dialog(
     parent: &adw::ApplicationWindow,
     canvas: &TerminalCanvas,
@@ -2658,6 +2888,7 @@ fn show_preferences_dialog(
         .orientation(gtk::Orientation::Vertical)
         .build();
     let header = adw::HeaderBar::builder().build();
+    header.add_css_class("terminal-header");
     let title = gtk::Label::builder()
         .label("Preferences")
         .css_classes(["title"])
@@ -4853,7 +5084,6 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
         @define-color chelotype_chrome_hover alpha(__FOREGROUND__, 0.13);
         @define-color chelotype_chrome_active alpha(__FOREGROUND__, 0.19);
 
-        window,
         .term-root,
         preferencespage,
         preferencesgroup {
@@ -4861,8 +5091,6 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
             color: @chelotype_foreground;
         }
 
-        window,
-        headerbar,
         .terminal-header,
         .term-root,
         preferencespage,

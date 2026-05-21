@@ -1,6 +1,6 @@
 [package]
 name = "chelotype"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "Opinionated GTK terminal"
 repository = "https://github.com/chelokot/Chelotype"
@@ -10,7 +10,7 @@ keywords = ["terminal", "gtk", "containers", "pty", "shell"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-adw = { version = "0.8", package = "libadwaita" }
+adw = { version = "0.8", package = "libadwaita", features = ["v1_5"] }
 gtk = { version = "0.10", package = "gtk4", features = ["v4_6"] }
 portable-pty = "0.9"
 serde_json = "1.0"

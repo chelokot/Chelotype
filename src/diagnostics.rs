@@ -234,7 +234,9 @@ impl WorkspaceHeadlessRuntime {
                         | KeyAction::ZoomIn
                         | KeyAction::ZoomOut
                         | KeyAction::ZoomReset
-                        | KeyAction::OpenSettings => Ok(()),
+                        | KeyAction::OpenSettings
+                        | KeyAction::NewWindow
+                        | KeyAction::OpenAbout => Ok(()),
                     }
                 } else {
                     Ok(())
@@ -371,7 +373,9 @@ impl HeadlessRuntime {
                         | KeyAction::ZoomIn
                         | KeyAction::ZoomOut
                         | KeyAction::ZoomReset
-                        | KeyAction::OpenSettings => Ok(()),
+                        | KeyAction::OpenSettings
+                        | KeyAction::NewWindow
+                        | KeyAction::OpenAbout => Ok(()),
                     }
                 } else {
                     Ok(())

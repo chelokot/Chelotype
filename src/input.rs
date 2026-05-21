@@ -18,6 +18,7 @@ pub enum KeyAction {
     UndoInput,
     RedoInput,
     NewTab,
+    NewWindow,
     CloseTab,
     NextTab,
     PreviousTab,
@@ -26,6 +27,7 @@ pub enum KeyAction {
     ZoomOut,
     ZoomReset,
     OpenSettings,
+    OpenAbout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +47,7 @@ enum PhysicalKey {
     A,
     C,
     E,
+    N,
     T,
     V,
     W,
@@ -73,6 +76,9 @@ pub fn key_to_action(key: gdk::Key, keycode: u32, state: gdk::ModifierType) -> O
             },
             selecting: shift,
         });
+    }
+    if key == gdk::Key::F1 {
+        return Some(KeyAction::OpenAbout);
     }
     if ctrl && shift && matches!(key, gdk::Key::Up | gdk::Key::Down) {
         return Some(KeyAction::SelectCommandBlockOutput(
@@ -117,6 +123,9 @@ pub fn key_to_action(key: gdk::Key, keycode: u32, state: gdk::ModifierType) -> O
     }
     if ctrl && shift && key_matches(key, keycode, PhysicalKey::T, &['t']) {
         return Some(KeyAction::NewTab);
+    }
+    if ctrl && shift && key_matches(key, keycode, PhysicalKey::N, &['n']) {
+        return Some(KeyAction::NewWindow);
     }
     if ctrl && shift && key_matches(key, keycode, PhysicalKey::W, &['w']) {
         return Some(KeyAction::CloseTab);
@@ -240,6 +249,7 @@ fn physical_control_byte(keycode: u32) -> Option<u8> {
         PhysicalKey::A => Some(0x01),
         PhysicalKey::C => Some(0x03),
         PhysicalKey::E => Some(0x05),
+        PhysicalKey::N => Some(0x0e),
         PhysicalKey::T => Some(0x14),
         PhysicalKey::V => Some(0x16),
         PhysicalKey::W => Some(0x17),
@@ -254,6 +264,7 @@ fn physical_key(keycode: u32) -> Option<PhysicalKey> {
         38 => Some(PhysicalKey::A),
         54 => Some(PhysicalKey::C),
         26 => Some(PhysicalKey::E),
+        57 => Some(PhysicalKey::N),
         28 => Some(PhysicalKey::T),
         55 => Some(PhysicalKey::V),
         25 => Some(PhysicalKey::W),
@@ -508,6 +519,21 @@ mod tests {
         assert_eq!(
             key_to_action(gdk::Key::comma, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::OpenSettings)
+        );
+    }
+
+    #[test]
+    fn maps_window_and_about_shortcuts() {
+        assert_eq!(
+            key_to_action(
+                gdk::Key::n,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::NewWindow)
+        );
+        assert_eq!(
+            key_to_action(gdk::Key::F1, gdk::ModifierType::empty()),
+            Some(KeyAction::OpenAbout)
         );
     }
 
