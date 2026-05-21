@@ -6,7 +6,6 @@ pub mod cell_text;
 pub mod command_blocks;
 pub mod config;
 pub mod containers;
-pub mod cursor_preview;
 pub mod diagnostics;
 pub mod frame_timing;
 pub mod ghostty_snapshot;

@@ -2838,47 +2838,145 @@ fn cursor_animation_preview(
     shape: crate::config::CursorShape,
     style: crate::config::CursorStyle,
 ) -> gtk::DrawingArea {
-    let frame = std::rc::Rc::new(std::cell::Cell::new(0usize));
-    let preview = gtk::DrawingArea::builder()
-        .width_request(290)
-        .height_request(163)
-        .build();
-    preview.set_can_target(false);
-    {
-        let frame = frame.clone();
-        preview.set_draw_func(move |_, context, width, height| {
-            let scale_x = f64::from(width) / f64::from(crate::cursor_preview::PREVIEW_WIDTH);
-            let scale_y = f64::from(height) / f64::from(crate::cursor_preview::PREVIEW_HEIGHT);
-            let scale = scale_x.min(scale_y);
-            let offset_x = (f64::from(width)
-                - (f64::from(crate::cursor_preview::PREVIEW_WIDTH) * scale))
-                * 0.5;
-            let offset_y = (f64::from(height)
-                - (f64::from(crate::cursor_preview::PREVIEW_HEIGHT) * scale))
-                * 0.5;
-            let _ = context.save();
-            context.translate(offset_x, offset_y);
-            context.scale(scale, scale);
-            crate::cursor_preview::draw_preview_frame(context, shape, style, frame.get());
-            let _ = context.restore();
-        });
-    }
-    {
-        let started_at = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
-        preview.add_tick_callback(move |preview, frame_clock| {
+    let preview = terminal_preview_canvas(290, 163, style, shape);
+    preview.set_render(preview_render_frame(
+        ANIMATION_PREVIEW_LINES,
+        animation_preview_target(0),
+    ));
+    add_terminal_preview_tick(preview.clone(), Some(ANIMATION_PREVIEW_LINES));
+    preview.widget().clone()
+}
+
+#[derive(Clone, Copy)]
+struct PreviewCursorTarget {
+    line: i32,
+    column: i32,
+}
+
+const ANIMATION_PREVIEW_LINES: &[&str] = &[
+    "$ cargo run",
+    "  Compiling chelotype v0.1.0",
+    "  Finished dev profile",
+    "",
+    "$ echo smooth cursor previews",
+    "smooth cursor previews",
+    "",
+    "$ git status --short",
+    " M src/canvas.rs",
+];
+
+const ANIMATION_PREVIEW_TARGETS: [PreviewCursorTarget; 5] = [
+    PreviewCursorTarget { line: 0, column: 2 },
+    PreviewCursorTarget {
+        line: 0,
+        column: 11,
+    },
+    PreviewCursorTarget {
+        line: 4,
+        column: 28,
+    },
+    PreviewCursorTarget {
+        line: 7,
+        column: 15,
+    },
+    PreviewCursorTarget { line: 8, column: 2 },
+];
+
+fn terminal_preview_canvas(
+    width: i32,
+    height: i32,
+    style: crate::config::CursorStyle,
+    shape: crate::config::CursorShape,
+) -> TerminalCanvas {
+    let preview = TerminalCanvas::new();
+    preview.widget().set_width_request(width);
+    preview.widget().set_height_request(height);
+    preview.widget().set_can_target(false);
+    preview.widget().set_focusable(false);
+    preview.widget().set_cursor_from_name(None);
+    preview.set_cursor_options_override(Some((style, shape)));
+    preview.set_font_size_override(Some(10.0));
+    preview
+}
+
+fn add_terminal_preview_tick(
+    preview: TerminalCanvas,
+    animated_lines: Option<&'static [&'static str]>,
+) {
+    let started_at = std::rc::Rc::new(std::cell::Cell::new(None::<i64>));
+    let widget = preview.widget().clone();
+    widget.add_tick_callback(move |_, frame_clock| {
+        if let Some(lines) = animated_lines {
             let now = frame_clock.frame_time();
             let start = started_at.get().unwrap_or(now);
             started_at.set(Some(start));
-            let elapsed = now - start;
-            let preview_frame = elapsed as usize * crate::cursor_preview::PREVIEW_FRAME_RATE
-                / 1_000_000
-                % crate::cursor_preview::PREVIEW_FRAMES;
-            frame.set(preview_frame);
-            preview.queue_draw();
-            gtk::glib::ControlFlow::Continue
-        });
+            preview.set_render(preview_render_frame(
+                lines,
+                animation_preview_target((now - start) as u64),
+            ));
+        }
+        preview.tick_cursor_visual();
+        gtk::glib::ControlFlow::Continue
+    });
+}
+
+fn animation_preview_target(elapsed_us: u64) -> PreviewCursorTarget {
+    let segment = (elapsed_us / 850_000) as usize;
+    ANIMATION_PREVIEW_TARGETS[segment % ANIMATION_PREVIEW_TARGETS.len()]
+}
+
+fn preview_render_frame(lines: &[&str], cursor: PreviewCursorTarget) -> RenderFrame {
+    let content = RenderableContentOwned {
+        lines: lines.iter().map(|line| preview_cells(line)).collect(),
+        line_metadata: vec![crate::terminal_grid::TerminalLineMetadata::default(); lines.len()],
+        cursor_line: cursor.line,
+        cursor_col: cursor.column,
+        cursor_visible: true,
+        display_offset: 0,
+        colors: crate::terminal_grid::TerminalColors::default(),
+        mouse: MouseMode::default(),
+    };
+    Renderer::render_frame_for_paint(&content, None)
+}
+
+fn preview_cells(line: &str) -> Vec<crate::terminal_grid::TerminalCell> {
+    let palette = crate::terminal_palette::default_terminal_palette();
+    let mut cells = Vec::new();
+    let mut color = palette.foreground;
+    let mut bold = false;
+    for segment in line.split_inclusive(' ') {
+        let trimmed = segment.trim_end();
+        if trimmed == "$" || trimmed == "❯" {
+            color = palette.indexed[3];
+            bold = false;
+        } else if trimmed == "Compiling" || trimmed == "Finished" {
+            color = palette.indexed[2];
+            bold = true;
+        } else if trimmed.starts_with("smooth") {
+            color = palette.indexed[12];
+            bold = false;
+        } else if trimmed == "M" {
+            color = palette.indexed[1];
+            bold = true;
+        } else if trimmed.starts_with("src/") || trimmed.starts_with("v0.") {
+            color = palette.indexed[8];
+            bold = false;
+        } else if !trimmed.is_empty() {
+            color = palette.foreground;
+            bold = false;
+        }
+        cells.extend(
+            segment
+                .chars()
+                .map(|ch| crate::terminal_grid::TerminalCell {
+                    text: ch.to_string().into(),
+                    fg: Some(color.to_string()),
+                    bold,
+                    ..crate::terminal_grid::TerminalCell::blank()
+                }),
+        );
     }
-    preview
+    cells
 }
 
 fn scrolling_preview_tile(enabled: bool, canvas: TerminalCanvas) -> gtk::ToggleButton {
@@ -3371,56 +3469,16 @@ const PREVIEW_SCROLL_LINES: &[PreviewScrollLine] = &[
 ];
 
 fn cursor_shape_preview(shape: crate::config::CursorShape) -> gtk::DrawingArea {
-    let preview = gtk::DrawingArea::builder()
-        .width_request(290)
-        .height_request(46)
-        .build();
-    preview.set_can_target(false);
-    preview.set_draw_func(move |_, context, width, height| {
-        draw_cursor_shape_preview(context, shape, width, height);
-    });
-    preview
-}
-
-fn draw_cursor_shape_preview(
-    context: &gtk::cairo::Context,
-    shape: crate::config::CursorShape,
-    width: i32,
-    height: i32,
-) {
-    let background = crate::terminal_palette::default_terminal_palette().background_rgb();
-    context.set_source_rgb(
-        background.red_unit(),
-        background.green_unit(),
-        background.blue_unit(),
-    );
-    context.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
-    let _ = context.fill();
-    context.select_font_face(
-        "monospace",
-        gtk::cairo::FontSlant::Normal,
-        gtk::cairo::FontWeight::Normal,
-    );
-    context.set_font_size(14.0);
-    context.set_source_rgb(218.0 / 255.0, 225.0 / 255.0, 232.0 / 255.0);
-    context.move_to(14.0, 29.0);
-    let _ = context.show_text("let cursor = shape");
-    let line_height = 18.0;
-    let cursor_top = (f64::from(height) - line_height) * 0.5;
-    let target = crate::canvas::CursorDrawPosition {
-        pane_id: 0,
-        line: cursor_top / line_height,
-        column: 12.0,
-    };
-    crate::canvas::draw_cursor_visual(
-        context,
-        target,
-        None,
-        crate::config::CursorStyle::Steady,
-        shape,
-        line_height,
-        8.4,
-    );
+    let preview = terminal_preview_canvas(290, 46, crate::config::CursorStyle::Steady, shape);
+    preview.set_render(preview_render_frame(
+        &["let cursor = shape"],
+        PreviewCursorTarget {
+            line: 0,
+            column: 11,
+        },
+    ));
+    add_terminal_preview_tick(preview.clone(), None);
+    preview.widget().clone()
 }
 
 fn populate_animation_settings(

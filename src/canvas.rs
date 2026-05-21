@@ -1,6 +1,6 @@
 use crate::config::{CursorShape, CursorStyle};
 use crate::render::{RenderFrame, RenderRegion, RenderRun, RenderStyle};
-use crate::terminal_font::{TerminalFontMetrics, layout_for, metrics_for_widget};
+use crate::terminal_font::{TerminalFontMetrics, layout_for_size, metrics_for_widget_size};
 use crate::terminal_palette::default_terminal_palette;
 use crate::workspace_render::WorkspaceRenderFrame;
 use gtk::prelude::*;
@@ -20,6 +20,8 @@ pub struct TerminalCanvas {
     scroll_underlay: Rc<RefCell<Option<CanvasRenderFrame>>>,
     cursor_blink: Rc<Cell<CursorBlinkState>>,
     cursor_motion: Rc<Cell<CursorMotionState>>,
+    cursor_options_override: Rc<Cell<Option<CursorOptions>>>,
+    font_size_override: Rc<Cell<Option<f64>>>,
     scroll_visual_offset_px: Rc<Cell<f64>>,
 }
 
@@ -36,6 +38,8 @@ impl TerminalCanvas {
         let scroll_underlay = Rc::new(RefCell::new(None::<CanvasRenderFrame>));
         let cursor_blink = Rc::new(Cell::new(CursorBlinkState::default()));
         let cursor_motion = Rc::new(Cell::new(CursorMotionState::default()));
+        let cursor_options_override = Rc::new(Cell::new(None::<CursorOptions>));
+        let font_size_override = Rc::new(Cell::new(None::<f64>));
         let scroll_visual_offset_px = Rc::new(Cell::new(0.0));
         let text_layout_cache = Rc::new(RefCell::new(TextLayoutCache::default()));
         let row_surface_cache = Rc::new(RefCell::new(RowSurfaceCache::default()));
@@ -44,6 +48,8 @@ impl TerminalCanvas {
         let draw_scroll_underlay = scroll_underlay.clone();
         let draw_cursor_blink = cursor_blink.clone();
         let draw_cursor_motion = cursor_motion.clone();
+        let draw_cursor_options_override = cursor_options_override.clone();
+        let draw_font_size_override = font_size_override.clone();
         let draw_scroll_visual_offset_px = scroll_visual_offset_px.clone();
         let draw_text_layout_cache = text_layout_cache.clone();
         let draw_row_surface_cache = row_surface_cache.clone();
@@ -76,7 +82,12 @@ impl TerminalCanvas {
                     CanvasPaint {
                         cursor_blink: draw_cursor_blink.get(),
                         cursor_motion: draw_cursor_motion.get(),
-                        cursor_options: CursorOptions::from_config(),
+                        cursor_options: draw_cursor_options_override
+                            .get()
+                            .unwrap_or_else(CursorOptions::from_config),
+                        font_size_pt: draw_font_size_override
+                            .get()
+                            .unwrap_or_else(crate::terminal_font::font_size_pt),
                         scroll_visual_offset_px: draw_scroll_visual_offset_px.get(),
                         now,
                     },
@@ -92,6 +103,8 @@ impl TerminalCanvas {
             scroll_underlay,
             cursor_blink,
             cursor_motion,
+            cursor_options_override,
+            font_size_override,
             scroll_visual_offset_px,
         }
     }
@@ -106,6 +119,20 @@ impl TerminalCanvas {
 
     pub fn set_workspace_render(&self, render: WorkspaceRenderFrame) {
         self.set_canvas_render(CanvasRenderFrame::Workspace(render));
+    }
+
+    pub fn set_cursor_options_override(
+        &self,
+        style: Option<(crate::config::CursorStyle, crate::config::CursorShape)>,
+    ) {
+        self.cursor_options_override
+            .set(style.map(|(style, shape)| CursorOptions { style, shape }));
+        self.area.queue_draw();
+    }
+
+    pub fn set_font_size_override(&self, font_size_pt: Option<f64>) {
+        self.font_size_override.set(font_size_pt);
+        self.area.queue_draw();
     }
 
     pub fn set_scroll_visual_offset_px(&self, offset_px: f64) {
@@ -138,10 +165,13 @@ impl TerminalCanvas {
         let previous_blink = self.cursor_blink.get();
         let previous_motion = self.cursor_motion.get();
         self.cursor_blink.set(previous_blink.sync(identity, now));
-        let cursor_style = crate::config::cursor_style();
-        let cursor_shape = crate::config::cursor_shape();
-        self.cursor_motion
-            .set(previous_motion.sync(identity, now, cursor_style, cursor_shape));
+        let cursor_options = self.cursor_options();
+        self.cursor_motion.set(previous_motion.sync(
+            identity,
+            now,
+            cursor_options.style,
+            cursor_options.shape,
+        ));
         if current.as_ref() == Some(&render) {
             if previous_blink != self.cursor_blink.get()
                 || previous_motion != self.cursor_motion.get()
@@ -172,7 +202,7 @@ impl TerminalCanvas {
         let now = Instant::now();
         let next = self.cursor_blink.get().tick(cursor_visible, now);
         let current_motion = self.cursor_motion.get();
-        let next_motion = current_motion.settle_if_complete(now, crate::config::cursor_shape());
+        let next_motion = current_motion.settle_if_complete(now, self.cursor_options().shape);
         if current_motion != next_motion {
             self.cursor_motion.set(next_motion);
         }
@@ -183,6 +213,12 @@ impl TerminalCanvas {
             self.cursor_blink.set(next);
             self.area.queue_draw();
         }
+    }
+
+    fn cursor_options(&self) -> CursorOptions {
+        self.cursor_options_override
+            .get()
+            .unwrap_or_else(CursorOptions::from_config)
     }
 }
 
@@ -257,9 +293,12 @@ fn draw_canvas_render(
     paint_resources: &mut PaintResources<'_>,
     paint: CanvasPaint,
 ) {
-    let Some(metrics) = metrics_for_widget(widget) else {
+    let Some(metrics) = metrics_for_widget_size(widget, paint.font_size_pt) else {
         return;
     };
+    paint_resources
+        .text_layout_cache
+        .set_font_size(paint.font_size_pt);
     let cursor_paint = CursorPaintState {
         visible: paint.cursor_blink.visible,
         pane_id: 0,
@@ -473,7 +512,15 @@ fn draw_render_frame(
 
     if render.cursor.visible && cursor_paint.visible {
         if let Some(preedit) = &render.preedit {
-            draw_preedit(widget, context, render, preedit, line_height, cell_width);
+            draw_preedit(
+                widget,
+                context,
+                render,
+                preedit,
+                line_height,
+                cell_width,
+                paint_resources.text_layout_cache.font_size_pt,
+            );
         } else {
             draw_cursor(
                 context,
@@ -486,7 +533,15 @@ fn draw_render_frame(
             );
         }
     } else if let Some(preedit) = &render.preedit {
-        draw_preedit(widget, context, render, preedit, line_height, cell_width);
+        draw_preedit(
+            widget,
+            context,
+            render,
+            preedit,
+            line_height,
+            cell_width,
+            paint_resources.text_layout_cache.font_size_pt,
+        );
     }
     let _ = context.restore();
 }
@@ -612,6 +667,7 @@ struct CanvasPaint {
     cursor_blink: CursorBlinkState,
     cursor_motion: CursorMotionState,
     cursor_options: CursorOptions,
+    font_size_pt: f64,
     scroll_visual_offset_px: f64,
     now: Instant,
 }
@@ -741,7 +797,7 @@ impl RowSurfaceCache {
             return None;
         }
         let bucket = RowSurfaceBucketKey {
-            signature: TextLayoutCacheSignature::for_widget(widget),
+            signature: TextLayoutCacheSignature::for_widget(widget, text_layout_cache.font_size_pt),
             width_px: spec.width_px,
             height_px: spec.height_px,
             line_paint_key: line.paint_key,
@@ -854,6 +910,7 @@ struct TextLayoutCacheSignature {
 #[derive(Default)]
 struct TextLayoutCache {
     signature: Option<TextLayoutCacheSignature>,
+    font_size_pt: f64,
     layouts: HashMap<String, pango::Layout>,
 }
 
@@ -863,6 +920,14 @@ enum CachedLayout {
 }
 
 impl TextLayoutCache {
+    fn set_font_size(&mut self, font_size_pt: f64) {
+        if self.font_size_pt.to_bits() != font_size_pt.to_bits() {
+            self.font_size_pt = font_size_pt;
+            self.signature = None;
+            self.layouts.clear();
+        }
+    }
+
     fn layout_for(&mut self, widget: &gtk::DrawingArea, markup: &str) -> CachedLayout {
         self.sync_signature(widget);
         if let Some(layout) = self.layouts.get(markup) {
@@ -871,13 +936,13 @@ impl TextLayoutCache {
         if self.layouts.len() >= MAX_TEXT_LAYOUT_CACHE_ENTRIES {
             self.layouts.clear();
         }
-        let layout = layout_for(widget, markup);
+        let layout = layout_for_size(widget, markup, self.font_size_pt);
         self.layouts.insert(markup.to_string(), layout.clone());
         CachedLayout::Miss(layout)
     }
 
     fn sync_signature(&mut self, widget: &gtk::DrawingArea) {
-        let signature = TextLayoutCacheSignature::for_widget(widget);
+        let signature = TextLayoutCacheSignature::for_widget(widget, self.font_size_pt);
         if self.signature != Some(signature) {
             self.signature = Some(signature);
             self.layouts.clear();
@@ -886,9 +951,9 @@ impl TextLayoutCache {
 }
 
 impl TextLayoutCacheSignature {
-    fn for_widget(widget: &gtk::DrawingArea) -> Self {
+    fn for_widget(widget: &gtk::DrawingArea, font_size_pt: f64) -> Self {
         Self {
-            font_size_tenths: (crate::terminal_font::font_size_pt() * 10.0).round() as u32,
+            font_size_tenths: (font_size_pt * 10.0).round() as u32,
             text_scale_micros: (crate::terminal_font::text_scale_for_widget(widget) * 1_000_000.0)
                 .round() as u32,
         }
@@ -1775,58 +1840,6 @@ fn draw_cursor(
     }
 }
 
-pub(crate) fn draw_cursor_visual(
-    context: &cairo::Context,
-    target: CursorDrawPosition,
-    path: Option<CursorDrawPath>,
-    cursor_style: CursorStyle,
-    cursor_shape: CursorShape,
-    line_height: f64,
-    cell_width: f64,
-) {
-    match cursor_style {
-        CursorStyle::Steady => {
-            draw_caret_at(context, target, cursor_shape, line_height, cell_width)
-        }
-        CursorStyle::Smooth => draw_caret_at(
-            context,
-            path.map(|path| path.current).unwrap_or(target),
-            cursor_shape,
-            line_height,
-            cell_width,
-        ),
-        CursorStyle::Smear => {
-            if let Some(path) = path {
-                draw_smear_cursor(context, path, cursor_shape, line_height, cell_width);
-            } else {
-                draw_caret_at(context, target, cursor_shape, line_height, cell_width);
-            }
-        }
-        CursorStyle::Neovide => {
-            if let Some(path) = path {
-                draw_neovide_cursor(context, path, cursor_shape, line_height, cell_width);
-            } else {
-                draw_caret_at(context, target, cursor_shape, line_height, cell_width);
-            }
-        }
-    }
-}
-
-fn draw_neovide_cursor(
-    context: &cairo::Context,
-    path: CursorDrawPath,
-    shape: CursorShape,
-    line_height: f64,
-    cell_width: f64,
-) {
-    if path.progress >= 1.0 {
-        draw_caret_at(context, path.target, shape, line_height, cell_width);
-        return;
-    }
-    let points = neovide_corners(path, shape, line_height, cell_width);
-    draw_neovide_points(context, points, shape);
-}
-
 fn draw_neovide_points(context: &cairo::Context, points: [CursorPoint; 4], shape: CursorShape) {
     context.set_source_rgba(
         125.0 / 255.0,
@@ -1835,39 +1848,6 @@ fn draw_neovide_points(context: &cairo::Context, points: [CursorPoint; 4], shape
         cursor_alpha(shape),
     );
     draw_cursor_polygon(context, points);
-}
-
-fn draw_smear_cursor(
-    context: &cairo::Context,
-    path: CursorDrawPath,
-    shape: CursorShape,
-    line_height: f64,
-    cell_width: f64,
-) {
-    if path.progress >= 1.0 {
-        draw_caret_at(context, path.target, shape, line_height, cell_width);
-        return;
-    }
-    let mut points = smear_corners(path, shape, line_height, cell_width);
-    let target_center = cursor_center(path.target, shape, line_height, cell_width);
-    let mut head = points[0];
-    let mut tail = points[0];
-    for point in points {
-        if squared_distance(point, target_center) < squared_distance(head, target_center) {
-            head = point;
-        }
-        if squared_distance(point, target_center) > squared_distance(tail, target_center) {
-            tail = point;
-        }
-    }
-    points = limit_smear_length(points, head, cell_width * 6.0);
-    tail = points[0];
-    for point in points {
-        if squared_distance(point, head) > squared_distance(tail, head) {
-            tail = point;
-        }
-    }
-    draw_smear_points(context, points, target_center, shape);
 }
 
 fn draw_smear_points(
@@ -1899,25 +1879,7 @@ fn draw_smear_points(
     draw_cursor_polygon(context, points);
 }
 
-fn limit_smear_length(
-    points: [CursorPoint; 4],
-    head: CursorPoint,
-    max_length: f64,
-) -> [CursorPoint; 4] {
-    points.map(|point| {
-        let distance = squared_distance(point, head).sqrt();
-        if distance <= max_length {
-            point
-        } else {
-            let factor = max_length / distance;
-            CursorPoint {
-                x: head.x + ((point.x - head.x) * factor),
-                y: head.y + ((point.y - head.y) * factor),
-            }
-        }
-    })
-}
-
+#[cfg(test)]
 fn neovide_corners(
     path: CursorDrawPath,
     shape: CursorShape,
@@ -1943,29 +1905,7 @@ fn neovide_corners(
     })
 }
 
-fn smear_corners(
-    path: CursorDrawPath,
-    shape: CursorShape,
-    line_height: f64,
-    cell_width: f64,
-) -> [CursorPoint; 4] {
-    let from = cursor_corners(path.from, shape, line_height, cell_width);
-    let target = cursor_corners(path.target, shape, line_height, cell_width);
-    let target_center = cursor_center(path.target, shape, line_height, cell_width);
-    let stiffnesses = smear_stiffnesses(from, target_center);
-    let damping = crate::config::cursor_smear_damping();
-    let elapsed_ms = path.elapsed.as_secs_f64() * 1000.0;
-    std::array::from_fn(|index| {
-        smear_corner_position(
-            from[index],
-            target[index],
-            stiffnesses[index],
-            damping,
-            elapsed_ms,
-        )
-    })
-}
-
+#[cfg(test)]
 fn cursor_corners(
     position: CursorDrawPosition,
     shape: CursorShape,
@@ -2099,6 +2039,7 @@ fn cursor_alpha(shape: CursorShape) -> f64 {
     }
 }
 
+#[cfg(test)]
 fn corner_ranks(
     from: CursorDrawPosition,
     target: CursorDrawPosition,
@@ -2135,56 +2076,7 @@ fn corner_ranks(
     ranks
 }
 
-fn smear_stiffnesses(from: [CursorPoint; 4], target_center: CursorPoint) -> [f64; 4] {
-    let head_stiffness = crate::config::cursor_smear_stiffness();
-    let trailing_stiffness = crate::config::cursor_smear_trailing_stiffness();
-    let distances = from.map(|point| squared_distance(point, target_center).sqrt());
-    let min_distance = distances.iter().copied().fold(f64::INFINITY, f64::min);
-    let max_distance = distances.iter().copied().fold(0.0, f64::max);
-    if (max_distance - min_distance).abs() <= f64::EPSILON {
-        return [head_stiffness; 4];
-    }
-    let trailing_exponent = crate::config::cursor_smear_trailing_exponent();
-    distances.map(|distance| {
-        smear_stiffness_for_distance(
-            distance,
-            min_distance,
-            max_distance,
-            head_stiffness,
-            trailing_stiffness,
-            trailing_exponent,
-        )
-    })
-}
-
-fn smear_corner_position(
-    from: CursorPoint,
-    target: CursorPoint,
-    stiffness: f64,
-    damping: f64,
-    elapsed_ms: f64,
-) -> CursorPoint {
-    let mut current = from;
-    let mut velocity = CursorPoint { x: 0.0, y: 0.0 };
-    let mut remaining = elapsed_ms;
-    while remaining > 0.0 {
-        let step = remaining.min(17.0);
-        let speed_correction = step / 17.0;
-        let velocity_conservation = (1.0 - damping).powf(speed_correction);
-        let damping_correction = 1.0 / (1.0 + (2.5 * velocity_conservation));
-        let effective_stiffness =
-            1.0 - (1.0 - (stiffness * damping_correction)).powf(speed_correction);
-        velocity.x += (target.x - current.x) * effective_stiffness;
-        velocity.y += (target.y - current.y) * effective_stiffness;
-        current.x += velocity.x;
-        current.y += velocity.y;
-        velocity.x *= velocity_conservation;
-        velocity.y *= velocity_conservation;
-        remaining -= step;
-    }
-    current
-}
-
+#[cfg(test)]
 fn critically_damped_progress(elapsed_ms: f64, duration_ms: f64) -> f64 {
     if duration_ms <= 1.0 || elapsed_ms >= duration_ms {
         return 1.0;
@@ -2194,6 +2086,7 @@ fn critically_damped_progress(elapsed_ms: f64, duration_ms: f64) -> f64 {
     (1.0 - residual).clamp(0.0, 1.0)
 }
 
+#[cfg(test)]
 fn lerp_point(from: CursorPoint, target: CursorPoint, progress: f64) -> CursorPoint {
     CursorPoint {
         x: from.x + ((target.x - from.x) * progress),
@@ -2244,6 +2137,7 @@ fn draw_preedit(
     preedit: &crate::render::RenderPreedit,
     line_height: f64,
     cell_width: f64,
+    font_size_pt: f64,
 ) {
     let x = preedit.column.max(0) as f64 * cell_width;
     let y = preedit.line.max(0) as f64 * line_height;
@@ -2268,7 +2162,7 @@ fn draw_preedit(
         markup: run_markup(&style, &preedit.text),
         style,
     };
-    let layout = layout_for(widget, &run.markup);
+    let layout = layout_for_size(widget, &run.markup, font_size_pt);
     gtk::render_layout(&widget.style_context(), context, x, y, &layout);
 
     if render.cursor.visible {

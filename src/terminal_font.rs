@@ -24,8 +24,15 @@ pub fn description() -> pango::FontDescription {
 }
 
 pub fn description_for_text_scale(text_scale: f64) -> pango::FontDescription {
+    description_for_size_and_text_scale(font_size_pt(), text_scale)
+}
+
+pub fn description_for_size_and_text_scale(
+    font_size_pt: f64,
+    text_scale: f64,
+) -> pango::FontDescription {
     let mut description = pango::FontDescription::from_string(TERMINAL_FONT);
-    let scaled_size = font_size_pt() * text_scale.clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE);
+    let scaled_size = font_size_pt * text_scale.clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE);
     description.set_size((scaled_size * pango::SCALE as f64).round() as i32);
     description
 }
@@ -73,16 +80,33 @@ fn save_configured_size() {
 }
 
 pub fn layout_for(widget: &gtk::DrawingArea, markup: &str) -> pango::Layout {
+    layout_for_size(widget, markup, font_size_pt())
+}
+
+pub fn layout_for_size(
+    widget: &gtk::DrawingArea,
+    markup: &str,
+    font_size_pt: f64,
+) -> pango::Layout {
     let layout = widget.create_pango_layout(None);
-    layout.set_font_description(Some(&description_for_text_scale(text_scale_for_widget(
-        widget,
-    ))));
+    layout.set_font_description(Some(&description_for_size_and_text_scale(
+        font_size_pt,
+        text_scale_for_widget(widget),
+    )));
     layout.set_markup(markup);
     layout
 }
 
 pub fn metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalFontMetrics> {
-    let description = description_for_text_scale(text_scale_for_widget(widget));
+    metrics_for_widget_size(widget, font_size_pt())
+}
+
+pub fn metrics_for_widget_size(
+    widget: &gtk::DrawingArea,
+    font_size_pt: f64,
+) -> Option<TerminalFontMetrics> {
+    let description =
+        description_for_size_and_text_scale(font_size_pt, text_scale_for_widget(widget));
     let sample = "00000000000000000000000000000000";
     let layout = widget.create_pango_layout(Some(sample));
     layout.set_font_description(Some(&description));
