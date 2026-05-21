@@ -68,7 +68,6 @@ fn build_ui(app: &Application) {
     let launch_menu_icon = gtk::Image::from_icon_name("pan-down-symbolic");
     let launch_menu_button = gtk::MenuButton::builder()
         .tooltip_text("Show profiles and containers")
-        .css_classes(["launch-menu-arrow"])
         .child(&launch_menu_icon)
         .focus_on_click(false)
         .build();
@@ -96,6 +95,8 @@ fn build_ui(app: &Application) {
     header.pack_end(&settings_button);
 
     let canvas = TerminalCanvas::new();
+    let style_provider = gtk::CssProvider::new();
+    let pending_style_refresh = std::rc::Rc::new(std::cell::Cell::new(false));
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.add_css_class("term-root");
@@ -114,11 +115,17 @@ fn build_ui(app: &Application) {
         let window = window.clone();
         let canvas = canvas.clone();
         let force_snapshot = force_snapshot.clone();
+        let pending_style_refresh = pending_style_refresh.clone();
         settings_button.connect_clicked(move |_| {
-            show_preferences_dialog(&window, &canvas, force_snapshot.clone());
+            show_preferences_dialog(
+                &window,
+                &canvas,
+                force_snapshot.clone(),
+                pending_style_refresh.clone(),
+            );
         });
     }
-    apply_style(canvas.widget());
+    install_style(canvas.widget(), &style_provider);
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
     let render_snapshot_enabled =
         std::env::var("CHELOTYPE_RENDER_SNAPSHOT").ok().as_deref() == Some("1");
@@ -292,6 +299,7 @@ fn build_ui(app: &Application) {
         let pending_input_latency = pending_input_latency.clone();
         let window = window.clone();
         let canvas = canvas.clone();
+        let pending_style_refresh = pending_style_refresh.clone();
         key_controller.connect_key_pressed(move |_ctrl, key, keycode, state| {
             if let Some(action) = key_to_action(key, keycode, state) {
                 match action {
@@ -501,7 +509,12 @@ fn build_ui(app: &Application) {
                         );
                     }
                     KeyAction::OpenSettings => {
-                        show_preferences_dialog(&window, &canvas, force_snapshot.clone());
+                        show_preferences_dialog(
+                            &window,
+                            &canvas,
+                            force_snapshot.clone(),
+                            pending_style_refresh.clone(),
+                        );
                     }
                 }
                 glib::Propagation::Stop
@@ -1366,6 +1379,8 @@ fn build_ui(app: &Application) {
     }
     let media_preferences_force_snapshot = force_snapshot.clone();
     let tick_canvas = canvas.clone();
+    let tick_style_provider = style_provider.clone();
+    let tick_pending_style_refresh = pending_style_refresh.clone();
     let trace_window = window.clone();
     let tick_last_completed_frame_timing = last_completed_frame_timing.clone();
     let tick_last_presentation_time = last_presentation_time.clone();
@@ -1581,6 +1596,9 @@ fn build_ui(app: &Application) {
                 None
             };
             tick_canvas.set_workspace_render(rendered);
+            if tick_pending_style_refresh.replace(false) {
+                refresh_style(&tick_style_provider);
+            }
             record_pending_input_latency(&pending_input_latency);
             if selection_changed {
                 copy_selection_to_primary(tick_canvas.widget(), &selection_text);
@@ -1698,6 +1716,9 @@ fn build_ui(app: &Application) {
                 None
             };
             tick_canvas.set_render(rendered);
+            if tick_pending_style_refresh.replace(false) {
+                refresh_style(&tick_style_provider);
+            }
             record_pending_input_latency(&pending_input_latency);
             if selection_changed {
                 copy_selection_to_primary(tick_canvas.widget(), &selection_text);
@@ -1769,8 +1790,9 @@ fn build_ui(app: &Application) {
         let window = window.clone();
         let canvas = canvas.clone();
         let force_snapshot = media_preferences_force_snapshot.clone();
+        let pending_style_refresh = pending_style_refresh.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(450), move || {
-            show_preferences_dialog(&window, &canvas, force_snapshot);
+            show_preferences_dialog(&window, &canvas, force_snapshot, pending_style_refresh);
         });
     }
 }
@@ -2619,6 +2641,7 @@ fn show_preferences_dialog(
     parent: &adw::ApplicationWindow,
     canvas: &TerminalCanvas,
     force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
 ) {
     let default_height = std::env::var("CHELOTYPE_MEDIA_PREFERENCES_HEIGHT")
         .ok()
@@ -2648,7 +2671,8 @@ fn show_preferences_dialog(
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
     let cursor_page = cursor_preferences_page(canvas);
-    let appearance_page = appearance_preferences_page(parent, canvas, force_snapshot);
+    let appearance_page =
+        appearance_preferences_page(parent, canvas, force_snapshot, pending_style_refresh);
     stack.add_named(&cursor_page, Some("cursor"));
     stack.add_named(&appearance_page, Some("appearance"));
     stack.set_visible_child_name("cursor");
@@ -2742,6 +2766,7 @@ fn appearance_preferences_page(
     parent: &adw::ApplicationWindow,
     canvas: &TerminalCanvas,
     force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().title("Appearance").build();
     let font_group = adw::PreferencesGroup::builder().title("Font").build();
@@ -2768,7 +2793,8 @@ fn appearance_preferences_page(
     group.add(&grid);
     page.add(&group);
 
-    let palette_group = palette_preferences_group(canvas.clone(), force_snapshot);
+    let palette_group =
+        palette_preferences_group(canvas.clone(), force_snapshot, pending_style_refresh);
     page.add(&palette_group);
     page
 }
@@ -2776,6 +2802,7 @@ fn appearance_preferences_page(
 fn palette_preferences_group(
     canvas: TerminalCanvas,
     force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
 ) -> adw::PreferencesGroup {
     let show_all = std::rc::Rc::new(std::cell::Cell::new(false));
     let selected_palette = std::rc::Rc::new(std::cell::RefCell::new(
@@ -2784,7 +2811,9 @@ fn palette_preferences_group(
             .to_string(),
     ));
     let previews = std::rc::Rc::new(std::cell::RefCell::new(Vec::<gtk::DrawingArea>::new()));
-    let cards = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(gtk::Button, bool)>::new()));
+    let cards = std::rc::Rc::new(std::cell::RefCell::new(
+        Vec::<(gtk::FlowBoxChild, bool)>::new(),
+    ));
     let toggle = gtk::Button::new();
     set_pointer_cursor(&toggle);
     set_palette_visibility_toggle(&toggle, show_all.get());
@@ -2823,10 +2852,14 @@ fn palette_preferences_group(
             previews.clone(),
             canvas.clone(),
             force_snapshot.clone(),
+            pending_style_refresh.clone(),
         );
-        card.set_visible(palette.primary);
-        flow.append(&card);
-        cards.borrow_mut().push((card, palette.primary));
+        let flow_child = gtk::FlowBoxChild::builder()
+            .child(&card)
+            .visible(palette.primary)
+            .build();
+        flow.append(&flow_child);
+        cards.borrow_mut().push((flow_child, palette.primary));
     }
     {
         let show_all = show_all.clone();
@@ -2876,6 +2909,7 @@ fn palette_preview_card(
     previews: std::rc::Rc<std::cell::RefCell<Vec<gtk::DrawingArea>>>,
     canvas: TerminalCanvas,
     force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
 ) -> gtk::Button {
     let preview = gtk::DrawingArea::builder()
         .width_request(188)
@@ -2905,13 +2939,20 @@ fn palette_preview_card(
     set_pointer_cursor(&button);
     button.set_child(Some(&preview));
     button.connect_clicked(move |_| {
-        crate::terminal_palette::set_default_terminal_palette(palette.id);
+        let changed = selected_palette.borrow().as_str() != palette.id;
+        if changed {
+            canvas.begin_palette_transition();
+            crate::terminal_palette::set_default_terminal_palette(palette.id);
+            pending_style_refresh.set(true);
+        }
         *selected_palette.borrow_mut() = palette.id.to_string();
         for preview in previews.borrow().iter() {
             preview.queue_draw();
         }
-        force_snapshot.set(true);
-        canvas.widget().queue_draw();
+        if changed {
+            force_snapshot.set(true);
+            canvas.widget().queue_draw();
+        }
     });
     button
 }
@@ -4430,6 +4471,7 @@ fn command_block_output_selection_at_rail(
     x: f64,
 ) -> Option<SelectionRange> {
     let metrics = metrics?;
+    let x = x - metrics.offset_x;
     if metrics.width <= 0.0 || target.position.column != 0 {
         return None;
     }
@@ -4787,23 +4829,66 @@ fn trace_clipboard_export(kind: &str, text: &str) {
     }
 }
 
-fn apply_style(canvas: &gtk::DrawingArea) {
+fn install_style(canvas: &gtk::DrawingArea, provider: &gtk::CssProvider) {
+    refresh_style(provider);
+    gtk::style_context_add_provider_for_display(
+        &canvas.display(),
+        provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+fn refresh_style(provider: &gtk::CssProvider) {
+    provider.load_from_data(&app_style_css(
+        crate::terminal_palette::default_terminal_palette(),
+    ));
+}
+
+fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
     let css = "
+        @define-color chelotype_background __BACKGROUND__;
+        @define-color chelotype_foreground __FOREGROUND__;
+        @define-color chelotype_chrome_bg mix(__BACKGROUND__, __FOREGROUND__, 0.06);
+        @define-color chelotype_chrome_border alpha(__FOREGROUND__, 0.16);
+        @define-color chelotype_chrome_hover alpha(__FOREGROUND__, 0.13);
+        @define-color chelotype_chrome_active alpha(__FOREGROUND__, 0.19);
+
+        window,
+        .term-root,
+        preferencespage,
+        preferencesgroup {
+            background-color: @chelotype_background;
+            color: @chelotype_foreground;
+        }
+
+        window,
+        headerbar,
+        .terminal-header,
+        .term-root,
+        preferencespage,
+        preferencesgroup,
+        .term-tab-bar,
+        tabbar,
+        tabbox,
+        popover.tab-menu contents,
+        .settings-bottom-navigation {
+            transition: background-color 300ms ease-out, color 300ms ease-out, border-color 300ms ease-out, box-shadow 300ms ease-out;
+        }
+
         .terminal-header {
-            background: #303033;
+            background-color: @chelotype_chrome_bg;
+            color: @chelotype_foreground;
             border-bottom: none;
             box-shadow: none;
-            min-height: 2.25rem;
             padding-top: 0;
             padding-bottom: 0;
-            padding-left: 0.5rem;
-            padding-right: 0.5rem;
         }
         drawingarea.term-canvas {
-            background: transparent;
+            background-color: transparent;
         }
         .term-tab-bar {
-            background: transparent;
+            background-color: transparent;
+            color: @chelotype_foreground;
             box-shadow: none;
             border: none;
         }
@@ -4813,16 +4898,23 @@ fn apply_style(canvas: &gtk::DrawingArea) {
         tabbox,
         .term-tab-bar > revealer > box,
         .term-tab-bar tabbox {
-            background: transparent;
+            background-color: transparent;
+            color: @chelotype_foreground;
             box-shadow: none;
             border: none;
         }
-        menubutton.launch-menu-arrow button {
-            min-width: 1.25rem;
-            padding-left: 0.25rem;
-            padding-right: 0.25rem;
+        tabbar tab {
+            color: @chelotype_foreground;
+        }
+        tabbar tab:hover {
+            background-color: @chelotype_chrome_hover;
+        }
+        tabbar tab:selected {
+            background-color: @chelotype_chrome_active;
         }
         popover.tab-menu contents {
+            background-color: @chelotype_chrome_bg;
+            color: @chelotype_foreground;
             padding: 0;
             min-width: 17.5rem;
         }
@@ -4831,7 +4923,7 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             margin: 0.5rem;
         }
         popover.tab-menu .launch-targets {
-            background: transparent;
+            background-color: transparent;
             padding: 0.375rem;
         }
         popover.tab-menu .launch-target-row {
@@ -4841,10 +4933,10 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             margin: 0;
         }
         popover.tab-menu .launch-target-row:hover {
-            background: alpha(currentColor, 0.13);
+            background-color: @chelotype_chrome_hover;
         }
         popover.tab-menu .launch-target-row:active {
-            background: alpha(currentColor, 0.19);
+            background-color: @chelotype_chrome_active;
         }
         popover.tab-menu .launch-target-row > * {
             padding: 0 0.75rem;
@@ -4857,8 +4949,9 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             margin: 0.5rem;
         }
         .settings-bottom-navigation {
-            background: #242428;
-            border-top: 1px solid #1b1b1f;
+            background-color: @chelotype_chrome_bg;
+            color: @chelotype_foreground;
+            border-top: 1px solid @chelotype_chrome_border;
             padding: 0.375rem 7rem;
             min-height: 3rem;
         }
@@ -4870,24 +4963,19 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             font-weight: 700;
         }
         .settings-bottom-navigation-button:checked {
-            background: #56565d;
+            background-color: @chelotype_chrome_active;
         }
         button.palette-card-button {
             min-width: 0;
             min-height: 0;
             padding: 0;
-            background: transparent;
+            background-color: transparent;
             border: none;
             box-shadow: none;
         }
     ";
-    let provider = gtk::CssProvider::new();
-    provider.load_from_data(css);
-    gtk::style_context_add_provider_for_display(
-        &canvas.display(),
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    css.replace("__BACKGROUND__", palette.background)
+        .replace("__FOREGROUND__", palette.foreground)
 }
 
 fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: TerminalMetrics) {
@@ -5398,6 +5486,8 @@ impl CachedTerminalMetrics {
 struct CellMetrics {
     width: f64,
     height: f64,
+    offset_x: f64,
+    offset_y: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -5444,21 +5534,23 @@ struct PointerPaneActivation<'a> {
 }
 
 fn terminal_metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalMetrics> {
-    let width = widget.allocated_width();
-    let height = widget.allocated_height();
-    if width <= 0 || height <= 0 {
+    let padding = crate::canvas::terminal_canvas_padding(widget);
+    let width = padding.content_width(widget);
+    let height = padding.content_height(widget);
+    if width <= 0.0 || height <= 0.0 {
         return None;
     }
     let font_metrics = metrics_for_widget(widget)?;
-    let cols =
-        ((width as f64 / font_metrics.cell_width).floor() as i32).clamp(1, u16::MAX as i32) as u16;
-    let rows = ((height as f64 / font_metrics.line_height).floor() as i32).clamp(1, u16::MAX as i32)
-        as u16;
+    let cols = ((width / font_metrics.cell_width).floor() as i32).clamp(1, u16::MAX as i32) as u16;
+    let rows =
+        ((height / font_metrics.line_height).floor() as i32).clamp(1, u16::MAX as i32) as u16;
     Some(TerminalMetrics {
         size: ScreenSize::new(cols, rows).ok()?,
         cell: CellMetrics {
             width: font_metrics.cell_width,
             height: font_metrics.line_height,
+            offset_x: padding.left,
+            offset_y: padding.top,
         },
     })
 }
@@ -5498,6 +5590,8 @@ fn pointer_grid_position_for_panes(
     y: f64,
 ) -> Option<PointerPanePosition> {
     let metrics = metrics?;
+    let x = x - metrics.offset_x;
+    let y = y - metrics.offset_y;
     if x < 0.0 || y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
         return None;
     }
@@ -5531,6 +5625,7 @@ fn split_resize_boundary_at(
     x: f64,
 ) -> Option<usize> {
     let metrics = metrics?;
+    let x = x - metrics.offset_x;
     if panes.len() < 2 || x < 0.0 || metrics.width <= 0.0 {
         return None;
     }
@@ -5568,6 +5663,8 @@ fn pointer_grid_position_for_pane(
     y: f64,
 ) -> Option<PointerPanePosition> {
     let metrics = metrics?;
+    let x = x - metrics.offset_x;
+    let y = y - metrics.offset_y;
     if y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
         return None;
     }
@@ -5589,6 +5686,8 @@ fn pointer_cursor_position_for_target(
     y: f64,
 ) -> Option<MouseGridPosition> {
     let metrics = metrics?;
+    let x = x - metrics.offset_x;
+    let y = y - metrics.offset_y;
     if x < 0.0 || y < 0.0 || metrics.width <= 0.0 || metrics.height <= 0.0 {
         return None;
     }
@@ -5644,6 +5743,8 @@ mod tests {
         Some(CellMetrics {
             width: 10.0,
             height: 20.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
         })
     }
 
@@ -5654,6 +5755,8 @@ mod tests {
             cell: CellMetrics {
                 width: 10.0,
                 height: 20.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
             },
         };
         let cached = CachedTerminalMetrics {

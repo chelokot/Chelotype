@@ -11,13 +11,47 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(530);
+const PALETTE_TRANSITION_DURATION: Duration = Duration::from_millis(300);
 const MAX_TEXT_LAYOUT_CACHE_ENTRIES: usize = 4096;
 const MAX_ROW_SURFACE_CACHE_ENTRIES: usize = 512;
+const TERMINAL_CANVAS_PADDING_PX: f64 = 6.0;
+
+#[derive(Clone, Copy)]
+pub struct TerminalCanvasPadding {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+impl TerminalCanvasPadding {
+    pub fn content_width(self, widget: &gtk::DrawingArea) -> f64 {
+        (f64::from(widget.allocated_width()) - self.left - self.right).max(0.0)
+    }
+
+    pub fn content_height(self, widget: &gtk::DrawingArea) -> f64 {
+        (f64::from(widget.allocated_height()) - self.top - self.bottom).max(0.0)
+    }
+}
+
+pub fn terminal_canvas_padding(widget: &gtk::DrawingArea) -> TerminalCanvasPadding {
+    let _ = widget;
+    TerminalCanvasPadding {
+        left: TERMINAL_CANVAS_PADDING_PX,
+        top: TERMINAL_CANVAS_PADDING_PX,
+        right: TERMINAL_CANVAS_PADDING_PX,
+        bottom: TERMINAL_CANVAS_PADDING_PX,
+    }
+}
+
 #[derive(Clone)]
 pub struct TerminalCanvas {
     area: gtk::DrawingArea,
     render: Rc<RefCell<Option<CanvasRenderFrame>>>,
     scroll_underlay: Rc<RefCell<Option<CanvasRenderFrame>>>,
+    palette_transition: Rc<RefCell<Option<CanvasFrameTransition>>>,
+    palette_transition_timer_active: Rc<Cell<bool>>,
+    pending_palette_transition: Rc<RefCell<Option<CanvasRenderFrame>>>,
     cursor_blink: Rc<Cell<CursorBlinkState>>,
     cursor_motion: Rc<Cell<CursorMotionState>>,
     cursor_options_override: Rc<Cell<Option<CursorOptions>>>,
@@ -36,6 +70,9 @@ impl TerminalCanvas {
 
         let render = Rc::new(RefCell::new(None::<CanvasRenderFrame>));
         let scroll_underlay = Rc::new(RefCell::new(None::<CanvasRenderFrame>));
+        let palette_transition = Rc::new(RefCell::new(None::<CanvasFrameTransition>));
+        let palette_transition_timer_active = Rc::new(Cell::new(false));
+        let pending_palette_transition = Rc::new(RefCell::new(None::<CanvasRenderFrame>));
         let cursor_blink = Rc::new(Cell::new(CursorBlinkState::default()));
         let cursor_motion = Rc::new(Cell::new(CursorMotionState::default()));
         let cursor_options_override = Rc::new(Cell::new(None::<CursorOptions>));
@@ -46,6 +83,7 @@ impl TerminalCanvas {
         let last_paint_started = Rc::new(Cell::new(None::<Instant>));
         let draw_render = render.clone();
         let draw_scroll_underlay = scroll_underlay.clone();
+        let draw_palette_transition = palette_transition.clone();
         let draw_cursor_blink = cursor_blink.clone();
         let draw_cursor_motion = cursor_motion.clone();
         let draw_cursor_options_override = cursor_options_override.clone();
@@ -65,7 +103,6 @@ impl TerminalCanvas {
             let now = Instant::now();
             let render = draw_render.borrow();
             if let Some(render) = render.as_ref() {
-                draw_background(context, width, height, render.background());
                 let mut text_layout_cache = draw_text_layout_cache.borrow_mut();
                 let mut row_surface_cache = draw_row_surface_cache.borrow_mut();
                 let mut paint_resources = PaintResources {
@@ -73,25 +110,65 @@ impl TerminalCanvas {
                     row_surface_cache: &mut row_surface_cache,
                     stats: PaintStats::default(),
                 };
-                draw_canvas_render(
-                    widget,
-                    context,
-                    render,
-                    draw_scroll_underlay.borrow().as_ref(),
-                    &mut paint_resources,
-                    CanvasPaint {
-                        cursor_blink: draw_cursor_blink.get(),
-                        cursor_motion: draw_cursor_motion.get(),
-                        cursor_options: draw_cursor_options_override
-                            .get()
-                            .unwrap_or_else(CursorOptions::from_config),
-                        font_size_pt: draw_font_size_override
-                            .get()
-                            .unwrap_or_else(crate::terminal_font::font_size_pt),
-                        scroll_visual_offset_px: draw_scroll_visual_offset_px.get(),
-                        now,
-                    },
-                );
+                let paint = CanvasPaint {
+                    cursor_blink: draw_cursor_blink.get(),
+                    cursor_motion: draw_cursor_motion.get(),
+                    cursor_options: draw_cursor_options_override
+                        .get()
+                        .unwrap_or_else(CursorOptions::from_config),
+                    font_size_pt: draw_font_size_override
+                        .get()
+                        .unwrap_or_else(crate::terminal_font::font_size_pt),
+                    scroll_visual_offset_px: draw_scroll_visual_offset_px.get(),
+                    now,
+                };
+                let transition = draw_palette_transition.borrow().clone();
+                if let Some(transition) = transition {
+                    let elapsed = now.saturating_duration_since(transition.started);
+                    let progress = (elapsed.as_secs_f64()
+                        / PALETTE_TRANSITION_DURATION.as_secs_f64())
+                    .clamp(0.0, 1.0);
+                    let progress = ease_out_progress(progress);
+                    draw_canvas_render_layer(
+                        widget,
+                        context,
+                        width,
+                        height,
+                        &transition.from,
+                        None,
+                        &mut paint_resources,
+                        paint,
+                        1.0,
+                    );
+                    draw_canvas_render_layer(
+                        widget,
+                        context,
+                        width,
+                        height,
+                        render,
+                        draw_scroll_underlay.borrow().as_ref(),
+                        &mut paint_resources,
+                        paint,
+                        progress,
+                    );
+                    if progress >= 1.0 {
+                        draw_palette_transition.borrow_mut().take();
+                    } else {
+                        request_palette_animation_frame(widget);
+                    }
+                } else {
+                    draw_canvas_render_layer(
+                        widget,
+                        context,
+                        width,
+                        height,
+                        render,
+                        draw_scroll_underlay.borrow().as_ref(),
+                        &mut paint_resources,
+                        paint,
+                        1.0,
+                    );
+                }
                 paint_resources.stats.record();
             }
             crate::perf_trace::record_duration("gtk_paint", started.elapsed());
@@ -101,6 +178,9 @@ impl TerminalCanvas {
             area,
             render,
             scroll_underlay,
+            palette_transition,
+            palette_transition_timer_active,
+            pending_palette_transition,
             cursor_blink,
             cursor_motion,
             cursor_options_override,
@@ -111,6 +191,14 @@ impl TerminalCanvas {
 
     pub fn widget(&self) -> &gtk::DrawingArea {
         &self.area
+    }
+
+    pub fn begin_palette_transition(&self) {
+        if let Some(render) = self.render.borrow().as_ref() {
+            self.pending_palette_transition
+                .borrow_mut()
+                .replace(render.clone());
+        }
     }
 
     pub fn set_render(&self, render: RenderFrame) {
@@ -215,6 +303,14 @@ impl TerminalCanvas {
             }
             return;
         }
+        if let Some(from) = self.pending_palette_transition.borrow_mut().take() {
+            self.start_palette_transition(from, now);
+        } else if self.palette_transition.borrow().is_none()
+            && let Some(current_frame) = current.as_ref()
+            && current_frame.background() != render.background()
+        {
+            self.start_palette_transition(current_frame.clone(), now);
+        }
         if self.scroll_visual_offset_px.get().abs() >= 0.1 {
             *self.scroll_underlay.borrow_mut() = current.clone();
         } else {
@@ -222,6 +318,31 @@ impl TerminalCanvas {
         }
         *current = Some(render);
         self.area.queue_draw();
+    }
+
+    fn start_palette_transition(&self, from: CanvasRenderFrame, started: Instant) {
+        self.palette_transition
+            .borrow_mut()
+            .replace(CanvasFrameTransition { from, started });
+        self.start_palette_transition_timer();
+    }
+
+    fn start_palette_transition_timer(&self) {
+        if self.palette_transition_timer_active.replace(true) {
+            return;
+        }
+        let area = self.area.clone();
+        let transition = self.palette_transition.clone();
+        let timer_active = self.palette_transition_timer_active.clone();
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(8), move || {
+            if transition.borrow().is_some() {
+                area.queue_draw();
+                gtk::glib::ControlFlow::Continue
+            } else {
+                timer_active.set(false);
+                gtk::glib::ControlFlow::Break
+            }
+        });
     }
 
     pub fn tick_cursor_visual(&self) {
@@ -316,6 +437,12 @@ impl CanvasRenderFrame {
     }
 }
 
+#[derive(Clone)]
+struct CanvasFrameTransition {
+    from: CanvasRenderFrame,
+    started: Instant,
+}
+
 impl Default for TerminalCanvas {
     fn default() -> Self {
         Self::new()
@@ -331,6 +458,53 @@ fn draw_background(context: &cairo::Context, width: i32, height: i32, color: Opt
     let _ = context.fill();
 }
 
+fn ease_out_progress(progress: f64) -> f64 {
+    1.0 - (1.0 - progress).powi(3)
+}
+
+fn request_palette_animation_frame(widget: &gtk::DrawingArea) {
+    widget.queue_draw();
+    if let Some(frame_clock) = widget.frame_clock() {
+        frame_clock.request_phase(gtk::gdk::FrameClockPhase::UPDATE);
+        frame_clock.request_phase(gtk::gdk::FrameClockPhase::PAINT);
+    }
+}
+
+fn draw_canvas_render_layer(
+    widget: &gtk::DrawingArea,
+    context: &cairo::Context,
+    width: i32,
+    height: i32,
+    render: &CanvasRenderFrame,
+    scroll_underlay: Option<&CanvasRenderFrame>,
+    paint_resources: &mut PaintResources<'_>,
+    paint: CanvasPaint,
+    alpha: f64,
+) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let alpha = alpha.min(1.0);
+    let _ = context.save();
+    if alpha < 1.0 {
+        context.push_group();
+    }
+    draw_background(context, width, height, render.background());
+    draw_canvas_render(
+        widget,
+        context,
+        render,
+        scroll_underlay,
+        paint_resources,
+        paint,
+    );
+    if alpha < 1.0 {
+        let _ = context.pop_group_to_source();
+        let _ = context.paint_with_alpha(alpha);
+    }
+    let _ = context.restore();
+}
+
 fn draw_canvas_render(
     widget: &gtk::DrawingArea,
     context: &cairo::Context,
@@ -342,6 +516,12 @@ fn draw_canvas_render(
     let Some(metrics) = metrics_for_widget_size(widget, paint.font_size_pt) else {
         return;
     };
+    let padding = terminal_canvas_padding(widget);
+    let content_width = padding.content_width(widget);
+    let content_height = padding.content_height(widget);
+    if content_width <= 0.0 || content_height <= 0.0 {
+        return;
+    }
     paint_resources
         .text_layout_cache
         .set_font_size(paint.font_size_pt);
@@ -352,6 +532,10 @@ fn draw_canvas_render(
         options: paint.cursor_options,
         now: paint.now,
     };
+    let _ = context.save();
+    context.rectangle(padding.left, padding.top, content_width, content_height);
+    context.clip();
+    context.translate(padding.left, padding.top);
     match render {
         CanvasRenderFrame::Single(render) => {
             draw_render_frame(
@@ -363,17 +547,21 @@ fn draw_canvas_render(
                 paint_resources,
                 PaintViewport {
                     scroll_visual_offset_px: paint.scroll_visual_offset_px,
-                    width: f64::from(widget.allocated_width()),
+                    width: content_width,
                 },
             );
             if let Some(CanvasRenderFrame::Single(underlay)) = scroll_underlay {
-                draw_scroll_underlay_frame(
+                draw_scroll_underlay_frame_in_rect(
                     widget,
                     context,
                     underlay,
                     metrics,
                     paint_resources,
                     paint.scroll_visual_offset_px,
+                    PaintRect {
+                        width: content_width,
+                        height: content_height,
+                    },
                 );
             }
         }
@@ -400,30 +588,7 @@ fn draw_canvas_render(
             }
         }
     }
-}
-
-fn draw_scroll_underlay_frame(
-    widget: &gtk::DrawingArea,
-    context: &cairo::Context,
-    render: &RenderFrame,
-    metrics: TerminalFontMetrics,
-    paint_resources: &mut PaintResources<'_>,
-    scroll_visual_offset_px: f64,
-) {
-    if scroll_visual_offset_px.abs() < 0.1 {
-        return;
-    }
-    let width = f64::from(widget.allocated_width());
-    let height = f64::from(widget.allocated_height());
-    draw_scroll_underlay_frame_in_rect(
-        widget,
-        context,
-        render,
-        metrics,
-        paint_resources,
-        scroll_visual_offset_px,
-        PaintRect { width, height },
-    );
+    let _ = context.restore();
 }
 
 fn draw_workspace_scroll_underlay(
