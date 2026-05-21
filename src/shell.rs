@@ -73,8 +73,8 @@ pub fn default_shell_has_input_edit_bridge() -> bool {
 pub fn default_shell_path() -> String {
     resolve_default_shell(
         std::env::var("CHELOTYPE_SHELL").ok().as_deref(),
-        std::env::var("SHELL").ok().as_deref(),
-        |path| std::path::Path::new(path).is_file(),
+        crate::host::environment_value("SHELL").as_deref(),
+        crate::host::path_is_file,
     )
 }
 
@@ -97,7 +97,7 @@ fn resolve_default_shell(
 
 fn shell_command_for_path(path: &str) -> CommandBuilder {
     let argv = shell_argv_for_path(path);
-    let mut command = CommandBuilder::new(&argv[0]);
+    let mut command = crate::host::command_builder(&argv[0]);
     command.args(&argv[1..]);
     command
 }
@@ -199,5 +199,35 @@ mod tests {
         assert!(line.starts_with("'/usr/bin/fish' '--init-command' 'functions -q fish_prompt"));
         assert!(line.contains("__chelotype_user_fish_prompt"));
         assert!(line.contains("__chelotype_redo"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn flatpak_shell_command_runs_host_shell_through_flatpak_spawn() {
+        unsafe {
+            std::env::set_var("FLATPAK_ID", "com.chelotype.Terminal");
+            std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
+        }
+
+        let command = default_shell_command();
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.as_os_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            argv,
+            vec![
+                OsStr::new("flatpak-spawn"),
+                OsStr::new("--host"),
+                OsStr::new("/bin/sh"),
+            ]
+        );
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_SHELL");
+            std::env::remove_var("FLATPAK_ID");
+        }
     }
 }

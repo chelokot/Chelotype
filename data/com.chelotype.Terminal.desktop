@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Chelotype
+Comment=A GTK terminal backed by one PTY and libghostty-vt
+Exec=chelotype
+Icon=com.chelotype.Terminal
+StartupNotify=true
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;System;TerminalEmulator;
+GenericName=Terminal
+Keywords=terminal;shell;command;commandline;cmd;cli;console;container;podman;toolbox;
+X-KDE-AuthorizeAction=shell_access

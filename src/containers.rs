@@ -1,5 +1,4 @@
 use portable_pty::CommandBuilder;
-use std::process::Command;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchTarget {
@@ -28,7 +27,7 @@ impl LaunchTarget {
         match self {
             Self::Host => shell_command(),
             Self::Toolbox { name } => {
-                let mut command = CommandBuilder::new("toolbox");
+                let mut command = crate::host::command_builder("toolbox");
                 command.arg("enter");
                 command.arg("--container");
                 command.arg(name);
@@ -36,7 +35,7 @@ impl LaunchTarget {
                 command
             }
             Self::Podman { name } => {
-                let mut command = CommandBuilder::new("/bin/sh");
+                let mut command = crate::host::command_builder("/bin/sh");
                 command.arg("-lc");
                 command.arg(format!(
                     "podman start {name} >/dev/null 2>&1 || true; exec podman exec -it {name} {shell}",
@@ -103,7 +102,7 @@ fn shell_command() -> CommandBuilder {
 }
 
 fn toolbox_containers() -> Vec<String> {
-    let Ok(output) = Command::new("toolbox")
+    let Ok(output) = crate::host::command("toolbox")
         .args(["list", "--containers"])
         .output()
     else {
@@ -116,7 +115,7 @@ fn toolbox_containers() -> Vec<String> {
 }
 
 fn podman_running_containers() -> Vec<String> {
-    let Ok(output) = Command::new("podman")
+    let Ok(output) = crate::host::command("podman")
         .args(["ps", "-a", "--format", "{{.Names}}"])
         .output()
     else {
@@ -231,6 +230,73 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
         assert!(argv[2].contains("podman exec -it 'fedora-toolbox'"));
         if argv[2].contains("fish") {
             assert!(argv[2].contains("'--init-command'"));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn toolbox_launch_runs_through_host_when_flatpaked() {
+        unsafe {
+            std::env::set_var("FLATPAK_ID", "com.chelotype.Terminal");
+            std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
+        }
+
+        let command = LaunchTarget::Toolbox {
+            name: "fedora-toolbox-latest".to_string(),
+        }
+        .command();
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            &argv[..6],
+            [
+                "flatpak-spawn",
+                "--host",
+                "toolbox",
+                "enter",
+                "--container",
+                "fedora-toolbox-latest",
+            ]
+        );
+        assert_eq!(argv[6], "/bin/sh");
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_SHELL");
+            std::env::remove_var("FLATPAK_ID");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn podman_launch_runs_through_host_shell_when_flatpaked() {
+        unsafe {
+            std::env::set_var("FLATPAK_ID", "com.chelotype.Terminal");
+            std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
+        }
+
+        let command = LaunchTarget::Podman {
+            name: "fedora-toolbox".to_string(),
+        }
+        .command();
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(argv[0], "flatpak-spawn");
+        assert_eq!(argv[1], "--host");
+        assert_eq!(argv[2], "/bin/sh");
+        assert_eq!(argv[3], "-lc");
+        assert!(argv[4].contains("podman exec -it 'fedora-toolbox'"));
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_SHELL");
+            std::env::remove_var("FLATPAK_ID");
         }
     }
 

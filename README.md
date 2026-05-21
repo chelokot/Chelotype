@@ -21,6 +21,27 @@ bash scripts/with-zig.sh cargo test -- --test-threads=1
 bash scripts/with-zig.sh cargo bench --bench pipeline -- --sample-size 10
 ```
 
+## Packaging
+
+Desktop metadata lives under `data/` and can be installed with:
+
+```sh
+PREFIX=/usr DESTDIR=/tmp/chelotype-root scripts/install-desktop-metadata.sh
+```
+
+The Flatpak manifest is `packaging/flatpak/com.chelotype.Terminal.yml`. It
+follows the same terminal-oriented sandbox shape as Ptyxis: the UI runs inside
+the Flatpak, while host shells and container commands are launched through
+`flatpak-spawn --host`.
+
+```sh
+flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean build-dir packaging/flatpak/com.chelotype.Terminal.yml
+```
+
+Fedora packaging notes and a draft spec template are in `packaging/fedora/`.
+Chelotype is licensed as `MIT OR Apache-2.0`; the license files are installed
+for Flatpak builds and referenced by Fedora packaging metadata.
+
 ## 240 Hz Runtime Profile
 
 ```sh

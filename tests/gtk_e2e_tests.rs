@@ -3012,7 +3012,7 @@ xdotool type --delay 2 "fedora-toolbox-latest"
 sleep 0.2
 command -v import >/dev/null 2>&1 && import -window root "$snapshot_dir/../menu-filter.png" || true
 row_x="$(awk -v x="$search_x" 'BEGIN { printf "%d", x + 20 }')"
-row_y="$(awk -v y="$search_y" 'BEGIN { printf "%d", y + 96 }')"
+row_y="$(awk -v y="$search_y" 'BEGIN { printf "%d", y + 74 }')"
 xdotool mousemove "$row_x" "$row_y"
 xdotool click 1
 xdotool key Return
@@ -3186,7 +3186,7 @@ open_toolbox_from_launcher() {
     xdotool type --delay 2 "fedora-toolbox-latest"
     sleep 0.2
     row_x="$(awk -v x="$search_x" 'BEGIN { printf "%d", x + 20 }')"
-    row_y="$(awk -v y="$search_y" 'BEGIN { printf "%d", y + 96 }')"
+    row_y="$(awk -v y="$search_y" 'BEGIN { printf "%d", y + 74 }')"
     xdotool mousemove "$row_x" "$row_y"
     xdotool click 1
     xdotool key Return

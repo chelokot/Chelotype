@@ -1,0 +1,47 @@
+Name:           chelotype
+Version:        0.1.0
+Release:        1%{?dist}
+Summary:        PTY-backed GTK terminal
+
+License:        MIT OR Apache-2.0
+URL:            https://github.com/chelokot/Chelotype
+Source0:        %{url}/archive/refs/tags/v%{version}/Chelotype-%{version}.tar.gz
+
+BuildRequires:  cargo-rpm-macros
+BuildRequires:  desktop-file-utils
+BuildRequires:  libappstream-glib
+BuildRequires:  pkgconfig(gtk4)
+BuildRequires:  pkgconfig(libadwaita-1)
+BuildRequires:  rust-packaging
+BuildRequires:  zig >= 0.15
+
+%description
+Chelotype is a GTK terminal experiment backed by one real PTY and libghostty-vt
+as the terminal-core state.
+
+%prep
+%autosetup -n Chelotype-%{version}
+%cargo_prep
+
+%build
+%cargo_build
+
+%install
+%cargo_install
+PREFIX=%{_prefix} DESTDIR=%{buildroot} ./scripts/install-desktop-metadata.sh
+
+%check
+%cargo_test
+desktop-file-validate %{buildroot}%{_datadir}/applications/com.chelotype.Terminal.desktop
+appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/com.chelotype.Terminal.metainfo.xml
+
+%files
+%{_bindir}/chelotype
+%{_datadir}/applications/com.chelotype.Terminal.desktop
+%{_datadir}/metainfo/com.chelotype.Terminal.metainfo.xml
+%{_datadir}/icons/hicolor/scalable/apps/com.chelotype.Terminal.svg
+%{_datadir}/icons/hicolor/symbolic/apps/com.chelotype.Terminal-symbolic.svg
+
+%changelog
+* Wed May 20 2026 Chelotype contributors <noreply@example.invalid> - 0.1.0-1
+- Initial package draft

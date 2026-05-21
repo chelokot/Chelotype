@@ -10,6 +10,7 @@ pub mod cursor_preview;
 pub mod diagnostics;
 pub mod frame_timing;
 pub mod ghostty_snapshot;
+pub mod host;
 pub mod input;
 pub mod input_selection;
 pub mod interaction;

@@ -62,36 +62,37 @@ fn build_ui(app: &Application) {
     let new_tab_button = gtk::Button::builder()
         .icon_name("tab-new-symbolic")
         .tooltip_text("New terminal")
+        .focus_on_click(false)
         .build();
-    new_tab_button.set_valign(gtk::Align::Center);
-    new_tab_button.add_css_class("image-button");
+    let launch_menu_icon = gtk::Image::from_icon_name("pan-down-symbolic");
     let launch_menu_button = gtk::MenuButton::builder()
-        .icon_name("pan-down-symbolic")
-        .tooltip_text("Open terminal in container")
+        .tooltip_text("Show profiles and containers")
+        .css_classes(["launch-menu-arrow"])
+        .child(&launch_menu_icon)
+        .focus_on_click(false)
         .build();
-    launch_menu_button.set_valign(gtk::Align::Center);
-    launch_menu_button.add_css_class("image-button");
-    launch_menu_button.add_css_class("terminal-launch-menu-button");
-    let launcher = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    launcher.set_valign(gtk::Align::Center);
-    launcher.add_css_class("terminal-launcher");
+    let launcher = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .css_name("splitbutton")
+        .css_classes(["image-button"])
+        .valign(gtk::Align::Center)
+        .build();
     launcher.append(&new_tab_button);
+    launcher.append(
+        &gtk::Separator::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .build(),
+    );
     launcher.append(&launch_menu_button);
-    let header_content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    header_content.add_css_class("terminal-header");
-    header_content.append(&launcher);
-    header_content.append(&tab_bar);
     let settings_button = gtk::Button::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text("Settings")
         .build();
-    settings_button.set_valign(gtk::Align::Center);
-    settings_button.add_css_class("image-button");
-    header_content.append(&settings_button);
-    header_content.append(&gtk::WindowControls::new(gtk::PackType::End));
-
-    let header = gtk::WindowHandle::new();
-    header.set_child(Some(&header_content));
+    let header = adw::HeaderBar::new();
+    header.add_css_class("terminal-header");
+    header.pack_start(&launcher);
+    header.set_title_widget(Some(&tab_bar));
+    header.pack_end(&settings_button);
 
     let canvas = TerminalCanvas::new();
 
@@ -1289,6 +1290,7 @@ fn build_ui(app: &Application) {
         });
     }
     let tick_canvas = canvas.clone();
+    let trace_window = window.clone();
     let tick_last_completed_frame_timing = last_completed_frame_timing.clone();
     let tick_last_presentation_time = last_presentation_time.clone();
     canvas.widget().add_tick_callback(move |_, frame_clock| {
@@ -1342,7 +1344,13 @@ fn build_ui(app: &Application) {
             trace_geometry(path, tick_canvas.widget(), metrics);
         }
         if let Some(path) = &tab_trace {
-            trace_tabs(path, &tab_bar, &launch_menu_button, &workspace_rc.borrow());
+            trace_tabs(
+                path,
+                &trace_window,
+                &tab_bar,
+                &launch_menu_button,
+                &workspace_rc.borrow(),
+            );
         }
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
             && last_size.get() != Some(size)
@@ -1678,21 +1686,29 @@ fn configure_launch_menu(
     last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
 ) {
     let popover = gtk::Popover::new();
-    let panel = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    panel.add_css_class("terminal-launch-popover");
+    popover.add_css_class("tab-menu");
+    let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Filter...")
         .build();
     panel.append(&search);
-    let list = gtk::ListBox::new();
-    list.add_css_class("terminal-launch-list");
-    panel.append(&list);
+    panel.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let entries = std::rc::Rc::new(std::cell::RefCell::new(Vec::<LaunchMenuEntry>::new()));
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    list.add_css_class("launch-targets");
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .child(&list)
+        .build();
+    panel.append(&scroller);
     popover.set_child(Some(&panel));
     menu_button.set_popover(Some(&popover));
 
     let targets = std::rc::Rc::new(available_launch_targets());
     rebuild_launch_list(
         &list,
+        &entries,
         "",
         targets.as_ref(),
         LaunchMenuContext {
@@ -1703,21 +1719,36 @@ fn configure_launch_menu(
     );
     {
         let list = list.clone();
+        let entries = entries.clone();
         let targets = targets.clone();
-        let tabs = tabs.clone();
-        let last_size = last_size.clone();
-        let popover = popover.clone();
+        let context = LaunchMenuContext {
+            tabs: tabs.clone(),
+            last_size: last_size.clone(),
+            popover: popover.clone(),
+        };
         search.connect_search_changed(move |entry| {
             rebuild_launch_list(
                 &list,
+                &entries,
                 entry.text().as_str(),
                 targets.as_ref(),
-                LaunchMenuContext {
-                    tabs: tabs.clone(),
-                    last_size: last_size.clone(),
-                    popover: popover.clone(),
-                },
+                context.clone(),
             );
+        });
+    }
+    {
+        let context = LaunchMenuContext {
+            tabs,
+            last_size,
+            popover,
+        };
+        let entries = entries.clone();
+        search.connect_activate(move |_| {
+            let Some(target) = entries.borrow().first().map(|entry| entry.target.clone()) else {
+                return;
+            };
+            add_launch_target_tab(target, &context);
+            context.popover.popdown();
         });
     }
 }
@@ -1739,6 +1770,18 @@ struct LaunchMenuContext {
     tabs: TabContext,
     last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
     popover: gtk::Popover,
+}
+
+#[derive(Clone)]
+struct LaunchMenuEntry {
+    title: String,
+    target: LaunchTarget,
+}
+
+impl LaunchMenuEntry {
+    fn is_container(&self) -> bool {
+        !matches!(self.target, LaunchTarget::Host)
+    }
 }
 
 #[derive(Default)]
@@ -1799,7 +1842,8 @@ impl TabPages {
 }
 
 fn rebuild_launch_list(
-    list: &gtk::ListBox,
+    list: &gtk::Box,
+    entries: &std::rc::Rc<std::cell::RefCell<Vec<LaunchMenuEntry>>>,
     filter: &str,
     targets: &[LaunchTarget],
     context: LaunchMenuContext,
@@ -1808,43 +1852,50 @@ fn rebuild_launch_list(
         list.remove(&child);
     }
     let filter = filter.trim().to_lowercase();
-    let mut appended_containers_header = false;
+    let mut next = Vec::new();
     for target in targets.iter().filter(|target| {
         filter.is_empty() || target.title().to_lowercase().contains(filter.as_str())
     }) {
-        if !matches!(target, LaunchTarget::Host) && !appended_containers_header {
+        next.push(LaunchMenuEntry {
+            title: target.title(),
+            target: target.clone(),
+        });
+    }
+    let mut previous_was_container = false;
+    for entry in &next {
+        if entry.is_container() && !previous_was_container {
             let header = gtk::Label::builder()
                 .label("Containers")
-                .halign(gtk::Align::Center)
+                .halign(gtk::Align::Fill)
+                .xalign(0.5)
                 .build();
-            header.add_css_class("terminal-launch-section");
-            let row = gtk::ListBoxRow::new();
-            row.set_selectable(false);
-            row.set_activatable(false);
-            row.add_css_class("terminal-launch-section-row");
-            row.set_child(Some(&header));
-            list.append(&row);
-            appended_containers_header = true;
+            header.add_css_class("title");
+            header.add_css_class("dim-label");
+            header.add_css_class("launch-targets-header");
+            list.append(&header);
         }
-        let row = gtk::ListBoxRow::new();
-        row.add_css_class("terminal-launch-row");
-        let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        content.add_css_class("terminal-launch-row-content");
+        previous_was_container = entry.is_container();
+        let button = gtk::Button::builder()
+            .css_classes(["flat", "launch-target-row"])
+            .focus_on_click(false)
+            .build();
         let label = gtk::Label::builder()
-            .label(target.title())
+            .label(entry.title.as_str())
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build();
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         content.append(&label);
-        row.set_child(Some(&content));
-        let target = target.clone();
+        button.set_child(Some(&content));
+        let target = entry.target.clone();
         let context = context.clone();
-        row.connect_activate(move |_| {
+        button.connect_clicked(move |_| {
             add_launch_target_tab(target.clone(), &context);
             context.popover.popdown();
         });
-        list.append(&row);
+        list.append(&button);
     }
+    *entries.borrow_mut() = next;
 }
 
 fn add_launch_target_tab(target: LaunchTarget, context: &LaunchMenuContext) {
@@ -4107,32 +4158,6 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             color: #e5e7eb;
             background: transparent;
         }
-        .terminal-header-title {
-            background: transparent;
-            border-spacing: 0.25rem;
-        }
-        .terminal-launcher {
-            background: #3d3d40;
-            border-radius: 0.5rem;
-            padding: 0;
-        }
-        .terminal-launcher button {
-            min-width: 1.5rem;
-            min-height: 1.25rem;
-            padding: 0.375rem;
-            margin-top: 0;
-            margin-bottom: 0;
-            border-radius: 0.375rem;
-            -gtk-icon-size: 0.875rem;
-        }
-        .terminal-launch-menu-button button {
-            min-width: 1rem;
-            min-height: 1.25rem;
-            padding-left: 0.375rem;
-            padding-right: 0.375rem;
-            padding-top: 0.375rem;
-            padding-bottom: 0.375rem;
-        }
         .term-tab-bar {
             background: transparent;
             box-shadow: none;
@@ -4148,62 +4173,40 @@ fn apply_style(canvas: &gtk::DrawingArea) {
             box-shadow: none;
             border: none;
         }
-        .terminal-launch-popover {
-            min-width: 20rem;
-            border-radius: 0.625rem;
-            padding: 0.5rem;
-            background: #2f2f33;
+        menubutton.launch-menu-arrow button {
+            min-width: 1.25rem;
+            padding-left: 0.25rem;
+            padding-right: 0.25rem;
         }
-        .terminal-launch-popover contents,
-        .terminal-launch-popover box,
-        .terminal-launch-popover scrolledwindow,
-        .terminal-launch-popover viewport {
-            background: #2f2f33;
-        }
-        .terminal-launch-popover list,
-        .terminal-launch-popover row,
-        .terminal-launch-popover searchentry,
-        .terminal-launch-popover entry {
-            background: #2f2f33;
-        }
-        .terminal-launch-list {
+        popover.tab-menu contents {
             padding: 0;
-            border-radius: 0.5rem;
-            background: #2f2f33;
+            min-width: 17.5rem;
         }
-        .terminal-launch-popover .terminal-launch-section-row,
-        .terminal-launch-popover .terminal-launch-section-row:hover,
-        .terminal-launch-popover .terminal-launch-section-row:selected,
-        .terminal-launch-section-row,
-        .terminal-launch-section-row:hover,
-        .terminal-launch-section-row:selected {
-            background: #2f2f33;
+        popover.tab-menu searchentry,
+        popover.tab-menu entry.search {
+            margin: 0.5rem;
         }
-        .terminal-launch-section {
-            color: #a7a7ad;
-            font-weight: 700;
-            padding: 0.5rem 0.625rem 0.375rem;
+        popover.tab-menu .launch-targets {
+            background: transparent;
+            padding: 0.375rem;
         }
-        .terminal-launch-row {
-            min-height: 2.125rem;
+        popover.tab-menu .launch-target-row {
+            border-radius: 0.5625rem;
+            min-height: 2rem;
             padding: 0;
-            margin: 0.0625rem 0;
-            border-radius: 0.5rem;
-            background: #2f2f33;
+            margin: 0;
         }
-        .terminal-launch-row:hover,
-        .terminal-launch-row:selected,
-        .terminal-launch-row:hover .terminal-launch-row-content,
-        .terminal-launch-row:selected .terminal-launch-row-content {
-            background: #3a3a3e;
+        popover.tab-menu .launch-target-row:hover {
+            background: alpha(currentColor, 0.13);
         }
-        .terminal-launch-row-content {
-            padding: 0.375rem 1rem;
-            border-radius: 0.5rem;
-            background: #2f2f33;
+        popover.tab-menu .launch-target-row:active {
+            background: alpha(currentColor, 0.19);
         }
-        .terminal-launch-row label {
-            font-weight: 400;
+        popover.tab-menu .launch-target-row > * {
+            padding: 0 0.75rem;
+        }
+        popover.tab-menu .launch-targets-header {
+            padding: 0.75rem 0.375rem 0.375rem 0.75rem;
         }
         .terminal-rename-entry {
             min-width: 13rem;
@@ -4252,22 +4255,25 @@ fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: Te
 
 fn trace_tabs(
     path: &std::path::Path,
+    root: &impl IsA<gtk::Widget>,
     tab_bar: &adw::TabBar,
     launch_menu_button: &gtk::MenuButton,
     workspace: &TerminalWorkspace,
 ) {
     let tabs = workspace.tabs();
     let selected_index = tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let tab_bar_bounds = widget_trace_bounds(tab_bar, root);
+    let launch_menu_bounds = widget_trace_bounds(launch_menu_button, root);
     let mut content = format!(
         "tab_bar_x={}\ntab_bar_y={}\ntab_bar_width={}\ntab_bar_height={}\nlaunch_menu_x={}\nlaunch_menu_y={}\nlaunch_menu_width={}\nlaunch_menu_height={}\ntab_count={}\nselected_index={}",
-        tab_bar.allocation().x(),
-        tab_bar.allocation().y(),
-        tab_bar.allocated_width(),
-        tab_bar.allocated_height(),
-        launch_menu_button.allocation().x(),
-        launch_menu_button.allocation().y(),
-        launch_menu_button.allocated_width(),
-        launch_menu_button.allocated_height(),
+        tab_bar_bounds.x,
+        tab_bar_bounds.y,
+        tab_bar_bounds.width,
+        tab_bar_bounds.height,
+        launch_menu_bounds.x,
+        launch_menu_bounds.y,
+        launch_menu_bounds.width,
+        launch_menu_bounds.height,
         tabs.len(),
         selected_index,
     );
@@ -4284,6 +4290,34 @@ fn trace_tabs(
         }
     }
     write_trace_file(path, &content);
+}
+
+struct WidgetTraceBounds {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn widget_trace_bounds(
+    widget: &impl IsA<gtk::Widget>,
+    root: &impl IsA<gtk::Widget>,
+) -> WidgetTraceBounds {
+    if let Some(bounds) = widget.compute_bounds(root) {
+        return WidgetTraceBounds {
+            x: bounds.x().round() as i32,
+            y: bounds.y().round() as i32,
+            width: bounds.width().round() as i32,
+            height: bounds.height().round() as i32,
+        };
+    }
+    let widget = widget.as_ref();
+    WidgetTraceBounds {
+        x: widget.allocation().x(),
+        y: widget.allocation().y(),
+        width: widget.allocated_width(),
+        height: widget.allocated_height(),
+    }
 }
 
 fn write_trace_file(path: &std::path::Path, content: &str) {
