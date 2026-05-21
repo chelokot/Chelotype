@@ -4,16 +4,15 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
   <name>Chelotype</name>
-  <summary>PTY-backed GTK terminal</summary>
+  <summary>Opinionated GTK terminal</summary>
   <description>
     <p>
-      Chelotype is a GTK terminal experiment backed by one real PTY and
-      libghostty-vt as the terminal-core state.
+      Chelotype is an opinionated GTK terminal with mouse-driven interaction,
+      smooth scrolling, direct launching into containers, Neovide-inspired
+      cursor animations, customization, and more.
     </p>
     <p>
-      It renders Ghostty grid and cell snapshots through a custom GTK renderer,
-      supports tabs and split panes, and can open terminals on the host or in
-      toolbox and podman containers.
+      It is written in Rust and uses libghostty-vt as its terminal core.
     </p>
   </description>
   <developer id="com.chelokot">
