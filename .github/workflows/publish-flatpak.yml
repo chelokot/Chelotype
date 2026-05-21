@@ -46,6 +46,7 @@ jobs:
         env:
           FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
         run: |
+          mkdir -p public/flatpak
           flatpak-builder \
             --user \
             --disable-rofiles-fuse \

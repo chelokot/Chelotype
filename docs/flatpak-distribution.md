@@ -2,20 +2,17 @@
 
 Chelotype publishes a signed Flatpak repository to a static website.
 
-Install directly from the Flatpak ref:
-
-```sh
-flatpak install --user https://chelokot.com/flatpak/com.chelokot.Chelotype.flatpakref
-```
-
-The `.flatpakref` file points Flatpak at Flathub for the GNOME runtime and at
-the Chelotype repository for the app itself.
-
-To add the Chelotype remote explicitly:
+Add the repository once and install the app from it:
 
 ```sh
 flatpak remote-add --user --if-not-exists chelotype https://chelokot.com/flatpak/chelotype.flatpakrepo
 flatpak install --user chelotype com.chelokot.Chelotype
+```
+
+Updates use the same Flatpak remote:
+
+```sh
+flatpak update --user com.chelokot.Chelotype
 ```
 
 The publishing workflow is `.github/workflows/publish-flatpak.yml`. It builds

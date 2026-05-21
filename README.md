@@ -63,14 +63,14 @@ Fedora packaging notes and the draft spec live in `packaging/fedora/`.
 ## Install
 
 ```sh
-flatpak install --user https://chelokot.com/flatpak/com.chelokot.Chelotype.flatpakref
-```
-
-To add the repository explicitly:
-
-```sh
 flatpak remote-add --user --if-not-exists chelotype https://chelokot.com/flatpak/chelotype.flatpakrepo
 flatpak install --user chelotype com.chelokot.Chelotype
+```
+
+After that, Chelotype updates through Flatpak:
+
+```sh
+flatpak update --user com.chelokot.Chelotype
 ```
 
 ## Media
