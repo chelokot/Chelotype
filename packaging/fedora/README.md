@@ -14,6 +14,10 @@ The distro package should install:
 The native build needs GTK4, libadwaita, Rust, and Zig 0.15.x because
 `libghostty-vt` builds its vendored native core with Zig.
 
+Binary packages should include license files for the bundled Rust crates,
+Ghostty source, and Zig package sources that are linked into `chelotype` or
+`libghostty-vt`.
+
 Suggested package checks:
 
 ```sh
