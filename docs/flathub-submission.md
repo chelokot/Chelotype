@@ -1,7 +1,7 @@
 # Flathub Submission
 
 The Flathub manifest is `com.chelokot.Chelotype.yml` in the repository root.
-It builds the tagged `v0.1.0` source release and installs the desktop,
+It builds the tagged `v0.1.2` source release and installs the desktop,
 AppStream, icon, font, and bundled third-party license metadata.
 
 Before opening the Flathub pull request, verify the tagged release locally:

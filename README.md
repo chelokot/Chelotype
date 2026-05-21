@@ -55,10 +55,23 @@ PREFIX=/usr DESTDIR=/tmp/chelotype-root scripts/install-desktop-metadata.sh
 ```
 
 ```sh
-flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean build-dir com.chelokot.Chelotype.yml
+flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean --default-branch=stable build-dir com.chelokot.Chelotype.yml
 ```
 
 Fedora packaging notes and the draft spec live in `packaging/fedora/`.
+
+## Install
+
+```sh
+flatpak install --user https://chelokot.com/flatpak/com.chelokot.Chelotype.flatpakref
+```
+
+To add the repository explicitly:
+
+```sh
+flatpak remote-add --user --if-not-exists chelotype https://chelokot.com/flatpak/chelotype.flatpakrepo
+flatpak install --user chelotype com.chelokot.Chelotype
+```
 
 ## Media
 

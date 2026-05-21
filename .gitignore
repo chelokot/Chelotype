@@ -3,3 +3,5 @@ target
 .tools/
 .flatpak-builder/
 build-dir/
+repo/
+*.local.yml
