@@ -2,12 +2,13 @@ use gtk::pango;
 use gtk::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub const DEFAULT_TERMINAL_FONT: &str = "BlexMono Nerd Font Mono 13";
+pub const DEFAULT_TERMINAL_FONT: &str = "BlexMono Nerd Font Mono 10";
 const SYSTEM_TERMINAL_FONT: &str = "Monospace";
-const TERMINAL_FONT_SIZE_PT: f64 = 13.0;
+const TERMINAL_FONT_SIZE_PT: f64 = 10.0;
 const MIN_FONT_SIZE_TENTHS: u32 = 80;
 const MAX_FONT_SIZE_TENTHS: u32 = 280;
 const DEFAULT_FONT_SIZE_TENTHS: u32 = (TERMINAL_FONT_SIZE_PT * 10.0) as u32;
+const LEGACY_DEFAULT_FONT_SIZE_TENTHS: u32 = 130;
 const DEFAULT_XFT_DPI: i32 = 96 * 1024;
 const MIN_TEXT_SCALE: f64 = 0.5;
 const MAX_TEXT_SCALE: f64 = 3.0;
@@ -88,6 +89,13 @@ pub fn load_configured_size() {
     else {
         return;
     };
+    if value == LEGACY_DEFAULT_FONT_SIZE_TENTHS
+        && crate::config::read_value("custom_font").is_none()
+    {
+        FONT_SIZE_TENTHS.store(DEFAULT_FONT_SIZE_TENTHS, Ordering::Relaxed);
+        save_configured_size();
+        return;
+    }
     FONT_SIZE_TENTHS.store(clamp_size(value), Ordering::Relaxed);
 }
 
@@ -199,11 +207,68 @@ mod tests {
         zoom_reset();
         zoom_in();
         let config = std::fs::read_to_string(dir.join("config")).expect("font config");
-        assert_eq!(config, "font_size_tenths=140\n");
+        assert_eq!(config, "font_size_tenths=110\n");
 
         std::fs::write(dir.join("config"), "font_size_tenths=170\n").expect("write font config");
         load_configured_size();
         assert_eq!(font_size_pt(), 17.0);
+
+        zoom_reset();
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_default_size_migrates_to_current_default() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-font-legacy-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+        std::fs::create_dir_all(&dir).expect("config dir");
+        std::fs::write(dir.join("config"), "font_size_tenths=130\n").expect("write font config");
+
+        load_configured_size();
+        assert_eq!(font_size_pt(), 10.0);
+        let config = std::fs::read_to_string(dir.join("config")).expect("font config");
+        assert_eq!(config, "font_size_tenths=100\n");
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn explicit_legacy_size_with_custom_font_is_preserved() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-font-explicit-legacy-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+        std::fs::create_dir_all(&dir).expect("config dir");
+        std::fs::write(
+            dir.join("config"),
+            "font_size_tenths=130\ncustom_font=BlexMono Nerd Font Mono 13\n",
+        )
+        .expect("write font config");
+
+        load_configured_size();
+        assert_eq!(font_size_pt(), 13.0);
 
         zoom_reset();
         unsafe {
@@ -287,8 +352,8 @@ mod tests {
         zoom_reset();
         let unscaled = description_for_text_scale(1.0).size();
         let scaled = description_for_text_scale(1.5).size();
-        assert_eq!(unscaled, 13 * pango::SCALE);
-        assert_eq!(scaled, (19.5 * pango::SCALE as f64).round() as i32);
+        assert_eq!(unscaled, 10 * pango::SCALE);
+        assert_eq!(scaled, (15.0 * pango::SCALE as f64).round() as i32);
 
         zoom_reset();
         unsafe {
