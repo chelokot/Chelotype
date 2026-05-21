@@ -172,7 +172,7 @@ pub fn key_to_terminal_bytes(
         }
     }
     match key {
-        gdk::Key::Return => Some(b"\n".to_vec()),
+        gdk::Key::Return | gdk::Key::KP_Enter => Some(b"\r".to_vec()),
         gdk::Key::BackSpace => Some(vec![0x7f]),
         gdk::Key::Tab => Some(b"\t".to_vec()),
         gdk::Key::Left => Some(b"\x1b[D".to_vec()),
@@ -283,7 +283,11 @@ mod tests {
     fn maps_enter_backspace_and_tab() {
         assert_eq!(
             key_to_terminal_bytes(gdk::Key::Return, gdk::ModifierType::empty()).as_deref(),
-            Some(&b"\n"[..])
+            Some(&b"\r"[..])
+        );
+        assert_eq!(
+            key_to_terminal_bytes(gdk::Key::KP_Enter, gdk::ModifierType::empty()).as_deref(),
+            Some(&b"\r"[..])
         );
         assert_eq!(
             key_to_terminal_bytes(gdk::Key::BackSpace, gdk::ModifierType::empty()).as_deref(),
