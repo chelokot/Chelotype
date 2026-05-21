@@ -1,4 +1,4 @@
-use crate::config::{CursorShape, CursorStyle};
+use crate::config::{CursorBlinking, CursorShape, CursorStyle};
 use crate::render::{RenderFrame, RenderRegion, RenderRun, RenderStyle};
 use crate::terminal_font::{TerminalFontMetrics, layout_for_size, metrics_for_widget_size};
 use crate::terminal_palette::default_terminal_palette;
@@ -135,6 +135,39 @@ impl TerminalCanvas {
         self.area.queue_draw();
     }
 
+    pub fn refresh_cursor_options(&self) {
+        let identity = {
+            let render = self.render.borrow();
+            let Some(render) = render.as_ref() else {
+                self.area.queue_draw();
+                return;
+            };
+            render
+                .active_cursor_identity()
+                .unwrap_or_else(CursorIdentity::hidden)
+        };
+        let options = self.cursor_options();
+        let now = Instant::now();
+        self.cursor_motion.set(CursorMotionState::settled(
+            CursorDrawPosition {
+                pane_id: identity.pane_id,
+                line: f64::from(identity.line.max(0)),
+                column: f64::from(identity.column.max(0)),
+            },
+            identity.visible,
+            options.style,
+            options.shape,
+            now,
+        ));
+        self.cursor_blink
+            .set(self.cursor_blink.get().sync(identity, now).tick(
+                identity.visible,
+                self.cursor_blinking_enabled(),
+                now,
+            ));
+        self.area.queue_draw();
+    }
+
     pub fn set_scroll_visual_offset_px(&self, offset_px: f64) {
         self.set_scroll_visual_offset_px_with_draw(offset_px, true);
     }
@@ -200,7 +233,10 @@ impl TerminalCanvas {
             render.active_cursor_visible()
         };
         let now = Instant::now();
-        let next = self.cursor_blink.get().tick(cursor_visible, now);
+        let next =
+            self.cursor_blink
+                .get()
+                .tick(cursor_visible, self.cursor_blinking_enabled(), now);
         let current_motion = self.cursor_motion.get();
         let next_motion = current_motion.settle_if_complete(now, self.cursor_options().shape);
         if current_motion != next_motion {
@@ -219,6 +255,16 @@ impl TerminalCanvas {
         self.cursor_options_override
             .get()
             .unwrap_or_else(CursorOptions::from_config)
+    }
+
+    fn cursor_blinking_enabled(&self) -> bool {
+        match crate::config::cursor_blinking() {
+            CursorBlinking::FollowSystem => gtk::Settings::default()
+                .map(|settings| settings.is_gtk_cursor_blink())
+                .unwrap_or(true),
+            CursorBlinking::Enabled => true,
+            CursorBlinking::Disabled => false,
+        }
     }
 }
 
@@ -1155,10 +1201,17 @@ impl CursorBlinkState {
         self
     }
 
-    fn tick(self, cursor_visible: bool, now: Instant) -> Self {
+    fn tick(self, cursor_visible: bool, blink_enabled: bool, now: Instant) -> Self {
         if !cursor_visible {
             return Self {
                 visible: false,
+                cursor: self.cursor,
+                reset_at: None,
+            };
+        }
+        if !blink_enabled {
+            return Self {
+                visible: true,
                 cursor: self.cursor,
                 reset_at: None,
             };
@@ -2336,7 +2389,7 @@ mod tests {
         };
         let state = CursorBlinkState::default().sync(cursor, start);
         assert!(state.visible);
-        let hidden = state.tick(true, start + CURSOR_BLINK_PERIOD);
+        let hidden = state.tick(true, true, start + CURSOR_BLINK_PERIOD);
         assert!(!hidden.visible);
         assert!(
             !hidden
@@ -2358,10 +2411,29 @@ mod tests {
             moved
                 .tick(
                     true,
+                    true,
                     start + CURSOR_BLINK_PERIOD + Duration::from_millis(120)
                 )
                 .visible
         );
+    }
+
+    #[test]
+    fn cursor_blink_disabled_keeps_cursor_visible() {
+        let start = Instant::now();
+        let cursor = CursorIdentity {
+            pane_id: 0,
+            line: 1,
+            column: 2,
+            visible: true,
+        };
+        let state = CursorBlinkState::default().sync(cursor, start);
+        let visible = state.tick(false, false, start + CURSOR_BLINK_PERIOD);
+        assert!(!visible.visible);
+
+        let visible = state.tick(true, false, start + CURSOR_BLINK_PERIOD);
+        assert!(visible.visible);
+        assert_eq!(visible.reset_at, None);
     }
 
     #[test]

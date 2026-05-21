@@ -12,6 +12,13 @@ pub enum CursorShape {
     Block,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorBlinking {
+    FollowSystem,
+    Enabled,
+    Disabled,
+}
+
 pub const DEFAULT_CURSOR_ANIMATION_DURATION_MS: u32 = 100;
 pub const DEFAULT_NEOVIDE_TRAIL_SIZE: f64 = 0.65;
 pub const DEFAULT_SMEAR_STIFFNESS: f64 = 0.6;
@@ -107,6 +114,50 @@ impl CursorShape {
     }
 }
 
+impl CursorBlinking {
+    pub const ALL: [Self; 3] = [Self::FollowSystem, Self::Enabled, Self::Disabled];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FollowSystem => "Follow System",
+            Self::Enabled => "Enabled",
+            Self::Disabled => "Disabled",
+        }
+    }
+
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::FollowSystem => "system",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn selected_index(self) -> u32 {
+        Self::ALL
+            .iter()
+            .position(|mode| *mode == self)
+            .unwrap_or(0)
+            .min(u32::MAX as usize) as u32
+    }
+
+    pub fn from_selected_index(index: u32) -> Self {
+        Self::ALL
+            .get(index as usize)
+            .copied()
+            .unwrap_or(Self::FollowSystem)
+    }
+
+    fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "system" | "follow-system" => Some(Self::FollowSystem),
+            "on" | "true" | "enabled" => Some(Self::Enabled),
+            "off" | "false" | "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
 pub fn read_value(key: &str) -> Option<String> {
     let path = config_path()?;
     let content = std::fs::read_to_string(path).ok()?;
@@ -172,6 +223,12 @@ pub fn cursor_shape() -> CursorShape {
     read_value("cursor_shape")
         .and_then(|value| CursorShape::from_config_value(&value))
         .unwrap_or(CursorShape::Bar)
+}
+
+pub fn cursor_blinking() -> CursorBlinking {
+    read_value("cursor_blinking")
+        .and_then(|value| CursorBlinking::from_config_value(&value))
+        .unwrap_or(CursorBlinking::FollowSystem)
 }
 
 pub fn cursor_animation_duration_ms() -> u32 {
@@ -250,7 +307,7 @@ fn read_f64(key: &str, default: f64, min: f64, max: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn read_bool(key: &str, default: bool) -> bool {
+pub fn read_bool(key: &str, default: bool) -> bool {
     match read_value(key).as_deref() {
         Some("on" | "true" | "1") => true,
         Some("off" | "false" | "0") => false,
@@ -372,6 +429,34 @@ mod tests {
         assert_eq!(cursor_shape(), CursorShape::Bar);
         write_value("cursor_shape", "unknown");
         assert_eq!(cursor_shape(), CursorShape::Bar);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn cursor_blinking_defaults_to_system_and_reads_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-cursor-blinking-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert_eq!(cursor_blinking(), CursorBlinking::FollowSystem);
+        write_value("cursor_blinking", "enabled");
+        assert_eq!(cursor_blinking(), CursorBlinking::Enabled);
+        write_value("cursor_blinking", "disabled");
+        assert_eq!(cursor_blinking(), CursorBlinking::Disabled);
+        write_value("cursor_blinking", "unexpected");
+        assert_eq!(cursor_blinking(), CursorBlinking::FollowSystem);
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");

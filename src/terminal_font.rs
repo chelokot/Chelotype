@@ -2,8 +2,10 @@ use gtk::pango;
 use gtk::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub const TERMINAL_FONT: &str =
-    "Adwaita Mono, Symbols Nerd Font Mono, Symbols Nerd Font, BlexMono Nerd Font Mono";
+pub const DEFAULT_TERMINAL_FONT: &str = "BlexMono Nerd Font Mono 13";
+const SYSTEM_TERMINAL_FONT: &str = "Monospace";
+const TERMINAL_FONT_FALLBACKS: &str =
+    "Symbols Nerd Font Mono, Symbols Nerd Font, Adwaita Mono, monospace";
 const TERMINAL_FONT_SIZE_PT: f64 = 13.0;
 const MIN_FONT_SIZE_TENTHS: u32 = 80;
 const MAX_FONT_SIZE_TENTHS: u32 = 280;
@@ -31,7 +33,7 @@ pub fn description_for_size_and_text_scale(
     font_size_pt: f64,
     text_scale: f64,
 ) -> pango::FontDescription {
-    let mut description = pango::FontDescription::from_string(TERMINAL_FONT);
+    let mut description = pango::FontDescription::from_string(&terminal_font_family_stack());
     let scaled_size = font_size_pt * text_scale.clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE);
     description.set_size((scaled_size * pango::SCALE as f64).round() as i32);
     description
@@ -54,6 +56,34 @@ pub fn zoom_reset() {
     save_configured_size();
 }
 
+pub fn use_system_font() -> bool {
+    crate::config::read_bool("use_system_font", false)
+}
+
+pub fn set_use_system_font(enabled: bool) {
+    crate::config::write_value("use_system_font", if enabled { "true" } else { "false" });
+}
+
+pub fn custom_font() -> String {
+    crate::config::read_value("custom_font").unwrap_or_else(|| DEFAULT_TERMINAL_FONT.to_string())
+}
+
+pub fn custom_font_label() -> String {
+    custom_font()
+}
+
+pub fn set_custom_font(font: &str) {
+    crate::config::write_value("custom_font", font);
+    let description = pango::FontDescription::from_string(font);
+    let size = description.size();
+    if size > 0 {
+        let size_pt = size as f64 / pango::SCALE as f64;
+        let value = (size_pt * 10.0).round() as u32;
+        FONT_SIZE_TENTHS.store(clamp_size(value), Ordering::Relaxed);
+        save_configured_size();
+    }
+}
+
 pub fn load_configured_size() {
     let Some(value) =
         crate::config::read_value("font_size_tenths").and_then(|value| value.parse::<u32>().ok())
@@ -61,6 +91,17 @@ pub fn load_configured_size() {
         return;
     };
     FONT_SIZE_TENTHS.store(clamp_size(value), Ordering::Relaxed);
+}
+
+fn terminal_font_family_stack() -> String {
+    if use_system_font() {
+        return SYSTEM_TERMINAL_FONT.to_string();
+    }
+    let primary = pango::FontDescription::from_string(&custom_font())
+        .family()
+        .map(|family| family.to_string())
+        .unwrap_or_else(|| DEFAULT_TERMINAL_FONT.to_string());
+    format!("{primary}, {TERMINAL_FONT_FALLBACKS}")
 }
 
 fn adjust_font_size(delta: i32) {
@@ -169,6 +210,39 @@ mod tests {
         std::fs::write(dir.join("config"), "font_size_tenths=170\n").expect("write font config");
         load_configured_size();
         assert_eq!(font_size_pt(), 17.0);
+
+        zoom_reset();
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn custom_font_defaults_to_nerd_font_and_persists_selection() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-font-family-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert!(!use_system_font());
+        assert_eq!(custom_font(), DEFAULT_TERMINAL_FONT);
+        set_use_system_font(true);
+        assert!(use_system_font());
+        set_custom_font("BlexMono Nerd Font Mono 15");
+        assert_eq!(custom_font(), "BlexMono Nerd Font Mono 15");
+        assert_eq!(font_size_pt(), 15.0);
+        assert_eq!(terminal_font_family_stack(), SYSTEM_TERMINAL_FONT);
+        set_use_system_font(false);
+        assert!(terminal_font_family_stack().contains("BlexMono Nerd Font Mono"));
+        assert!(terminal_font_family_stack().contains("Symbols Nerd Font"));
 
         zoom_reset();
         unsafe {

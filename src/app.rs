@@ -2545,7 +2545,7 @@ fn show_preferences_dialog(parent: &adw::ApplicationWindow, canvas: &TerminalCan
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
     let cursor_page = cursor_preferences_page(canvas);
-    let appearance_page = appearance_preferences_page(canvas);
+    let appearance_page = appearance_preferences_page(parent, canvas);
     stack.add_named(&cursor_page, Some("cursor"));
     stack.add_named(&appearance_page, Some("appearance"));
     stack.set_visible_child_name("cursor");
@@ -2593,16 +2593,12 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         .column_spacing(10)
         .margin_top(8)
         .margin_bottom(8)
-        .margin_start(6)
-        .margin_end(6)
         .build();
     let cursor_animation_grid = gtk::Grid::builder()
         .column_spacing(10)
         .row_spacing(10)
         .margin_top(8)
         .margin_bottom(8)
-        .margin_start(6)
-        .margin_end(6)
         .build();
     let animation_settings_group = AnimationSettingsGroup::new();
     populate_cursor_shape_grid(
@@ -2632,11 +2628,24 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     );
     group.add(&animation_settings_group.container);
     page.add(&group);
+
+    let behavior_group = adw::PreferencesGroup::builder().build();
+    behavior_group.add(&cursor_blinking_row(canvas.clone()));
+    page.add(&behavior_group);
     page
 }
 
-fn appearance_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
+fn appearance_preferences_page(
+    parent: &adw::ApplicationWindow,
+    canvas: &TerminalCanvas,
+) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().title("Appearance").build();
+    let font_group = adw::PreferencesGroup::builder().title("Font").build();
+    let (system_font_row, custom_font_row) = font_rows(parent, canvas.clone());
+    font_group.add(&system_font_row);
+    font_group.add(&custom_font_row);
+    page.add(&font_group);
+
     let group = adw::PreferencesGroup::builder().title("Scrolling").build();
     let grid = gtk::Grid::builder()
         .column_spacing(10)
@@ -2655,6 +2664,100 @@ fn appearance_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage 
     group.add(&grid);
     page.add(&group);
     page
+}
+
+fn font_rows(
+    parent: &adw::ApplicationWindow,
+    canvas: TerminalCanvas,
+) -> (adw::ActionRow, adw::ActionRow) {
+    let system_font_switch = gtk::Switch::builder()
+        .active(crate::terminal_font::use_system_font())
+        .valign(gtk::Align::Center)
+        .build();
+    set_pointer_cursor(&system_font_switch);
+    let system_font_row = adw::ActionRow::builder()
+        .title("Use System Font")
+        .activatable_widget(&system_font_switch)
+        .build();
+    system_font_row.add_suffix(&system_font_switch);
+
+    let custom_font_row = adw::ActionRow::builder()
+        .title("Custom Font")
+        .activatable(true)
+        .build();
+    let custom_font_label = gtk::Label::builder()
+        .label(crate::terminal_font::custom_font_label())
+        .halign(gtk::Align::End)
+        .build();
+    custom_font_label.set_can_target(false);
+    let custom_font_arrow = gtk::Image::builder()
+        .icon_name("go-next-symbolic")
+        .pixel_size(16)
+        .build();
+    custom_font_arrow.set_can_target(false);
+    custom_font_row.add_suffix(&custom_font_label);
+    custom_font_row.add_suffix(&custom_font_arrow);
+    custom_font_row.set_visible(!crate::terminal_font::use_system_font());
+
+    {
+        let canvas = canvas.clone();
+        let custom_font_row = custom_font_row.clone();
+        system_font_switch.connect_active_notify(move |switch| {
+            let use_system_font = switch.is_active();
+            crate::terminal_font::set_use_system_font(use_system_font);
+            custom_font_row.set_visible(!use_system_font);
+            canvas.widget().queue_draw();
+        });
+    }
+    {
+        let parent = parent.clone();
+        let canvas = canvas.clone();
+        custom_font_row.connect_activated(move |_| {
+            show_custom_font_dialog(&parent, canvas.clone(), custom_font_label.clone());
+        });
+    }
+
+    (system_font_row, custom_font_row)
+}
+
+fn show_custom_font_dialog(
+    parent: &adw::ApplicationWindow,
+    canvas: TerminalCanvas,
+    custom_font_label: gtk::Label,
+) {
+    let dialog = gtk::FontChooserDialog::new(Some("Custom Font"), Some(parent));
+    dialog.set_modal(true);
+    dialog.set_font(&crate::terminal_font::custom_font());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Select", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept
+            && let Some(font) = dialog.font()
+        {
+            crate::terminal_font::set_custom_font(font.as_str());
+            custom_font_label.set_label(&crate::terminal_font::custom_font_label());
+            canvas.widget().queue_draw();
+        }
+        dialog.close();
+    });
+    dialog.present();
+}
+
+fn cursor_blinking_row(canvas: TerminalCanvas) -> adw::ComboRow {
+    let labels = crate::config::CursorBlinking::ALL.map(crate::config::CursorBlinking::label);
+    let model = gtk::StringList::new(&labels);
+    let row = adw::ComboRow::builder()
+        .title("Cursor Blinking")
+        .model(&model)
+        .selected(crate::config::cursor_blinking().selected_index())
+        .build();
+    row.connect_selected_notify(move |row| {
+        let mode = crate::config::CursorBlinking::from_selected_index(row.selected());
+        crate::config::write_value("cursor_blinking", mode.config_value());
+        canvas.refresh_cursor_options();
+    });
+    row
 }
 
 fn settings_navigation_button(icon_name: &str, label: &str) -> gtk::ToggleButton {
@@ -2720,7 +2823,7 @@ fn populate_cursor_shape_grid(
                     canvas.clone(),
                     animation_settings.clone(),
                 );
-                canvas.widget().queue_draw();
+                canvas.refresh_cursor_options();
             });
         }
         grid.attach(&button, index as i32, 0, 1, 1);
@@ -2762,7 +2865,7 @@ fn populate_cursor_animation_grid(
                     },
                 );
                 populate_animation_settings(&animation_settings, style, canvas.clone());
-                canvas.widget().queue_draw();
+                canvas.refresh_cursor_options();
             });
         }
         grid.attach(&button, (index % 2) as i32, (index / 2) as i32, 1, 1);
@@ -3485,8 +3588,6 @@ impl AnimationSettingsGroup {
                 .spacing(12)
                 .margin_top(4)
                 .margin_bottom(12)
-                .margin_start(12)
-                .margin_end(12)
                 .build(),
         }
     }
@@ -3632,8 +3733,6 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
         .spacing(5)
         .margin_top(12)
         .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
         .build();
     let header = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
