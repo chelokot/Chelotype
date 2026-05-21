@@ -1788,13 +1788,15 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
+    let open_startup_preferences = crate::config::take_first_launch_preferences()
+        || std::env::var("CHELOTYPE_MEDIA_OPEN_PREFERENCES")
+            .ok()
+            .as_deref()
+            == Some("1");
+
     window.present();
 
-    if std::env::var("CHELOTYPE_MEDIA_OPEN_PREFERENCES")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
+    if open_startup_preferences {
         let window = window.clone();
         let canvas = canvas.clone();
         let force_snapshot = media_preferences_force_snapshot.clone();

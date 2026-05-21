@@ -206,6 +206,14 @@ pub fn smooth_scrolling_enabled() -> bool {
     read_bool("smooth_scrolling", DEFAULT_SMOOTH_SCROLLING)
 }
 
+pub fn take_first_launch_preferences() -> bool {
+    if read_bool("first_launch_preferences_shown", false) {
+        return false;
+    }
+    write_value("first_launch_preferences_shown", "true");
+    true
+}
+
 pub fn cursor_style() -> CursorStyle {
     if let Some(style) =
         read_value("cursor_style").and_then(|value| CursorStyle::from_config_value(&value))
@@ -401,6 +409,33 @@ mod tests {
         write_value("cursor_style", "steady");
         assert!(!cursor_animation_enabled());
         assert_eq!(cursor_style(), CursorStyle::Steady);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn first_launch_preferences_are_taken_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-first-launch-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert!(take_first_launch_preferences());
+        assert!(!take_first_launch_preferences());
+        assert_eq!(
+            read_value("first_launch_preferences_shown").as_deref(),
+            Some("true")
+        );
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");
