@@ -48,6 +48,23 @@ impl TerminalPalette {
 }
 
 pub const DEFAULT_TERMINAL_PALETTE_ID: &str = "gnome";
+pub const PRIMARY_TERMINAL_PALETTE_IDS: &[&str] = &[
+    "gnome",
+    "dracula",
+    "Catppuccin Mocha",
+    "Catppuccin Latte",
+    "Gruvbox",
+    "Gruvbox Material",
+    "solarized",
+    "Solarized Light",
+    "nord",
+    "Tokyo Night",
+    "Rosé Pine",
+    "Github",
+    "Vs Code",
+    "Monokai Dark",
+    "gnome-high-contrast",
+];
 
 pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
@@ -389,7 +406,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "campbell",
         name: "Campbell",
-        primary: true,
+        primary: false,
         foreground: "#777777",
         background: "#0c0c0c",
         cursor: "#777777",
@@ -413,7 +430,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Catppuccin Latte",
         name: "Catppuccin Latte",
-        primary: false,
+        primary: true,
         foreground: "#4C4F69",
         background: "#EFF1F5",
         cursor: "#4C4F69",
@@ -437,7 +454,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Catppuccin Mocha",
         name: "Catppuccin Mocha",
-        primary: false,
+        primary: true,
         foreground: "#CDD6F4",
         background: "#1E1E2E",
         cursor: "#CDD6F4",
@@ -893,7 +910,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Github",
         name: "Github",
-        primary: false,
+        primary: true,
         foreground: "#8B949E",
         background: "#101216",
         cursor: "#C9D1D9",
@@ -1001,7 +1018,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Gruvbox",
         name: "Gruvbox",
-        primary: false,
+        primary: true,
         foreground: "#EBDBB2",
         background: "#282828",
         cursor: "#EBDBB2",
@@ -1013,7 +1030,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Gruvbox Material",
         name: "Gruvbox Material",
-        primary: false,
+        primary: true,
         foreground: "#D4BE98",
         background: "#282828",
         cursor: "#D4BE98",
@@ -1133,7 +1150,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Horizon",
         name: "Horizon",
-        primary: true,
+        primary: false,
         foreground: "#FDF0ED",
         background: "#1C1E26",
         cursor: "#FDF0ED",
@@ -1361,7 +1378,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "linux",
         name: "Linux",
-        primary: true,
+        primary: false,
         foreground: "#aaaaaa",
         background: "#000000",
         cursor: "#aaaaaa",
@@ -1601,7 +1618,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Monokai Dark",
         name: "Monokai Dark",
-        primary: false,
+        primary: true,
         foreground: "#F8F8F2",
         background: "#272822",
         cursor: "#F8F8F2",
@@ -2129,7 +2146,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Rosé Pine",
         name: "Rosé Pine",
-        primary: false,
+        primary: true,
         foreground: "#E0DEF4",
         background: "#191724",
         cursor: "#E0DEF4",
@@ -2343,6 +2360,18 @@ pub const PALETTES: &[TerminalPalette] = &[
         ],
     },
     TerminalPalette {
+        id: "Solarized Light",
+        name: "Solarized Light",
+        primary: true,
+        foreground: "#657B83",
+        background: "#FDF6E3",
+        cursor: "#657B83",
+        indexed: [
+            "#073642", "#DC322F", "#859900", "#B58900", "#268BD2", "#D33682", "#2AA198", "#EEE8D5",
+            "#002B36", "#CB4B16", "#586E75", "#657B83", "#839496", "#6C71C4", "#93A1A1", "#FDF6E3",
+        ],
+    },
+    TerminalPalette {
         id: "Solarized Darcula",
         name: "Solarized Darcula",
         primary: false,
@@ -2549,7 +2578,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "tango",
         name: "Tango",
-        primary: true,
+        primary: false,
         foreground: "#d3d7cf",
         background: "#2e3436",
         cursor: "#d3d7cf",
@@ -2633,7 +2662,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "Tokyo Night",
         name: "Tokyo Night",
-        primary: false,
+        primary: true,
         foreground: "#C0CAF5",
         background: "#1A1B26",
         cursor: "#C0CAF5",
@@ -2957,7 +2986,7 @@ pub const PALETTES: &[TerminalPalette] = &[
     TerminalPalette {
         id: "xterm",
         name: "XTerm",
-        primary: true,
+        primary: false,
         foreground: "#ffffff",
         background: "#000000",
         cursor: "#ffffff",
@@ -2997,7 +3026,23 @@ pub fn set_default_terminal_palette(id: &str) {
 }
 
 pub fn primary_terminal_palettes() -> impl Iterator<Item = &'static TerminalPalette> {
-    PALETTES.iter().filter(|palette| palette.primary)
+    PRIMARY_TERMINAL_PALETTE_IDS
+        .iter()
+        .map(|id| terminal_palette_by_id(id).expect("primary terminal palette"))
+}
+
+pub fn is_primary_terminal_palette(id: &str) -> bool {
+    PRIMARY_TERMINAL_PALETTE_IDS.contains(&id)
+}
+
+pub fn terminal_palette_display_order(show_all: bool) -> Vec<&'static TerminalPalette> {
+    if show_all {
+        let mut palettes = PALETTES.iter().collect::<Vec<_>>();
+        palettes.sort_by_key(|palette| palette.name.to_lowercase());
+        return palettes;
+    }
+
+    primary_terminal_palettes().collect()
 }
 
 #[cfg(test)]
@@ -3007,7 +3052,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn palette_table_keeps_ptyxis_primary_subset() {
+    fn palette_table_keeps_popular_primary_subset() {
         let names = primary_terminal_palettes()
             .map(|palette| palette.name)
             .collect::<Vec<_>>();
@@ -3015,18 +3060,38 @@ mod tests {
         assert_eq!(
             names,
             [
-                "Campbell",
-                "Dracula",
                 "GNOME",
-                "High Contrast",
-                "Horizon",
-                "Linux",
-                "Nord",
+                "Dracula",
+                "Catppuccin Mocha",
+                "Catppuccin Latte",
+                "Gruvbox",
+                "Gruvbox Material",
                 "Solarized",
-                "Tango",
+                "Solarized Light",
+                "Nord",
+                "Tokyo Night",
+                "Rosé Pine",
+                "Github",
                 "VS Code",
-                "XTerm",
+                "Monokai Dark",
+                "High Contrast",
             ]
+        );
+    }
+
+    #[test]
+    fn palette_primary_flags_match_popular_subset() {
+        for palette in PALETTES {
+            assert_eq!(
+                palette.primary,
+                is_primary_terminal_palette(palette.id),
+                "{} primary flag",
+                palette.name
+            );
+        }
+        assert_eq!(
+            PALETTES.iter().filter(|palette| palette.primary).count(),
+            PRIMARY_TERMINAL_PALETTE_IDS.len()
         );
     }
 

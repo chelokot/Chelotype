@@ -2734,9 +2734,10 @@ fn issue_url(debug_info: &str) -> String {
 }
 
 fn release_notes() -> &'static str {
-    "<p>Polishes the What's New release history layout in the About dialog.</p>
+    "<p>Improves the palette picker with a curated default set, alphabetical expanded view, and search.</p>
     <p>Earlier releases:</p>
     <ul>
+      <li>0.1.10: Polished What's New release history layout.</li>
       <li>0.1.9: AppStream-compatible About dialog changelog markup.</li>
       <li>0.1.8: Full release history in About.</li>
       <li>0.1.7: Main menu, About dialog, issue reporting metadata, and release notes.</li>
@@ -3057,9 +3058,7 @@ fn palette_preferences_group(
             .to_string(),
     ));
     let previews = std::rc::Rc::new(std::cell::RefCell::new(Vec::<gtk::DrawingArea>::new()));
-    let cards = std::rc::Rc::new(std::cell::RefCell::new(
-        Vec::<(gtk::FlowBoxChild, bool)>::new(),
-    ));
+    let cards = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PaletteCard>::new()));
     let toggle = gtk::Button::new();
     set_pointer_cursor(&toggle);
     set_palette_visibility_toggle(&toggle, show_all.get());
@@ -3078,7 +3077,13 @@ fn palette_preferences_group(
         .hexpand(true)
         .css_classes(["heading"])
         .build();
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Search palettes")
+        .hexpand(true)
+        .visible(false)
+        .build();
     header.append(&title);
+    header.append(&search);
     header.append(&toggle);
     container.append(&header);
     let flow = gtk::FlowBox::builder()
@@ -3091,7 +3096,7 @@ fn palette_preferences_group(
         .margin_top(8)
         .margin_bottom(8)
         .build();
-    for palette in crate::terminal_palette::PALETTES {
+    for palette in crate::terminal_palette::terminal_palette_display_order(true) {
         let card = palette_preview_card(
             palette,
             selected_palette.clone(),
@@ -3105,23 +3110,70 @@ fn palette_preferences_group(
             .visible(palette.primary)
             .build();
         flow.append(&flow_child);
-        cards.borrow_mut().push((flow_child, palette.primary));
+        cards.borrow_mut().push(PaletteCard {
+            child: flow_child,
+            palette,
+        });
     }
     {
         let show_all = show_all.clone();
         let cards = cards.clone();
+        let flow = flow.clone();
+        let search = search.clone();
+        let title = title.clone();
         toggle.connect_clicked(move |button| {
             let expanded = !show_all.get();
             show_all.set(expanded);
             set_palette_visibility_toggle(button, expanded);
-            for (card, primary) in cards.borrow().iter() {
-                card.set_visible(expanded || *primary);
+            reorder_palette_cards(&flow, &cards.borrow(), expanded);
+            title.set_visible(!expanded);
+            search.set_visible(expanded);
+            if expanded {
+                search.grab_focus();
+            } else {
+                search.set_text("");
             }
+            update_palette_card_visibility(&cards.borrow(), expanded, search.text().as_str());
+        });
+    }
+    {
+        let show_all = show_all.clone();
+        let cards = cards.clone();
+        search.connect_search_changed(move |entry| {
+            update_palette_card_visibility(&cards.borrow(), show_all.get(), entry.text().as_str());
         });
     }
     container.append(&flow);
     group.add(&container);
     group
+}
+
+#[derive(Clone)]
+struct PaletteCard {
+    child: gtk::FlowBoxChild,
+    palette: &'static crate::terminal_palette::TerminalPalette,
+}
+
+fn reorder_palette_cards(flow: &gtk::FlowBox, cards: &[PaletteCard], show_all: bool) {
+    for card in cards {
+        flow.remove(&card.child);
+    }
+    for palette in crate::terminal_palette::terminal_palette_display_order(show_all) {
+        let card = cards
+            .iter()
+            .find(|card| card.palette.id == palette.id)
+            .expect("palette card");
+        flow.append(&card.child);
+    }
+}
+
+fn update_palette_card_visibility(cards: &[PaletteCard], show_all: bool, query: &str) {
+    let query = query.trim().to_lowercase();
+    for card in cards {
+        let matches_query = query.is_empty() || card.palette.name.to_lowercase().contains(&query);
+        card.child
+            .set_visible((show_all || card.palette.primary) && matches_query);
+    }
 }
 
 fn set_palette_visibility_toggle(button: &gtk::Button, show_all: bool) {
