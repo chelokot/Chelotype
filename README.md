@@ -1,5 +1,11 @@
 # Chelotype
 
+<!-- chelotype-media-start -->
+<p align="center">
+  <video src="docs/media/chelotype-preferences.webm" autoplay loop muted playsinline controls width="960"></video>
+</p>
+<!-- chelotype-media-end -->
+
 Chelotype is a GTK4/libadwaita terminal experiment backed by one real PTY and `libghostty-vt` as the terminal-core state. The app renders from Ghostty grid/cell snapshots through our own renderer; the old VTE bridge and hidden-terminal input path are gone.
 
 ## Run
@@ -84,3 +90,9 @@ bash scripts/with-zig.sh cargo test --test gtk_e2e_tests
 ```
 
 The same test file also runs scenarios that verify ANSI-colored cells, capture a nonblank real-window screenshot, check truecolor terminal output, narrow cursor shape, cursor blink/reset, cursor animation/style/shape settings, and command-block rails at the pixel level, send real keyboard events, render IM preedit state before commit, commit IM-composed text with `xdotool`, click the current input row to move the shell cursor, forward terminal mouse-reporting bytes to the PTY, drag-select terminal text with the mouse, keep released drag selections stable for copy, export PRIMARY/CLIPBOARD selection text, resize split panes by dragging the divider, resize the GTK window, and inspect the resulting structured snapshots.
+
+## Flathub Media
+
+```sh
+scripts/capture-flathub-media.sh
+```

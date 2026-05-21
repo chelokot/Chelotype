@@ -2610,10 +2610,14 @@ fn show_preferences_dialog(
     canvas: &TerminalCanvas,
     force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
 ) {
+    let default_height = std::env::var("CHELOTYPE_MEDIA_PREFERENCES_HEIGHT")
+        .ok()
+        .and_then(|height| height.parse::<i32>().ok())
+        .unwrap_or(960);
     let window = adw::Window::builder()
         .title("Settings")
         .default_width(960)
-        .default_height(960)
+        .default_height(default_height)
         .transient_for(parent)
         .modal(true)
         .build();
