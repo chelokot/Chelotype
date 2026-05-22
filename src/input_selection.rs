@@ -56,6 +56,10 @@ pub fn keyboard_cursor_target(
     unit: CursorUnit,
     current: Option<GridPoint>,
 ) -> Option<MouseGridPosition> {
+    if let Some(target) = keyboard_cursor_target_in_wrapped_input(content, direction, unit, current)
+    {
+        return Some(target);
+    }
     let row = current
         .map(|point| point.row)
         .or_else(|| usize::try_from(content.cursor_line).ok())?;
@@ -79,6 +83,38 @@ pub fn keyboard_cursor_target(
         row: row.min(u16::MAX as usize) as u16,
         column: column.min(u16::MAX as usize) as u16,
     })
+}
+
+fn keyboard_cursor_target_in_wrapped_input(
+    content: &RenderableContentOwned,
+    direction: CursorDirection,
+    unit: CursorUnit,
+    current: Option<GridPoint>,
+) -> Option<MouseGridPosition> {
+    let cursor_row = usize::try_from(content.cursor_line).ok()?;
+    let rows = active_wrapped_rows(content, cursor_row)?;
+    let row = current
+        .map(|point| point.row)
+        .or_else(|| usize::try_from(content.cursor_line).ok())?;
+    if !rows.contains(&row) {
+        return None;
+    }
+    let cursor = current
+        .map(|point| point.column)
+        .or_else(|| usize::try_from(content.cursor_col).ok())?;
+    let source = input_absolute_column(content, rows.clone(), row, cursor)?;
+    let bounds = wrapped_input_bounds(content, rows.clone())?;
+    let target = match (direction, unit) {
+        (CursorDirection::Left, CursorUnit::Cell) => source.saturating_sub(1).max(bounds.start),
+        (CursorDirection::Right, CursorUnit::Cell) => (source + 1).min(bounds.end),
+        (CursorDirection::Left, CursorUnit::Word) => {
+            previous_wrapped_word_boundary(content, rows.clone(), source, bounds.start)
+        }
+        (CursorDirection::Right, CursorUnit::Word) => {
+            next_wrapped_word_boundary(content, rows.clone(), source, bounds.end)
+        }
+    };
+    input_position_for_absolute_column(content, rows, target)
 }
 
 pub fn keyboard_selection_collapse_target(
@@ -151,9 +187,22 @@ pub fn keyboard_cursor_bytes(
             },
         )
     {
-        return Some(bytes);
+        return (!bytes.is_empty()).then_some(bytes);
+    }
+    if let Some(current) = current
+        && let Some(bytes) = crate::interaction::cursor_movement_bytes_between_editable_input_points(
+            content,
+            MouseGridPosition {
+                row: current.row.min(u16::MAX as usize) as u16,
+                column: current.column.min(u16::MAX as usize) as u16,
+            },
+            target,
+        )
+    {
+        return (!bytes.is_empty()).then_some(bytes);
     }
     crate::interaction::cursor_movement_bytes_for_content(content, target)
+        .filter(|bytes| !bytes.is_empty())
 }
 
 pub fn cursor_movement_bytes_between_points(
@@ -213,6 +262,176 @@ fn next_word_boundary(line: &[TerminalCell], cursor: usize, end: usize) -> usize
     column
 }
 
+fn active_wrapped_rows(
+    content: &RenderableContentOwned,
+    cursor_row: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    if cursor_row >= content.lines.len() {
+        return None;
+    }
+    let mut start = cursor_row;
+    while start > 0 {
+        let current = content
+            .line_metadata
+            .get(start)
+            .copied()
+            .unwrap_or_default();
+        let previous = content
+            .line_metadata
+            .get(start - 1)
+            .copied()
+            .unwrap_or_default();
+        if current.wrap_continuation || previous.wrapped {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut end = cursor_row;
+    while end + 1 < content.lines.len() {
+        let current = content.line_metadata.get(end).copied().unwrap_or_default();
+        let next = content
+            .line_metadata
+            .get(end + 1)
+            .copied()
+            .unwrap_or_default();
+        if current.wrapped || next.wrap_continuation {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    Some(start..=end)
+}
+
+fn wrapped_input_bounds(
+    content: &RenderableContentOwned,
+    rows: std::ops::RangeInclusive<usize>,
+) -> Option<std::ops::Range<usize>> {
+    let start_row = *rows.start();
+    let end_row = *rows.end();
+    let start = input_absolute_column(
+        content,
+        rows.clone(),
+        start_row,
+        input_start_column(content.lines.get(start_row)?),
+    )?;
+    let end_column = if Some(end_row) == usize::try_from(content.cursor_line).ok() {
+        active_input_end_column(
+            content.lines.get(end_row)?,
+            usize::try_from(content.cursor_col).ok(),
+        )
+    } else {
+        line_significant_len(content.lines.get(end_row)?)
+    };
+    let end = input_absolute_column(content, rows, end_row, end_column)?;
+    (end >= start).then_some(start..end)
+}
+
+fn input_absolute_column(
+    content: &RenderableContentOwned,
+    rows: std::ops::RangeInclusive<usize>,
+    row: usize,
+    column: usize,
+) -> Option<usize> {
+    if !rows.contains(&row) {
+        return None;
+    }
+    let mut absolute = 0;
+    for line_row in rows {
+        let line_width = content.lines.get(line_row)?.len();
+        if line_row == row {
+            return Some(absolute + column.min(line_width));
+        }
+        absolute += line_width;
+    }
+    None
+}
+
+fn input_position_for_absolute_column(
+    content: &RenderableContentOwned,
+    rows: std::ops::RangeInclusive<usize>,
+    absolute: usize,
+) -> Option<MouseGridPosition> {
+    let mut offset = 0;
+    for row in rows {
+        let line_width = content.lines.get(row)?.len();
+        if absolute <= offset + line_width {
+            return Some(MouseGridPosition {
+                row: row.min(u16::MAX as usize) as u16,
+                column: (absolute - offset).min(u16::MAX as usize) as u16,
+            });
+        }
+        offset += line_width;
+    }
+    None
+}
+
+fn previous_wrapped_word_boundary(
+    content: &RenderableContentOwned,
+    rows: std::ops::RangeInclusive<usize>,
+    cursor: usize,
+    start: usize,
+) -> usize {
+    let mut column = cursor.min(wrapped_input_len(content, rows.clone()));
+    while column > start
+        && !wrapped_input_cell(content, rows.clone(), column - 1).is_some_and(is_word_cell)
+    {
+        column -= 1;
+    }
+    while column > start
+        && wrapped_input_cell(content, rows.clone(), column - 1).is_some_and(is_word_cell)
+    {
+        column -= 1;
+    }
+    column
+}
+
+fn next_wrapped_word_boundary(
+    content: &RenderableContentOwned,
+    rows: std::ops::RangeInclusive<usize>,
+    cursor: usize,
+    end: usize,
+) -> usize {
+    let mut column = cursor.min(end);
+    while column < end
+        && !wrapped_input_cell(content, rows.clone(), column).is_some_and(is_word_cell)
+    {
+        column += 1;
+    }
+    while column < end
+        && wrapped_input_cell(content, rows.clone(), column).is_some_and(is_word_cell)
+    {
+        column += 1;
+    }
+    column
+}
+
+fn wrapped_input_cell(
+    content: &RenderableContentOwned,
+    rows: std::ops::RangeInclusive<usize>,
+    absolute: usize,
+) -> Option<&TerminalCell> {
+    let mut offset = 0;
+    for row in rows {
+        let line = content.lines.get(row)?;
+        if absolute < offset + line.len() {
+            return line.get(absolute - offset);
+        }
+        offset += line.len();
+    }
+    None
+}
+
+fn wrapped_input_len(
+    content: &RenderableContentOwned,
+    rows: std::ops::RangeInclusive<usize>,
+) -> usize {
+    rows.filter_map(|row| content.lines.get(row))
+        .map(Vec::len)
+        .sum()
+}
+
 fn is_word_cell(cell: &TerminalCell) -> bool {
     cell.text
         .chars()
@@ -258,7 +477,7 @@ fn parse_hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal_grid::{MouseMode, TerminalColors, TerminalContent};
+    use crate::terminal_grid::{MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata};
 
     fn content_with_cursor(text: &str, cursor_col: i32) -> TerminalContent {
         TerminalContent {
@@ -285,6 +504,38 @@ mod tests {
             text: text.to_string().into(),
             fg: Some(fg.to_string()),
             ..TerminalCell::blank()
+        }
+    }
+
+    fn wrapped_content_with_cursor(
+        lines: &[&str],
+        cursor_row: i32,
+        cursor_col: i32,
+    ) -> TerminalContent {
+        let mut line_metadata = vec![TerminalLineMetadata::default(); lines.len()];
+        for row in 0..lines.len().saturating_sub(1) {
+            line_metadata[row].wrapped = true;
+            line_metadata[row + 1].wrap_continuation = true;
+        }
+        TerminalContent {
+            lines: lines
+                .iter()
+                .map(|line| {
+                    line.chars()
+                        .map(|ch| TerminalCell {
+                            text: ch.to_string().into(),
+                            ..TerminalCell::blank()
+                        })
+                        .collect()
+                })
+                .collect(),
+            line_metadata,
+            cursor_line: cursor_row,
+            cursor_col,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
         }
     }
 
@@ -330,6 +581,10 @@ mod tests {
         assert_eq!(
             keyboard_cursor_target(&content, CursorDirection::Right, CursorUnit::Cell, None),
             Some(MouseGridPosition { row: 0, column: 7 })
+        );
+        assert_eq!(
+            keyboard_cursor_bytes(&content, None, MouseGridPosition { row: 0, column: 7 }),
+            None
         );
     }
 
@@ -430,5 +685,80 @@ mod tests {
         .expect("movement bytes");
 
         assert_eq!(bytes, b"\x1b[C\x1b[C\x1b[C");
+    }
+
+    #[test]
+    fn shift_left_target_crosses_soft_wrapped_input_row_boundary() {
+        let content = wrapped_content_with_cursor(&["❯ abc", "def"], 1, 0);
+
+        assert_eq!(
+            keyboard_cursor_target(&content, CursorDirection::Left, CursorUnit::Cell, None),
+            Some(MouseGridPosition { row: 0, column: 4 })
+        );
+        assert_eq!(
+            keyboard_cursor_bytes(&content, None, MouseGridPosition { row: 0, column: 4 })
+                .as_deref(),
+            Some(&b"\x1b[D"[..])
+        );
+    }
+
+    #[test]
+    fn directed_shift_left_selection_crosses_soft_wrapped_input_row_boundary() {
+        let content = wrapped_content_with_cursor(&["❯ abc", "def"], 1, 0);
+        let target =
+            keyboard_cursor_target(&content, CursorDirection::Left, CursorUnit::Cell, None)
+                .expect("left target across soft wrap");
+        let directed = directed_selection_for_target(&content, target, None, None)
+            .expect("directed selection across soft wrap");
+
+        assert_eq!(
+            directed.range(),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 4 },
+                GridPoint { row: 1, column: 0 }
+            ))
+        );
+        assert_eq!(
+            keyboard_cursor_bytes(&content, None, target).as_deref(),
+            Some(&b"\x1b[D"[..])
+        );
+    }
+
+    #[test]
+    fn directed_ctrl_shift_left_selection_crosses_soft_wrapped_input_row_boundary() {
+        let content = wrapped_content_with_cursor(&["❯ abc ", "def ghi"], 1, 0);
+        let target =
+            keyboard_cursor_target(&content, CursorDirection::Left, CursorUnit::Word, None)
+                .expect("word-left target across soft wrap");
+        let directed = directed_selection_for_target(&content, target, None, None)
+            .expect("directed word selection across soft wrap");
+
+        assert_eq!(target, MouseGridPosition { row: 0, column: 2 });
+        assert_eq!(
+            directed.range(),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 2 },
+                GridPoint { row: 1, column: 0 }
+            ))
+        );
+        assert_eq!(
+            keyboard_cursor_bytes(&content, None, target).as_deref(),
+            Some(&b"\x1b[D\x1b[D\x1b[D\x1b[D"[..])
+        );
+    }
+
+    #[test]
+    fn directed_selection_cursor_bytes_cross_soft_wrap_from_logical_focus() {
+        let content = wrapped_content_with_cursor(&["❯ abc", "def"], 1, 0);
+
+        assert_eq!(
+            keyboard_cursor_bytes(
+                &content,
+                Some(GridPoint { row: 0, column: 4 }),
+                MouseGridPosition { row: 1, column: 0 },
+            )
+            .as_deref(),
+            Some(&b"\x1b[C"[..])
+        );
     }
 }

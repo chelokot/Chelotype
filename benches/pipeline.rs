@@ -1,5 +1,10 @@
 use chelotype::ghostty_snapshot::GhosttySnapshotter;
+use chelotype::interaction::cursor_movement_bytes_between_editable_input_points;
+use chelotype::mouse::MouseGridPosition;
 use chelotype::render::Renderer;
+use chelotype::terminal_grid::{
+    MouseMode, TerminalCell, TerminalColors, TerminalContent, TerminalLineMetadata,
+};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use libghostty_vt::{Terminal, TerminalOptions};
 use std::time::{Duration, Instant};
@@ -155,6 +160,46 @@ fn bench_held_key_10s_latency_gate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_input_selection_long_line_drag_follow(c: &mut Criterion) {
+    let mut group = c.benchmark_group("input_selection");
+    group.sample_size(30);
+    group.measurement_time(Duration::from_secs(2));
+    group.bench_function("long_line_drag_follow", |b| {
+        b.iter_batched(
+            || long_input_content(16_384),
+            |content| {
+                for column in 256..4096 {
+                    let source = MouseGridPosition { row: 0, column };
+                    let target = MouseGridPosition {
+                        row: 0,
+                        column: column + 1,
+                    };
+                    let bytes = cursor_movement_bytes_between_editable_input_points(
+                        &content, source, target,
+                    )
+                    .expect("adjacent input cursor movement");
+                    assert_eq!(bytes, b"\x1b[C");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+fn long_input_content(columns: usize) -> TerminalContent {
+    TerminalContent {
+        lines: vec![vec![TerminalCell::blank(); columns]],
+        line_metadata: vec![TerminalLineMetadata::default()],
+        cursor_line: 0,
+        cursor_col: 256,
+        cursor_visible: true,
+        display_offset: 0,
+        colors: TerminalColors::default(),
+        mouse: MouseMode::default(),
+    }
+}
+
 fn percentile(samples: &[Duration], percentile: usize) -> Duration {
     if samples.is_empty() {
         return Duration::ZERO;
@@ -168,6 +213,7 @@ criterion_group!(
     bench_full_pipeline_keyrepeat,
     bench_full_pipeline_latency_guard,
     bench_frame_budget_gates,
-    bench_held_key_10s_latency_gate
+    bench_held_key_10s_latency_gate,
+    bench_input_selection_long_line_drag_follow
 );
 criterion_main!(pipeline);

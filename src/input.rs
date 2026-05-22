@@ -42,6 +42,15 @@ pub enum CursorUnit {
     Word,
 }
 
+pub fn cursor_move_terminal_bytes(direction: CursorDirection, unit: CursorUnit) -> Vec<u8> {
+    match (direction, unit) {
+        (CursorDirection::Left, CursorUnit::Cell) => b"\x1b[D".to_vec(),
+        (CursorDirection::Right, CursorUnit::Cell) => b"\x1b[C".to_vec(),
+        (CursorDirection::Left, CursorUnit::Word) => b"\x1b[1;5D".to_vec(),
+        (CursorDirection::Right, CursorUnit::Word) => b"\x1b[1;5C".to_vec(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PhysicalKey {
     A,
@@ -319,6 +328,18 @@ mod tests {
         assert_eq!(
             key_to_terminal_bytes(gdk::Key::Delete, gdk::ModifierType::empty()).as_deref(),
             Some(&b"\x1b[3~"[..])
+        );
+    }
+
+    #[test]
+    fn maps_cursor_move_terminal_fallback_bytes() {
+        assert_eq!(
+            cursor_move_terminal_bytes(CursorDirection::Right, CursorUnit::Cell),
+            b"\x1b[C"
+        );
+        assert_eq!(
+            cursor_move_terminal_bytes(CursorDirection::Right, CursorUnit::Word),
+            b"\x1b[1;5C"
         );
     }
 

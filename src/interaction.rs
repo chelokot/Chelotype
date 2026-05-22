@@ -115,6 +115,9 @@ impl PointerInteraction {
             return Vec::new();
         }
         let range = SelectionRange::between_cells(anchor, focus);
+        if self.selection == Some(range) {
+            return Vec::new();
+        }
         self.selection = Some(range);
         self.selection_moved = true;
         vec![InteractionEffect::SelectionChanged(Some(range))]
@@ -175,6 +178,48 @@ pub fn cursor_movement_bytes_between_input_points(
     arrow_bytes_for_delta(delta)
 }
 
+pub fn cursor_movement_bytes_for_editable_input(
+    content: &TerminalContent,
+    target: MouseGridPosition,
+) -> Option<Vec<u8>> {
+    let cursor_row = usize::try_from(content.cursor_line).ok()?;
+    let cursor_column = usize::try_from(content.cursor_col).ok()?;
+    let target_row = usize::from(target.row);
+    let target_column = usize::from(target.column);
+    let input_rows = active_wrapped_rows(content, cursor_row)?;
+    if !input_rows.contains(&target_row) {
+        return None;
+    }
+    let cursor_absolute =
+        absolute_input_column(content, input_rows.clone(), cursor_row, cursor_column)?;
+    let target_absolute = absolute_input_column(content, input_rows, target_row, target_column)?;
+    let delta = target_absolute as i32 - cursor_absolute as i32;
+    arrow_bytes_for_delta(delta)
+}
+
+pub fn cursor_movement_bytes_between_editable_input_points(
+    content: &TerminalContent,
+    source: MouseGridPosition,
+    target: MouseGridPosition,
+) -> Option<Vec<u8>> {
+    let cursor_row = usize::try_from(content.cursor_line).ok()?;
+    let input_rows = active_wrapped_rows(content, cursor_row)?;
+    let source_absolute = absolute_input_column(
+        content,
+        input_rows.clone(),
+        usize::from(source.row),
+        usize::from(source.column),
+    )?;
+    let target_absolute = absolute_input_column(
+        content,
+        input_rows,
+        usize::from(target.row),
+        usize::from(target.column),
+    )?;
+    let delta = target_absolute as i32 - source_absolute as i32;
+    arrow_bytes_for_delta(delta)
+}
+
 pub fn input_position_in_active_input(
     content: &TerminalContent,
     position: MouseGridPosition,
@@ -183,6 +228,25 @@ pub fn input_position_in_active_input(
         return false;
     };
     let Some(input_rows) = active_input_rows(content, cursor_row) else {
+        return false;
+    };
+    absolute_input_column(
+        content,
+        input_rows,
+        usize::from(position.row),
+        usize::from(position.column),
+    )
+    .is_some()
+}
+
+pub fn input_position_in_editable_input(
+    content: &TerminalContent,
+    position: MouseGridPosition,
+) -> bool {
+    let Some(cursor_row) = usize::try_from(content.cursor_line).ok() else {
+        return false;
+    };
+    let Some(input_rows) = active_wrapped_rows(content, cursor_row) else {
         return false;
     };
     absolute_input_column(
@@ -366,6 +430,25 @@ mod tests {
                 GridPoint { row: 1, column: 2 },
                 GridPoint { row: 1, column: 6 }
             ))
+        );
+    }
+
+    #[test]
+    fn local_drag_reports_selection_only_when_cell_range_changes() {
+        let mut interaction = PointerInteraction::default();
+        interaction.press(MouseMode::default(), MouseButton::Left, pos(2, 1));
+        assert_eq!(
+            interaction.motion(MouseMode::default(), pos(5, 1)),
+            vec![InteractionEffect::SelectionChanged(Some(
+                SelectionRange::new(
+                    GridPoint { row: 1, column: 2 },
+                    GridPoint { row: 1, column: 6 }
+                )
+            ))]
+        );
+        assert_eq!(
+            interaction.motion(MouseMode::default(), pos(5, 1)),
+            Vec::new()
         );
     }
 

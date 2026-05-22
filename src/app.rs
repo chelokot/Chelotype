@@ -5,15 +5,18 @@ use crate::command_blocks::{
     command_block_output_range, command_block_output_range_near_cursor, command_blocks,
 };
 use crate::containers::{LaunchTarget, available_launch_targets};
-use crate::input::{CursorDirection, CursorUnit, KeyAction, key_to_action};
+use crate::input::{
+    CursorDirection, CursorUnit, KeyAction, cursor_move_terminal_bytes, key_to_action,
+};
 use crate::input_selection::{
     DirectedSelectionRange, active_cursor_point, active_input_line_range,
     cursor_movement_bytes_between_points, directed_selection_for_target, keyboard_cursor_bytes,
     keyboard_cursor_target, keyboard_selection_collapse_target,
 };
 use crate::interaction::{
-    InteractionEffect, PointerInteraction, cursor_movement_bytes_between_input_points,
-    cursor_movement_bytes_for_content, input_position_in_active_input,
+    InteractionEffect, PointerInteraction, cursor_movement_bytes_between_editable_input_points,
+    cursor_movement_bytes_for_content, cursor_movement_bytes_for_editable_input,
+    input_position_in_editable_input,
 };
 use crate::mouse::{MouseButton, MouseGridPosition};
 use crate::render::{RenderFrame, RenderPreedit, Renderer};
@@ -552,6 +555,7 @@ fn build_ui(app: &Application) {
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         let input_selection_drag = input_selection_drag.clone();
+        let canvas = canvas.clone();
         let canvas_widget = canvas.widget().clone();
         let pending_input_latency = pending_input_latency.clone();
         let context_menu = CanvasContextMenuContext {
@@ -570,6 +574,7 @@ fn build_ui(app: &Application) {
             drag_gesture_active.set(false);
             drag_gesture_moved.set(false);
             input_selection_drag.set(None);
+            canvas.set_cursor_motion_suppressed(false);
             crate::logging::debug_log(&format!("mouse press x={x:.1} y={y:.1}"));
             if split_resize_boundary_at(metrics.get(), &pane_hits.borrow(), x).is_some() {
                 pointer_pane_capture.set(None);
@@ -690,11 +695,13 @@ fn build_ui(app: &Application) {
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         let input_selection_drag = input_selection_drag.clone();
+        let canvas = canvas.clone();
         click_controller.connect_released(move |_gesture, _press_count, x, y| {
             crate::logging::debug_log(&format!("mouse release x={x:.1} y={y:.1}"));
             left_pointer_down.set(false);
             drag_gesture_active.set(false);
             input_selection_drag.set(None);
+            canvas.set_cursor_motion_suppressed(false);
             let current_mode = current_mouse_mode(&content, mode.get());
             if drag_gesture_moved.get() && !current_mode.sends_press_release() {
                 pointer_pane_capture.set(None);
@@ -784,8 +791,10 @@ fn build_ui(app: &Application) {
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         let input_selection_drag = input_selection_drag.clone();
+        let canvas = canvas.clone();
         gtk::prelude::GestureExt::connect_cancel(&click_controller, move |_gesture, _sequence| {
             input_selection_drag.set(None);
+            canvas.set_cursor_motion_suppressed(false);
             let effects = cancel_click_gesture(
                 &drag_gesture_active,
                 &left_pointer_down,
@@ -933,6 +942,7 @@ fn build_ui(app: &Application) {
         let split_resize_drag = split_resize_drag.clone();
         let drag_gesture_moved = drag_gesture_moved.clone();
         let input_selection_drag = input_selection_drag.clone();
+        let canvas = canvas.clone();
         let canvas_widget = canvas.widget().clone();
         drag_controller.connect_drag_update(move |gesture, offset_x, offset_y| {
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
@@ -1025,6 +1035,7 @@ fn build_ui(app: &Application) {
                         &input_selection_drag,
                         &workspace,
                         &content,
+                        &canvas,
                         target.position,
                     )
                 {
@@ -1051,10 +1062,12 @@ fn build_ui(app: &Application) {
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         let input_selection_drag = input_selection_drag.clone();
+        let canvas = canvas.clone();
         drag_controller.connect_drag_end(move |gesture, offset_x, offset_y| {
             left_pointer_down.set(false);
             drag_gesture_active.set(false);
             input_selection_drag.set(None);
+            canvas.set_cursor_motion_suppressed(false);
             if current_mouse_mode(&content, mode.get()).sends_press_release() {
                 return;
             }
@@ -1113,11 +1126,13 @@ fn build_ui(app: &Application) {
         let drag_gesture_active = drag_gesture_active.clone();
         let left_pointer_down = left_pointer_down.clone();
         let input_selection_drag = input_selection_drag.clone();
+        let canvas = canvas.clone();
         gtk::prelude::GestureExt::connect_cancel(&drag_controller, move |_gesture, _sequence| {
             left_pointer_down.set(false);
             drag_gesture_active.set(false);
             drag_gesture_moved.set(false);
             input_selection_drag.set(None);
+            canvas.set_cursor_motion_suppressed(false);
             pointer_pane_capture.set(None);
             split_resize_drag.set(None);
             let effects = pointer_interaction.borrow_mut().cancel();
@@ -1153,6 +1168,7 @@ fn build_ui(app: &Application) {
         let drag_gesture_moved = drag_gesture_moved.clone();
         let left_pointer_down = left_pointer_down.clone();
         let input_selection_drag = input_selection_drag.clone();
+        let canvas = canvas.clone();
         let canvas_widget = canvas.widget().clone();
         motion_controller.connect_motion(move |controller, x, y| {
             crate::logging::debug_log(&format!("mouse motion x={x:.1} y={y:.1}"));
@@ -1206,6 +1222,7 @@ fn build_ui(app: &Application) {
                             &input_selection_drag,
                             &workspace,
                             &content,
+                            &canvas,
                             target.position,
                         )
                     {
@@ -5077,6 +5094,13 @@ fn move_cursor_from_keyboard(
     }
     if let Some(bytes) = keyboard_cursor_bytes(&content, current_override, target) {
         let _ = workspace.borrow_mut().write_active(&bytes);
+    } else if !cursor_move.selecting {
+        let _ = workspace
+            .borrow_mut()
+            .write_active(&cursor_move_terminal_bytes(
+                cursor_move.direction,
+                cursor_move.unit,
+            ));
     }
 }
 
@@ -5703,7 +5727,7 @@ fn input_selection_drag_for_content(
     content: &RenderableContentOwned,
     position: MouseGridPosition,
 ) -> Option<InputSelectionDrag> {
-    input_position_in_active_input(content, position).then_some(InputSelectionDrag {
+    input_position_in_editable_input(content, position).then_some(InputSelectionDrag {
         anchor: position,
         cursor: None,
     })
@@ -5729,29 +5753,49 @@ fn follow_input_selection_cursor(
     drag: &std::rc::Rc<std::cell::Cell<Option<InputSelectionDrag>>>,
     workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
     content: &std::rc::Rc<std::cell::RefCell<Option<RenderableContentOwned>>>,
+    canvas: &TerminalCanvas,
     focus: MouseGridPosition,
 ) -> bool {
     let Some(mut state) = drag.get() else {
         return false;
     };
-    let target = input_selection_cursor_target(state.anchor, focus);
     let Some(content) = content.borrow().as_ref().cloned() else {
         return false;
     };
-    if !input_position_in_active_input(&content, target) {
-        return false;
-    }
-    let bytes = state
-        .cursor
-        .and_then(|cursor| cursor_movement_bytes_between_input_points(&content, cursor, target))
-        .or_else(|| cursor_movement_bytes_for_content(&content, target));
-    state.cursor = Some(target);
-    drag.set(Some(state));
-    let Some(bytes) = bytes else {
+    let Some((updated_state, bytes)) = input_selection_cursor_step(&content, state, focus) else {
         return false;
     };
+    state = updated_state;
+    drag.set(Some(state));
+    canvas.set_cursor_motion_suppressed(true);
     let _ = workspace.borrow_mut().write_active(&bytes);
     true
+}
+
+fn input_selection_cursor_step(
+    content: &RenderableContentOwned,
+    mut state: InputSelectionDrag,
+    focus: MouseGridPosition,
+) -> Option<(InputSelectionDrag, Vec<u8>)> {
+    let target = input_selection_cursor_target(state.anchor, focus);
+    if !input_position_in_editable_input(content, target) {
+        return None;
+    }
+    let bytes = input_selection_cursor_movement(content, state, target)?;
+    state.cursor = Some(target);
+    Some((state, bytes))
+}
+
+fn input_selection_cursor_movement(
+    content: &RenderableContentOwned,
+    state: InputSelectionDrag,
+    target: MouseGridPosition,
+) -> Option<Vec<u8>> {
+    if let Some(cursor) = state.cursor {
+        cursor_movement_bytes_between_editable_input_points(content, cursor, target)
+    } else {
+        cursor_movement_bytes_for_editable_input(content, target)
+    }
 }
 
 fn point_le(left: GridPoint, right: GridPoint) -> bool {
@@ -5799,7 +5843,7 @@ struct SplitResizeDrag {
     applied_delta_cols: i16,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InputSelectionDrag {
     anchor: MouseGridPosition,
     cursor: Option<MouseGridPosition>,
@@ -6091,6 +6135,227 @@ mod tests {
     }
 
     #[test]
+    fn input_selection_cursor_movement_uses_logical_drag_cursor_after_first_move() {
+        let content = input_content("❯ manualinput", 14);
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 0, column: 2 },
+            cursor: None,
+        };
+        assert_eq!(
+            input_selection_cursor_movement(
+                &content,
+                initial,
+                MouseGridPosition { row: 0, column: 8 },
+            )
+            .as_deref(),
+            Some(&b"\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"[..])
+        );
+
+        let moved = InputSelectionDrag {
+            cursor: Some(MouseGridPosition { row: 0, column: 8 }),
+            ..initial
+        };
+        assert_eq!(
+            input_selection_cursor_movement(
+                &content,
+                moved,
+                MouseGridPosition { row: 0, column: 6 }
+            )
+            .as_deref(),
+            Some(&b"\x1b[D\x1b[D"[..])
+        );
+    }
+
+    #[test]
+    fn input_selection_cursor_movement_does_not_fallback_from_invalid_logical_cursor() {
+        let content = input_content("❯ manualinput", 14);
+        let stale = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 0, column: 2 },
+            cursor: Some(MouseGridPosition { row: 9, column: 8 }),
+        };
+
+        assert_eq!(
+            input_selection_cursor_movement(
+                &content,
+                stale,
+                MouseGridPosition { row: 0, column: 6 }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn input_selection_cursor_step_tracks_forward_drag_from_end_cursor() {
+        let content = input_content("❯ manualinput", 14);
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 0, column: 2 },
+            cursor: None,
+        };
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 0, column: 4 })
+                .expect("forward input drag step");
+        assert_eq!(bytes, left_arrows(8));
+        assert_eq!(
+            state,
+            InputSelectionDrag {
+                anchor: MouseGridPosition { row: 0, column: 2 },
+                cursor: Some(MouseGridPosition { row: 0, column: 5 }),
+            }
+        );
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 0, column: 8 })
+                .expect("forward input drag follow step");
+        assert_eq!(bytes, right_arrows(4));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 0, column: 9 }));
+    }
+
+    #[test]
+    fn input_selection_cursor_step_tracks_reverse_drag_from_start_cursor() {
+        let content = input_content("❯ manualinput", 2);
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 0, column: 10 },
+            cursor: None,
+        };
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 0, column: 7 })
+                .expect("reverse input drag step");
+        assert_eq!(bytes, right_arrows(5));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 0, column: 7 }));
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 0, column: 4 })
+                .expect("reverse input drag follow step");
+        assert_eq!(bytes, left_arrows(3));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 0, column: 4 }));
+    }
+
+    #[test]
+    fn input_selection_cursor_step_does_not_move_when_focus_leaves_input_and_resumes_on_return() {
+        let content = command_block_content_with_active_input("❯ activeinput");
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 3, column: 2 },
+            cursor: None,
+        };
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 3, column: 3 })
+                .expect("initial input drag step");
+        assert_eq!(bytes, right_arrows(2));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 3, column: 4 }));
+
+        assert_eq!(
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 2, column: 5 }),
+            None
+        );
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 3, column: 4 })
+                .expect("returned input drag step");
+        assert_eq!(bytes, right_arrows(1));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 3, column: 5 }));
+    }
+
+    #[test]
+    fn input_selection_cursor_step_does_not_move_when_drag_enters_prompt_line() {
+        let content = semantic_prompt_with_active_input();
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 1, column: 2 },
+            cursor: None,
+        };
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 1, column: 4 })
+                .expect("initial editable input drag step");
+        assert_eq!(bytes, left_arrows(3));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 1, column: 5 }));
+
+        assert_eq!(
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 0, column: 12 }),
+            None
+        );
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 1, column: 5 })
+                .expect("returned editable input drag step");
+        assert_eq!(bytes, right_arrows(1));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 1, column: 6 }));
+    }
+
+    #[test]
+    fn input_selection_cursor_step_supports_cursor_already_on_first_drag_edge() {
+        let content = input_content("❯ manualinput", 5);
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 0, column: 2 },
+            cursor: None,
+        };
+
+        assert_eq!(
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 0, column: 4 }),
+            None
+        );
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 0, column: 5 })
+                .expect("next discrete input drag step");
+        assert_eq!(bytes, right_arrows(1));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 0, column: 6 }));
+    }
+
+    #[test]
+    fn input_selection_cursor_step_supports_multiline_wrapped_input_edges() {
+        use crate::terminal_grid::{
+            MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
+        };
+        let content = TerminalContent {
+            lines: vec![
+                vec![crate::terminal_grid::TerminalCell::blank(); 4],
+                vec![crate::terminal_grid::TerminalCell::blank(); 4],
+                vec![crate::terminal_grid::TerminalCell::blank(); 4],
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata {
+                    wrapped: true,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    wrapped: true,
+                    wrap_continuation: true,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    wrap_continuation: true,
+                    ..TerminalLineMetadata::default()
+                },
+            ],
+            cursor_line: 2,
+            cursor_col: 1,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        };
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 0, column: 1 },
+            cursor: None,
+        };
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 1, column: 2 })
+                .expect("wrapped forward input drag step");
+        assert_eq!(bytes, left_arrows(2));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 1, column: 3 }));
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 2, column: 0 })
+                .expect("wrapped forward input drag follow step");
+        assert_eq!(bytes, right_arrows(2));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 2, column: 1 }));
+    }
+
+    #[test]
     fn scrolling_preview_waits_before_first_scroll() {
         let mut preview = ScrollingPreviewState::with_profile(vec![WheelProfileEvent {
             elapsed_ms: 0.0,
@@ -6209,7 +6474,35 @@ mod tests {
             .collect()
     }
 
+    fn input_content(text: &str, cursor_col: i32) -> RenderableContentOwned {
+        use crate::terminal_grid::{
+            MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
+        };
+        TerminalContent {
+            lines: vec![line(text)],
+            line_metadata: vec![TerminalLineMetadata::default()],
+            cursor_line: 0,
+            cursor_col,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        }
+    }
+
+    fn left_arrows(count: usize) -> Vec<u8> {
+        b"\x1b[D".repeat(count)
+    }
+
+    fn right_arrows(count: usize) -> Vec<u8> {
+        b"\x1b[C".repeat(count)
+    }
+
     fn command_block_content() -> RenderableContentOwned {
+        command_block_content_with_active_input("❯ ")
+    }
+
+    fn command_block_content_with_active_input(active_input: &str) -> RenderableContentOwned {
         use crate::terminal_grid::{
             MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
         };
@@ -6218,7 +6511,7 @@ mod tests {
                 line("❯ printf block"),
                 line("BLOCK_OUT_1"),
                 line("BLOCK_OUT_2"),
-                line("❯ "),
+                line(active_input),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -6234,6 +6527,34 @@ mod tests {
             ],
             cursor_line: 3,
             cursor_col: 2,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        }
+    }
+
+    fn semantic_prompt_with_active_input() -> RenderableContentOwned {
+        use crate::terminal_grid::{
+            MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
+        };
+        TerminalContent {
+            lines: vec![
+                line("~/Documents/Projects/Chelotype on main"),
+                line("❯ ls -la"),
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Continuation,
+                    ..TerminalLineMetadata::default()
+                },
+            ],
+            cursor_line: 1,
+            cursor_col: 8,
             cursor_visible: true,
             display_offset: 0,
             colors: TerminalColors::default(),

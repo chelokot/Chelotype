@@ -37,6 +37,11 @@
     <binary>chelotype</binary>
   </provides>
   <releases>
+    <release version="0.1.13" date="2026-05-22">
+      <description>
+        <p>Fixes wrapped input selection, mouse drag cursor following, and shell autosuggestion cursor handoff.</p>
+      </description>
+    </release>
     <release version="0.1.12" date="2026-05-21">
       <description>
         <p>Polishes preference preview cards, scrolling previews, and palette layout.</p>

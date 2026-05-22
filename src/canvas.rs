@@ -55,6 +55,7 @@ pub struct TerminalCanvas {
     pending_palette_transition: Rc<RefCell<Option<CanvasRenderFrame>>>,
     cursor_blink: Rc<Cell<CursorBlinkState>>,
     cursor_motion: Rc<Cell<CursorMotionState>>,
+    cursor_motion_suppressed: Rc<Cell<bool>>,
     cursor_options_override: Rc<Cell<Option<CursorOptions>>>,
     font_size_override: Rc<Cell<Option<f64>>>,
     scroll_visual_offset_px: Rc<Cell<f64>>,
@@ -76,6 +77,7 @@ impl TerminalCanvas {
         let pending_palette_transition = Rc::new(RefCell::new(None::<CanvasRenderFrame>));
         let cursor_blink = Rc::new(Cell::new(CursorBlinkState::default()));
         let cursor_motion = Rc::new(Cell::new(CursorMotionState::default()));
+        let cursor_motion_suppressed = Rc::new(Cell::new(false));
         let cursor_options_override = Rc::new(Cell::new(None::<CursorOptions>));
         let font_size_override = Rc::new(Cell::new(None::<f64>));
         let scroll_visual_offset_px = Rc::new(Cell::new(0.0));
@@ -184,6 +186,7 @@ impl TerminalCanvas {
             pending_palette_transition,
             cursor_blink,
             cursor_motion,
+            cursor_motion_suppressed,
             cursor_options_override,
             font_size_override,
             scroll_visual_offset_px,
@@ -222,6 +225,10 @@ impl TerminalCanvas {
     pub fn set_font_size_override(&self, font_size_pt: Option<f64>) {
         self.font_size_override.set(font_size_pt);
         self.area.queue_draw();
+    }
+
+    pub fn set_cursor_motion_suppressed(&self, suppressed: bool) {
+        self.cursor_motion_suppressed.set(suppressed);
     }
 
     pub fn add_preview_corners(&self) {
@@ -292,12 +299,22 @@ impl TerminalCanvas {
         let previous_motion = self.cursor_motion.get();
         self.cursor_blink.set(previous_blink.sync(identity, now));
         let cursor_options = self.cursor_options();
-        self.cursor_motion.set(previous_motion.sync(
-            identity,
-            now,
-            cursor_options.style,
-            cursor_options.shape,
-        ));
+        let next_motion = if self.cursor_motion_suppressed.get() {
+            CursorMotionState::settled(
+                CursorDrawPosition {
+                    pane_id: identity.pane_id,
+                    line: f64::from(identity.line.max(0)),
+                    column: f64::from(identity.column.max(0)),
+                },
+                identity.visible,
+                cursor_options.style,
+                cursor_options.shape,
+                now,
+            )
+        } else {
+            previous_motion.sync(identity, now, cursor_options.style, cursor_options.shape)
+        };
+        self.cursor_motion.set(next_motion);
         if current.as_ref() == Some(&render) {
             if previous_blink != self.cursor_blink.get()
                 || previous_motion != self.cursor_motion.get()
