@@ -1192,12 +1192,15 @@ impl RowSurfaceLineKey {
 struct TextLayoutCacheSignature {
     font_size_tenths: u32,
     text_scale_micros: u32,
+    line_spacing_tenths: u32,
+    column_spacing_tenths: u32,
 }
 
 #[derive(Default)]
 struct TextLayoutCache {
     signature: Option<TextLayoutCacheSignature>,
     font_size_pt: f64,
+    letter_spacing: i32,
     layouts: HashMap<String, pango::Layout>,
 }
 
@@ -1223,7 +1226,12 @@ impl TextLayoutCache {
         if self.layouts.len() >= MAX_TEXT_LAYOUT_CACHE_ENTRIES {
             self.layouts.clear();
         }
-        let layout = layout_for_size(widget, markup, self.font_size_pt);
+        let layout = crate::terminal_font::layout_for_size_with_letter_spacing(
+            widget,
+            markup,
+            self.font_size_pt,
+            self.letter_spacing,
+        );
         self.layouts.insert(markup.to_string(), layout.clone());
         CachedLayout::Miss(layout)
     }
@@ -1232,6 +1240,8 @@ impl TextLayoutCache {
         let signature = TextLayoutCacheSignature::for_widget(widget, self.font_size_pt);
         if self.signature != Some(signature) {
             self.signature = Some(signature);
+            self.letter_spacing =
+                crate::terminal_font::letter_spacing_for_widget_size(widget, self.font_size_pt);
             self.layouts.clear();
         }
     }
@@ -1243,6 +1253,8 @@ impl TextLayoutCacheSignature {
             font_size_tenths: (font_size_pt * 10.0).round() as u32,
             text_scale_micros: (crate::terminal_font::text_scale_for_widget(widget) * 1_000_000.0)
                 .round() as u32,
+            line_spacing_tenths: (crate::config::line_spacing() * 10.0).round() as u32,
+            column_spacing_tenths: (crate::config::column_spacing() * 10.0).round() as u32,
         }
     }
 }

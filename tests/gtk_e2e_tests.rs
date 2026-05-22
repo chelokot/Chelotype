@@ -467,6 +467,73 @@ fn gtk_e2e_exports_colored_cells_under_xvfb() {
 
 #[test]
 #[serial]
+fn gtk_e2e_lays_out_scrolling_preview_card_spacing_under_xvfb() {
+    if !has_command("xvfb-run") {
+        eprintln!("skipping gtk preferences layout e2e because xvfb-run is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-preferences-layout-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let geometry_trace = dir.join("preferences-geometry.env");
+    let config_dir = dir.join("config");
+
+    let output = Command::new("xvfb-run")
+        .args([
+            "-a",
+            "-s",
+            "-screen 0 1920x1080x24",
+            env!("CARGO_BIN_EXE_chelotype"),
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("GDK_BACKEND", "x11")
+        .env("GSETTINGS_BACKEND", "memory")
+        .env("NO_AT_BRIDGE", "1")
+        .env("CHELOTYPE_SHELL", "/bin/sh")
+        .env("CHELOTYPE_MEDIA_OPEN_PREFERENCES", "1")
+        .env("CHELOTYPE_MEDIA_PREFERENCES_HEIGHT", "760")
+        .env("CHELOTYPE_PREFERENCES_GEOMETRY_TRACE", &geometry_trace)
+        .env("CHELOTYPE_PREFERENCES_GEOMETRY_EXIT", "1")
+        .output()
+        .expect("run gtk preferences layout e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk preferences layout e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let card_x_min = geometry_metric(&geometry_trace, "card.x_min");
+    let card_x_max = geometry_metric(&geometry_trace, "card.x_max");
+    let card_y_min = geometry_metric(&geometry_trace, "card.y_min");
+    let card_y_max = geometry_metric(&geometry_trace, "card.y_max");
+    let terminal_x_min = geometry_metric(&geometry_trace, "terminal.x_min");
+    let terminal_x_max = geometry_metric(&geometry_trace, "terminal.x_max");
+    let terminal_y_min = geometry_metric(&geometry_trace, "terminal.y_min");
+    let terminal_y_max = geometry_metric(&geometry_trace, "terminal.y_max");
+    let label_y_min = geometry_metric(&geometry_trace, "label.y_min");
+    let label_y_max = geometry_metric(&geometry_trace, "label.y_max");
+
+    assert_eq!(terminal_x_min - card_x_min, 16.0);
+    assert_eq!(card_x_max - terminal_x_max, 16.0);
+    assert_eq!(terminal_y_min - card_y_min, 16.0);
+    assert_eq!(label_y_min - terminal_y_max, 8.0);
+    assert_eq!(card_y_max - label_y_max, 8.0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_exports_unicode_grapheme_and_width_cells_under_xvfb() {
     if !has_command("xvfb-run") {
         eprintln!("skipping gtk unicode e2e because xvfb-run is not installed");

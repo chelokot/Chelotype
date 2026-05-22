@@ -28,6 +28,10 @@ pub const DEFAULT_SMEAR_ANTICIPATION: f64 = 0.2;
 pub const DEFAULT_SMEAR_TRAILING_EXPONENT: f64 = 3.0;
 pub const DEFAULT_SMEAR_MAX_LENGTH: f64 = 25.0;
 pub const DEFAULT_SMOOTH_SCROLLING: bool = true;
+pub const DEFAULT_LINE_SPACING: f64 = 1.0;
+pub const DEFAULT_COLUMN_SPACING: f64 = 1.0;
+const MIN_TERMINAL_SPACING: f64 = 0.5;
+const MAX_TERMINAL_SPACING: f64 = 2.0;
 
 impl CursorStyle {
     pub const ALL: [Self; 4] = [Self::Steady, Self::Smooth, Self::Smear, Self::Neovide];
@@ -301,6 +305,37 @@ pub fn cursor_smear_max_length() -> f64 {
     )
 }
 
+pub fn line_spacing() -> f64 {
+    read_f64(
+        "line_spacing",
+        DEFAULT_LINE_SPACING,
+        MIN_TERMINAL_SPACING,
+        MAX_TERMINAL_SPACING,
+    )
+}
+
+pub fn set_line_spacing(value: f64) {
+    write_terminal_spacing("line_spacing", value);
+}
+
+pub fn column_spacing() -> f64 {
+    read_f64(
+        "column_spacing",
+        DEFAULT_COLUMN_SPACING,
+        MIN_TERMINAL_SPACING,
+        MAX_TERMINAL_SPACING,
+    )
+}
+
+pub fn set_column_spacing(value: f64) {
+    write_terminal_spacing("column_spacing", value);
+}
+
+fn write_terminal_spacing(key: &str, value: f64) {
+    let value = value.clamp(MIN_TERMINAL_SPACING, MAX_TERMINAL_SPACING);
+    write_value(key, &format!("{value:.1}"));
+}
+
 fn read_u32(key: &str, default: u32, min: u32, max: u32) -> u32 {
     read_value(key)
         .and_then(|value| value.parse::<u32>().ok())
@@ -436,6 +471,39 @@ mod tests {
             read_value("first_launch_preferences_shown").as_deref(),
             Some("true")
         );
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn terminal_spacing_defaults_persists_and_clamps() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-terminal-spacing-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert_eq!(line_spacing(), DEFAULT_LINE_SPACING);
+        assert_eq!(column_spacing(), DEFAULT_COLUMN_SPACING);
+        set_line_spacing(1.3);
+        set_column_spacing(0.8);
+        assert_eq!(line_spacing(), 1.3);
+        assert_eq!(column_spacing(), 0.8);
+        assert_eq!(read_value("line_spacing").as_deref(), Some("1.3"));
+        assert_eq!(read_value("column_spacing").as_deref(), Some("0.8"));
+        set_line_spacing(4.0);
+        set_column_spacing(0.1);
+        assert_eq!(line_spacing(), MAX_TERMINAL_SPACING);
+        assert_eq!(column_spacing(), MIN_TERMINAL_SPACING);
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");

@@ -131,12 +131,23 @@ pub fn layout_for_size(
     markup: &str,
     font_size_pt: f64,
 ) -> pango::Layout {
+    let letter_spacing = letter_spacing_for_widget_size(widget, font_size_pt);
+    layout_for_size_with_letter_spacing(widget, markup, font_size_pt, letter_spacing)
+}
+
+pub fn layout_for_size_with_letter_spacing(
+    widget: &gtk::DrawingArea,
+    markup: &str,
+    font_size_pt: f64,
+    letter_spacing: i32,
+) -> pango::Layout {
     let layout = widget.create_pango_layout(None);
     layout.set_font_description(Some(&description_for_size_and_text_scale(
         font_size_pt,
         text_scale_for_widget(widget),
     )));
     layout.set_markup(markup);
+    apply_letter_spacing(&layout, letter_spacing);
     layout
 }
 
@@ -145,6 +156,25 @@ pub fn metrics_for_widget(widget: &gtk::DrawingArea) -> Option<TerminalFontMetri
 }
 
 pub fn metrics_for_widget_size(
+    widget: &gtk::DrawingArea,
+    font_size_pt: f64,
+) -> Option<TerminalFontMetrics> {
+    let metrics = base_metrics_for_widget_size(widget, font_size_pt)?;
+    Some(TerminalFontMetrics {
+        cell_width: metrics.cell_width * crate::config::column_spacing(),
+        line_height: metrics.line_height * crate::config::line_spacing(),
+    })
+}
+
+pub fn letter_spacing_for_widget_size(widget: &gtk::DrawingArea, font_size_pt: f64) -> i32 {
+    let Some(metrics) = base_metrics_for_widget_size(widget, font_size_pt) else {
+        return 0;
+    };
+    (metrics.cell_width * (crate::config::column_spacing() - 1.0) * pango::SCALE as f64).round()
+        as i32
+}
+
+fn base_metrics_for_widget_size(
     widget: &gtk::DrawingArea,
     font_size_pt: f64,
 ) -> Option<TerminalFontMetrics> {
@@ -163,6 +193,18 @@ pub fn metrics_for_widget_size(
         cell_width,
         line_height,
     })
+}
+
+fn apply_letter_spacing(layout: &pango::Layout, letter_spacing: i32) {
+    if letter_spacing == 0 {
+        return;
+    }
+    let attributes = layout.attributes().unwrap_or_default();
+    let mut spacing = pango::AttrInt::new_letter_spacing(letter_spacing).upcast();
+    spacing.set_start_index(0);
+    spacing.set_end_index(u32::MAX);
+    attributes.insert(spacing);
+    layout.set_attributes(Some(&attributes));
 }
 
 pub fn text_scale_for_xft_dpi(xft_dpi: i32) -> f64 {

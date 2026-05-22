@@ -120,6 +120,7 @@ fn build_ui(app: &Application) {
         .default_height(990)
         .content(&content)
         .build();
+    let last_size = std::rc::Rc::new(std::cell::Cell::new(None::<ScreenSize>));
     install_window_actions(
         &window,
         app,
@@ -127,6 +128,7 @@ fn build_ui(app: &Application) {
         workspace_rc.clone(),
         force_snapshot.clone(),
         pending_style_refresh.clone(),
+        last_size.clone(),
     );
     install_style(canvas.widget(), &style_provider);
     let snapshot_enabled = std::env::var("CHELOTYPE_SNAPSHOT").ok().as_deref() == Some("1");
@@ -137,7 +139,6 @@ fn build_ui(app: &Application) {
     let ui_e2e_deadline = ui_e2e
         .as_ref()
         .map(|scenario| std::time::Instant::now() + scenario.timeout);
-    let last_size = std::rc::Rc::new(std::cell::Cell::new(None::<ScreenSize>));
     let cell_metrics = std::rc::Rc::new(std::cell::Cell::new(None::<CellMetrics>));
     let active_pane_origin_col = std::rc::Rc::new(std::cell::Cell::new(0usize));
     let pane_hits = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PaneHit>::new()));
@@ -522,6 +523,7 @@ fn build_ui(app: &Application) {
                             &canvas,
                             force_snapshot.clone(),
                             pending_style_refresh.clone(),
+                            last_size.clone(),
                         );
                     }
                     KeyAction::OpenAbout => {
@@ -1409,6 +1411,7 @@ fn build_ui(app: &Application) {
     let trace_window = window.clone();
     let tick_last_completed_frame_timing = last_completed_frame_timing.clone();
     let tick_last_presentation_time = last_presentation_time.clone();
+    let tick_last_size = last_size.clone();
     canvas.widget().add_tick_callback(move |_, frame_clock| {
         let tick_wall_started = std::time::Instant::now();
         if profile_updating_baseline && !started_frame_updating.replace(true) {
@@ -1453,7 +1456,7 @@ fn build_ui(app: &Application) {
         let measured_metrics = terminal_metrics_for_widget_cached(
             tick_canvas.widget(),
             &cached_terminal_metrics,
-            last_size.get().is_none(),
+            tick_last_size.get().is_none(),
         );
         cell_metrics.set(measured_metrics.map(|metrics| metrics.cell));
         if let (Some(path), Some(metrics)) = (&geometry_trace, measured_metrics) {
@@ -1469,15 +1472,15 @@ fn build_ui(app: &Application) {
             );
         }
         if let Some(size) = measured_metrics.map(|metrics| metrics.size)
-            && last_size.get() != Some(size)
+            && tick_last_size.get() != Some(size)
         {
-            let resize_result = if last_size.get().is_none() && crate::host::is_flatpak() {
+            let resize_result = if tick_last_size.get().is_none() && crate::host::is_flatpak() {
                 workspace_rc.borrow_mut().respawn_active_tab_with_size(size)
             } else {
                 workspace_rc.borrow_mut().resize_active_tab(size)
             };
             if resize_result.is_ok() {
-                last_size.set(Some(size));
+                tick_last_size.set(Some(size));
             }
         }
         let cursor_tick_started = std::time::Instant::now();
@@ -1818,8 +1821,15 @@ fn build_ui(app: &Application) {
         let canvas = canvas.clone();
         let force_snapshot = media_preferences_force_snapshot.clone();
         let pending_style_refresh = pending_style_refresh.clone();
+        let last_size = last_size.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(450), move || {
-            show_preferences_dialog(&window, &canvas, force_snapshot, pending_style_refresh);
+            show_preferences_dialog(
+                &window,
+                &canvas,
+                force_snapshot,
+                pending_style_refresh,
+                last_size,
+            );
         });
     }
 }
@@ -2685,6 +2695,7 @@ fn install_window_actions(
     workspace: std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
     force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
     pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
+    last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
 ) {
     let new_window = gio::SimpleAction::new("new-window", None);
     {
@@ -2699,12 +2710,14 @@ fn install_window_actions(
         let canvas = canvas.clone();
         let force_snapshot = force_snapshot.clone();
         let pending_style_refresh = pending_style_refresh.clone();
+        let last_size = last_size.clone();
         preferences.connect_activate(move |_, _| {
             show_preferences_dialog(
                 &window,
                 &canvas,
                 force_snapshot.clone(),
                 pending_style_refresh.clone(),
+                last_size.clone(),
             );
         });
     }
@@ -2906,7 +2919,9 @@ fn show_preferences_dialog(
     canvas: &TerminalCanvas,
     force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
     pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
+    last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
 ) {
+    let preference_geometry_trace = environment_value("CHELOTYPE_PREFERENCES_GEOMETRY_TRACE");
     let default_height = std::env::var("CHELOTYPE_MEDIA_PREFERENCES_HEIGHT")
         .ok()
         .and_then(|height| height.parse::<i32>().ok())
@@ -2926,8 +2941,13 @@ fn show_preferences_dialog(
         .vexpand(true)
         .build();
     let cursor_page = cursor_preferences_page(canvas);
-    let appearance_page =
-        appearance_preferences_page(parent, canvas, force_snapshot, pending_style_refresh);
+    let appearance_page = appearance_preferences_page(
+        parent,
+        canvas,
+        force_snapshot,
+        pending_style_refresh,
+        last_size,
+    );
     stack.add_titled_with_icon(
         &cursor_page,
         Some("cursor"),
@@ -2941,12 +2961,20 @@ fn show_preferences_dialog(
         "applications-graphics-symbolic",
     );
     stack.set_visible_child_name("cursor");
+    if preference_geometry_trace.is_some() {
+        stack.set_visible_child_name("appearance");
+    }
 
     let header_switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
         .policy(adw::ViewSwitcherPolicy::Wide)
         .build();
-    header.set_title_widget(Some(&header_switcher));
+    let header_title = adw::WindowTitle::builder().title("Preferences").build();
+    let header_title_stack = gtk::Stack::new();
+    header_title_stack.add_named(&header_switcher, Some("switcher"));
+    header_title_stack.add_named(&header_title, Some("title"));
+    header_title_stack.set_visible_child_name("switcher");
+    header.set_title_widget(Some(&header_title_stack));
     content.add_top_bar(&header);
     content.set_content(Some(&stack));
 
@@ -2956,18 +2984,84 @@ fn show_preferences_dialog(
         .build();
     content.add_bottom_bar(&switcher_bar);
 
-    let adaptive_root = adw::BreakpointBin::builder().child(&content).build();
+    let adaptive_root = adw::BreakpointBin::builder()
+        .child(&content)
+        .width_request(360)
+        .height_request(360)
+        .build();
     let narrow_navigation = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
         adw::BreakpointConditionLengthType::MaxWidth,
         700.0,
         adw::LengthUnit::Sp,
     ));
-    narrow_navigation.add_setter(&header, "title-widget", None);
+    narrow_navigation.add_setter(
+        &header_title_stack,
+        "visible-child-name",
+        Some(&"title".to_value()),
+    );
     narrow_navigation.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
     adaptive_root.add_breakpoint(narrow_navigation);
 
     window.set_content(Some(&adaptive_root));
     window.present();
+    if let Some(trace_path) = preference_geometry_trace {
+        let window = window.clone();
+        let application = parent.application();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(350), move || {
+            write_preferences_geometry_trace(&window, &trace_path);
+            if std::env::var("CHELOTYPE_PREFERENCES_GEOMETRY_EXIT")
+                .ok()
+                .as_deref()
+                == Some("1")
+                && let Some(application) = application
+            {
+                application.quit();
+            }
+        });
+    }
+}
+
+fn write_preferences_geometry_trace(window: &adw::Window, path: &str) {
+    let root = window.upcast_ref::<gtk::Widget>();
+    let mut output = String::new();
+    for (name, widget_name) in [
+        ("card", "chelotype-scrolling-instant-card"),
+        ("terminal", "chelotype-scrolling-instant-preview"),
+        ("label", "chelotype-scrolling-instant-label"),
+    ] {
+        let Some(widget) = find_named_widget(root, widget_name) else {
+            output.push_str(&format!("{name}=missing\n"));
+            continue;
+        };
+        let Some(bounds) = widget.compute_bounds(root) else {
+            output.push_str(&format!("{name}=unallocated\n"));
+            continue;
+        };
+        output.push_str(&format!(
+            "{name}.x_min={:.3}\n{name}.x_max={:.3}\n{name}.y_min={:.3}\n{name}.y_max={:.3}\n{name}.width={:.3}\n{name}.height={:.3}\n",
+            bounds.x(),
+            bounds.x() + bounds.width(),
+            bounds.y(),
+            bounds.y() + bounds.height(),
+            bounds.width(),
+            bounds.height(),
+        ));
+    }
+    let _ = std::fs::write(path, output);
+}
+
+fn find_named_widget(root: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+    if root.widget_name().as_str() == name {
+        return Some(root.clone());
+    }
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        if let Some(found) = find_named_widget(&widget, name) {
+            return Some(found);
+        }
+        child = widget.next_sibling();
+    }
+    None
 }
 
 fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
@@ -3026,6 +3120,7 @@ fn appearance_preferences_page(
     canvas: &TerminalCanvas,
     force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
     pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
+    last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().title("Appearance").build();
     let font_group = adw::PreferencesGroup::builder().title("Font").build();
@@ -3050,9 +3145,17 @@ fn appearance_preferences_page(
     group.add(&grid);
     page.add(&group);
 
-    let palette_group =
-        palette_preferences_group(canvas.clone(), force_snapshot, pending_style_refresh);
+    let palette_group = palette_preferences_group(
+        canvas.clone(),
+        force_snapshot.clone(),
+        pending_style_refresh,
+    );
     page.add(&palette_group);
+    page.add(&spacing_preferences_group(
+        canvas.clone(),
+        force_snapshot,
+        last_size,
+    ));
     page
 }
 
@@ -3171,6 +3274,56 @@ fn palette_preferences_group(
     container.append(&flow);
     group.add(&container);
     group
+}
+
+fn spacing_preferences_group(
+    canvas: TerminalCanvas,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().build();
+    group.add(&terminal_spacing_row(
+        "Line Spacing",
+        crate::config::line_spacing(),
+        canvas.clone(),
+        force_snapshot.clone(),
+        last_size.clone(),
+        crate::config::set_line_spacing,
+    ));
+    group.add(&terminal_spacing_row(
+        "Column Spacing",
+        crate::config::column_spacing(),
+        canvas,
+        force_snapshot,
+        last_size,
+        crate::config::set_column_spacing,
+    ));
+    group
+}
+
+fn terminal_spacing_row(
+    title: &str,
+    value: f64,
+    canvas: TerminalCanvas,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
+    write_value: fn(f64),
+) -> adw::SpinRow {
+    let adjustment = gtk::Adjustment::new(value, 0.5, 2.0, 0.1, 0.1, 0.0);
+    let row = adw::SpinRow::builder()
+        .title(title)
+        .adjustment(&adjustment)
+        .digits(1)
+        .numeric(true)
+        .snap_to_ticks(true)
+        .build();
+    row.connect_value_notify(move |row| {
+        write_value(row.value());
+        last_size.set(None);
+        force_snapshot.set(true);
+        canvas.widget().queue_draw();
+    });
+    row
 }
 
 #[derive(Clone)]
@@ -3637,18 +3790,21 @@ fn cursor_shape_tile(shape: crate::config::CursorShape) -> gtk::ToggleButton {
 
 fn preference_preview_tile(label: &str, preview: &impl IsA<gtk::Widget>) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::builder()
+        .css_classes(["preview-card-button"])
         .hexpand(true)
+        .halign(gtk::Align::Fill)
         .vexpand(false)
         .build();
     set_pointer_cursor(&button);
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
-        .halign(gtk::Align::Center)
-        .margin_top(8)
+        .hexpand(true)
+        .halign(gtk::Align::Fill)
+        .margin_top(16)
         .margin_bottom(8)
-        .margin_start(8)
-        .margin_end(8)
+        .margin_start(16)
+        .margin_end(16)
         .build();
     content.set_can_target(false);
     preview.set_can_target(false);
@@ -3728,6 +3884,8 @@ fn terminal_preview_canvas(
     let preview = TerminalCanvas::new();
     preview.widget().set_width_request(width);
     preview.widget().set_height_request(height);
+    preview.widget().set_hexpand(true);
+    preview.widget().set_halign(gtk::Align::Fill);
     preview.widget().set_can_target(false);
     preview.widget().set_focusable(false);
     preview.widget().set_cursor_from_name(None);
@@ -3819,10 +3977,17 @@ fn preview_cells(line: &str) -> Vec<crate::terminal_grid::TerminalCell> {
 }
 
 fn scrolling_preview_tile(enabled: bool, canvas: TerminalCanvas) -> gtk::ToggleButton {
-    let button = preference_preview_tile(
-        if enabled { "Smooth" } else { "Instant" },
-        &scrolling_preview_panel(enabled),
-    );
+    let preview = scrolling_preview_panel(enabled);
+    let button = preference_preview_tile(if enabled { "Smooth" } else { "Instant" }, &preview);
+    if !enabled {
+        button.set_widget_name("chelotype-scrolling-instant-card");
+        preview.set_widget_name("chelotype-scrolling-instant-preview");
+        if let Some(content) = button.child()
+            && let Some(label) = content.last_child()
+        {
+            label.set_widget_name("chelotype-scrolling-instant-label");
+        }
+    }
     button.connect_toggled(move |button| {
         if !button.is_active() {
             return;
@@ -3838,6 +4003,8 @@ fn scrolling_preview_panel(smooth: bool) -> gtk::DrawingArea {
     let preview = gtk::DrawingArea::builder()
         .width_request(290)
         .height_request(169)
+        .hexpand(true)
+        .halign(gtk::Align::Fill)
         .build();
     {
         let state = state.clone();
@@ -4340,14 +4507,11 @@ fn populate_animation_settings(
     canvas: TerminalCanvas,
 ) {
     container.clear();
+    container
+        .container
+        .set_visible(style != crate::config::CursorStyle::Steady);
+    container.container.set_margin_bottom(0);
     if style == crate::config::CursorStyle::Steady {
-        let label = gtk::Label::builder()
-            .label("No animation parameters for instant cursor")
-            .halign(gtk::Align::Start)
-            .margin_top(12)
-            .margin_bottom(12)
-            .build();
-        container.add(&label);
         return;
     }
     container.add(&animation_slider_row(
@@ -4443,6 +4607,7 @@ fn populate_animation_settings(
         crate::config::CursorStyle::Smooth | crate::config::CursorStyle::Steady => {}
     }
     if has_advanced_settings {
+        container.container.set_margin_bottom(12);
         advanced_expander.add_row(&advanced_content);
         let advanced_list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
@@ -5243,6 +5408,11 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
             background-color: transparent;
             border: none;
             box-shadow: none;
+        }
+        button.preview-card-button {
+            min-width: 0;
+            min-height: 0;
+            padding: 0;
         }
         flowboxchild.palette-flow-child {
             padding: 0;
