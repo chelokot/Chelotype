@@ -56,7 +56,6 @@ function __chelotype_move_cursor_to_target
     set -l target (string trim < \"$target_file\")
     string match -qr '^[0-9]+$' -- $target; or return
     commandline -C $target
-    commandline -f repaint
 end
 bind \\e\\[57344u __chelotype_capture_undo
 bind -M insert \\e\\[57344u __chelotype_capture_undo
