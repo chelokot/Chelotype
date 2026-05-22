@@ -2912,67 +2912,61 @@ fn show_preferences_dialog(
         .and_then(|height| height.parse::<i32>().ok())
         .unwrap_or(960);
     let window = adw::Window::builder()
-        .title("Settings")
+        .title("Preferences")
         .default_width(960)
         .default_height(default_height)
         .transient_for(parent)
         .modal(true)
         .build();
-    let root = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .build();
+    let content = adw::ToolbarView::new();
     let header = adw::HeaderBar::builder().build();
     header.add_css_class("terminal-header");
-    let title = gtk::Label::builder()
-        .label("Preferences")
-        .css_classes(["title"])
-        .build();
-    header.set_title_widget(Some(&title));
-    root.append(&header);
-
-    let stack = gtk::Stack::builder()
+    let stack = adw::ViewStack::builder()
         .hexpand(true)
         .vexpand(true)
-        .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
     let cursor_page = cursor_preferences_page(canvas);
     let appearance_page =
         appearance_preferences_page(parent, canvas, force_snapshot, pending_style_refresh);
-    stack.add_named(&cursor_page, Some("cursor"));
-    stack.add_named(&appearance_page, Some("appearance"));
+    stack.add_titled_with_icon(
+        &cursor_page,
+        Some("cursor"),
+        "Cursor",
+        "input-keyboard-symbolic",
+    );
+    stack.add_titled_with_icon(
+        &appearance_page,
+        Some("appearance"),
+        "Appearance",
+        "applications-graphics-symbolic",
+    );
     stack.set_visible_child_name("cursor");
-    root.append(&stack);
 
-    let navigation = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .halign(gtk::Align::Fill)
-        .css_classes(["settings-bottom-navigation"])
+    let header_switcher = adw::ViewSwitcher::builder()
+        .stack(&stack)
+        .policy(adw::ViewSwitcherPolicy::Wide)
         .build();
-    let cursor_button = settings_navigation_button("input-keyboard-symbolic", "Cursor");
-    let appearance_button =
-        settings_navigation_button("applications-graphics-symbolic", "Appearance");
-    appearance_button.set_group(Some(&cursor_button));
-    cursor_button.set_active(true);
-    {
-        let stack = stack.clone();
-        cursor_button.connect_toggled(move |button| {
-            if button.is_active() {
-                stack.set_visible_child_name("cursor");
-            }
-        });
-    }
-    {
-        let stack = stack.clone();
-        appearance_button.connect_toggled(move |button| {
-            if button.is_active() {
-                stack.set_visible_child_name("appearance");
-            }
-        });
-    }
-    navigation.append(&cursor_button);
-    navigation.append(&appearance_button);
-    root.append(&navigation);
-    window.set_content(Some(&root));
+    header.set_title_widget(Some(&header_switcher));
+    content.add_top_bar(&header);
+    content.set_content(Some(&stack));
+
+    let switcher_bar = adw::ViewSwitcherBar::builder()
+        .stack(&stack)
+        .reveal(false)
+        .build();
+    content.add_bottom_bar(&switcher_bar);
+
+    let adaptive_root = adw::BreakpointBin::builder().child(&content).build();
+    let narrow_navigation = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        700.0,
+        adw::LengthUnit::Sp,
+    ));
+    narrow_navigation.add_setter(&header, "title-widget", None);
+    narrow_navigation.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
+    adaptive_root.add_breakpoint(narrow_navigation);
+
+    window.set_content(Some(&adaptive_root));
     window.present();
 }
 
@@ -3549,32 +3543,6 @@ fn cursor_blinking_row(canvas: TerminalCanvas) -> adw::ComboRow {
         canvas.refresh_cursor_options();
     });
     row
-}
-
-fn settings_navigation_button(icon_name: &str, label: &str) -> gtk::ToggleButton {
-    let button = gtk::ToggleButton::builder()
-        .hexpand(true)
-        .css_classes(["settings-bottom-navigation-button", "flat"])
-        .build();
-    set_pointer_cursor(&button);
-    let content = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .build();
-    content.set_can_target(false);
-    let icon = gtk::Image::builder()
-        .icon_name(icon_name)
-        .pixel_size(18)
-        .build();
-    icon.set_can_target(false);
-    let label = gtk::Label::builder().label(label).build();
-    label.set_can_target(false);
-    content.append(&icon);
-    content.append(&label);
-    button.set_child(Some(&content));
-    button
 }
 
 fn set_pointer_cursor(widget: &impl IsA<gtk::Widget>) {
@@ -5184,8 +5152,8 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
         .term-tab-bar,
         tabbar,
         tabbox,
-        popover.tab-menu contents,
-        .settings-bottom-navigation {
+        viewswitcherbar,
+        popover.tab-menu contents {
             transition: background-color 300ms ease-out, color 300ms ease-out, border-color 300ms ease-out, box-shadow 300ms ease-out;
         }
 
@@ -5262,22 +5230,10 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
             min-width: 13rem;
             margin: 0.5rem;
         }
-        .settings-bottom-navigation {
+        viewswitcherbar {
             background-color: @chelotype_chrome_bg;
             color: @chelotype_foreground;
             border-top: 1px solid @chelotype_chrome_border;
-            padding: 0.375rem 7rem;
-            min-height: 3rem;
-        }
-        .settings-bottom-navigation-button {
-            min-width: 7rem;
-            min-height: 2.25rem;
-            padding: 0.25rem 0.625rem;
-            border-radius: 0.5rem;
-            font-weight: 700;
-        }
-        .settings-bottom-navigation-button:checked {
-            background-color: @chelotype_chrome_active;
         }
         button.palette-card-button {
             min-width: 0;
