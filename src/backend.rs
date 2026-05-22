@@ -5,10 +5,15 @@ use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{Terminal, TerminalOptions};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::thread::JoinHandle;
+
+static INPUT_CURSOR_TARGET_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScreenSize {
@@ -61,6 +66,7 @@ pub struct TerminalBackend {
     _reader: JoinHandle<()>,
     pty_rx: Receiver<Vec<u8>>,
     pty_responses: Rc<RefCell<Vec<Vec<u8>>>>,
+    input_cursor_target_file: Option<PathBuf>,
     dirty: bool,
 }
 
@@ -78,6 +84,18 @@ impl TerminalBackend {
     }
 
     pub fn spawn_with_size(mut cmd: CommandBuilder, size: ScreenSize) -> std::io::Result<Self> {
+        let input_cursor_target_file = if cmd
+            .get_env(crate::shell::INPUT_CURSOR_BRIDGE_ENV)
+            .is_some_and(|value| value == OsStr::new(crate::shell::INPUT_CURSOR_BRIDGE_FISH))
+        {
+            Some(create_input_cursor_target_file()?)
+        } else {
+            None
+        };
+        if let Some(path) = &input_cursor_target_file {
+            cmd.env(crate::shell::INPUT_CURSOR_TARGET_FILE_ENV, path.as_os_str());
+            inject_input_cursor_target_file(&mut cmd, path);
+        }
         cmd.env("COLUMNS", size.cols.to_string());
         cmd.env("LINES", size.rows.to_string());
         let pty_system = native_pty_system();
@@ -142,6 +160,7 @@ impl TerminalBackend {
             _reader: handle,
             pty_rx,
             pty_responses,
+            input_cursor_target_file,
             dirty: true,
         })
     }
@@ -150,6 +169,15 @@ impl TerminalBackend {
         self.writer.write_all(data)?;
         self.writer.flush()?;
         Ok(())
+    }
+
+    pub fn write_input_cursor_target(&mut self, offset: usize) -> std::io::Result<bool> {
+        let Some(path) = &self.input_cursor_target_file else {
+            return Ok(false);
+        };
+        std::fs::write(path, offset.to_string())?;
+        self.write(crate::shell::INPUT_CURSOR_TARGET_SEQUENCE)?;
+        Ok(true)
     }
 
     pub fn resize(&mut self, size: ScreenSize) -> std::io::Result<()> {
@@ -294,10 +322,56 @@ pub fn headless_shell_command() -> CommandBuilder {
     command
 }
 
+fn create_input_cursor_target_file() -> std::io::Result<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir);
+    let directory = base.join("chelotype");
+    std::fs::create_dir_all(&directory)?;
+    for _ in 0..16 {
+        let counter = INPUT_CURSOR_TARGET_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(
+            "input-cursor-target-{}-{counter}",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "cursor target file name collision",
+    ))
+}
+
+fn inject_input_cursor_target_file(command: &mut CommandBuilder, path: &std::path::Path) {
+    let placeholder = crate::shell::INPUT_CURSOR_TARGET_FILE_PLACEHOLDER;
+    let path = path.to_string_lossy();
+    for argument in command.get_argv_mut() {
+        let value = argument.to_string_lossy();
+        if value.contains(placeholder) {
+            *argument = value.replace(placeholder, &path).into();
+        }
+    }
+}
+
 impl Drop for TerminalBackend {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
+        }
+        if let Some(path) = &self.input_cursor_target_file {
+            let _ = std::fs::remove_file(path);
         }
     }
 }

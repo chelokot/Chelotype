@@ -30,6 +30,33 @@ fn fish_command() -> Option<CommandBuilder> {
         .map(CommandBuilder::new)
 }
 
+fn chelotype_fish_command() -> Option<CommandBuilder> {
+    ["/usr/bin/fish", "/bin/fish"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .map(|path| {
+            let mut command = CommandBuilder::new(path);
+            command.arg("--init-command");
+            command.arg(
+                r#"
+function __chelotype_move_cursor_to_target
+    set -l target_file $CHELOTYPE_CURSOR_TARGET_FILE
+    test -n "$target_file"; or return
+    test -f "$target_file"; or return
+    set -l target (string trim < "$target_file")
+    string match -qr '^[0-9]+$' -- $target; or return
+    commandline -C $target
+    commandline -f repaint
+end
+bind \e\[57347u __chelotype_move_cursor_to_target
+bind -M insert \e\[57347u __chelotype_move_cursor_to_target
+"#,
+            );
+            command.env("CHELOTYPE_INPUT_CURSOR_BRIDGE", "fish");
+            command
+        })
+}
+
 fn snapshot_contains(snapshot: &RenderableContentOwned, needle: &str) -> bool {
     snapshot_text(snapshot).contains(needle)
 }
@@ -144,6 +171,34 @@ fn backend_tracks_cursor_after_shell_echo() {
         snapshot_text(snapshot).contains("abc")
     });
     assert!(snapshot.cursor_col >= 3);
+    let _ = backend.write(b"\x15exit\n");
+}
+
+#[test]
+#[serial]
+fn backend_fish_cursor_target_bridge_moves_commandline_cursor_directly() {
+    let Some(command) = chelotype_fish_command() else {
+        eprintln!("skipping fish cursor target bridge test because fish is not installed");
+        return;
+    };
+
+    let mut backend = TerminalBackend::spawn(command).expect("spawn fish");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| snapshot.cursor_visible);
+    backend.write(b"abcde").expect("write fish input");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_text(snapshot).contains("abcde")
+    });
+    assert!(
+        backend
+            .write_input_cursor_target(2)
+            .expect("write cursor target"),
+        "fish backend should expose cursor target bridge"
+    );
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_text(snapshot).contains("abcde") && snapshot.cursor_col == 4
+    });
+
+    assert_eq!(snapshot.cursor_col, 4);
     let _ = backend.write(b"\x15exit\n");
 }
 

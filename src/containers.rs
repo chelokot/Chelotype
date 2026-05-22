@@ -107,6 +107,7 @@ fn distrobox_command(
     size: Option<ScreenSize>,
 ) -> CommandBuilder {
     let mut command = crate::host::command_builder_with_size("distrobox", size);
+    mark_input_cursor_bridge(&mut command);
     command.arg("enter");
     if !has_unshared_groups {
         command.arg("--no-tty");
@@ -121,6 +122,7 @@ fn distrobox_command(
     if let Some(directory) = launch_working_directory() {
         command.arg(format!("--chdir={directory}"));
     }
+    append_input_cursor_target_env(&mut command);
     command.args(crate::shell::default_shell_argv());
     command
 }
@@ -131,11 +133,13 @@ fn podman_exec_command(
     size: Option<ScreenSize>,
 ) -> CommandBuilder {
     let mut command = crate::host::command_builder_with_size("/bin/sh", size);
+    mark_input_cursor_bridge(&mut command);
     command.arg("-lc");
     let mut exec = format!(
         "podman start {name} >/dev/null 2>&1 || true; exec podman exec --privileged --interactive --tty --detach-keys= ",
         name = shell_quote(name),
     );
+    append_input_cursor_target_podman_env(&mut exec);
     if is_toolbox_like {
         if let Some(user) = crate::host::environment_value("USER") {
             exec.push_str(&format!("--user={} ", shell_quote(&user)));
@@ -149,6 +153,35 @@ fn podman_exec_command(
     exec.push_str(&crate::shell::default_shell_command_line());
     command.arg(exec);
     command
+}
+
+fn mark_input_cursor_bridge(command: &mut CommandBuilder) {
+    if crate::shell::default_shell_has_input_edit_bridge() {
+        command.env(
+            crate::shell::INPUT_CURSOR_BRIDGE_ENV,
+            crate::shell::INPUT_CURSOR_BRIDGE_FISH,
+        );
+    }
+}
+
+fn append_input_cursor_target_env(command: &mut CommandBuilder) {
+    if crate::shell::default_shell_has_input_edit_bridge() {
+        command.arg(format!(
+            "{}={}",
+            crate::shell::INPUT_CURSOR_TARGET_FILE_ENV,
+            crate::shell::INPUT_CURSOR_TARGET_FILE_PLACEHOLDER
+        ));
+    }
+}
+
+fn append_input_cursor_target_podman_env(exec: &mut String) {
+    if crate::shell::default_shell_has_input_edit_bridge() {
+        exec.push_str(&format!(
+            "--env={}={} ",
+            crate::shell::INPUT_CURSOR_TARGET_FILE_ENV,
+            crate::shell::INPUT_CURSOR_TARGET_FILE_PLACEHOLDER
+        ));
+    }
 }
 
 fn launch_working_directory() -> Option<String> {
@@ -358,6 +391,44 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     }
 
     #[test]
+    #[serial_test::serial]
+    fn distrobox_fish_launch_exports_cursor_target_placeholder() {
+        let old_shell = std::env::var_os("CHELOTYPE_SHELL");
+        unsafe {
+            std::env::set_var("CHELOTYPE_SHELL", "/usr/bin/fish");
+        }
+
+        let command = LaunchTarget::Distrobox {
+            name: "fedora-toolbox".to_string(),
+            has_unshared_groups: false,
+        }
+        .command();
+        let argv = command
+            .get_argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            command.get_env(crate::shell::INPUT_CURSOR_BRIDGE_ENV),
+            Some(std::ffi::OsStr::new(crate::shell::INPUT_CURSOR_BRIDGE_FISH))
+        );
+        assert!(argv.contains(&format!(
+            "{}={}",
+            crate::shell::INPUT_CURSOR_TARGET_FILE_ENV,
+            crate::shell::INPUT_CURSOR_TARGET_FILE_PLACEHOLDER
+        )));
+
+        unsafe {
+            if let Some(old_shell) = old_shell {
+                std::env::set_var("CHELOTYPE_SHELL", old_shell);
+            } else {
+                std::env::remove_var("CHELOTYPE_SHELL");
+            }
+        }
+    }
+
+    #[test]
     fn toolbox_launch_runs_as_user_in_working_directory() {
         let command = LaunchTarget::Toolbox {
             name: "fedora-toolbox-latest".to_string(),
@@ -373,6 +444,13 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
         assert_eq!(argv[1], "-lc");
         assert!(argv[2].contains("podman start 'fedora-toolbox-latest'"));
         assert!(argv[2].contains("podman exec --privileged --interactive --tty"));
+        if crate::shell::default_shell_has_input_edit_bridge() {
+            assert!(argv[2].contains(&format!(
+                "--env={}={}",
+                crate::shell::INPUT_CURSOR_TARGET_FILE_ENV,
+                crate::shell::INPUT_CURSOR_TARGET_FILE_PLACEHOLDER
+            )));
+        }
         assert!(argv[2].contains("--user="));
         assert!(argv[2].contains("--workdir="));
     }
@@ -392,6 +470,13 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
         assert_eq!(argv[0], "/bin/sh");
         assert_eq!(argv[1], "-lc");
         assert!(argv[2].contains("podman exec --privileged --interactive --tty"));
+        if crate::shell::default_shell_has_input_edit_bridge() {
+            assert!(argv[2].contains(&format!(
+                "--env={}={}",
+                crate::shell::INPUT_CURSOR_TARGET_FILE_ENV,
+                crate::shell::INPUT_CURSOR_TARGET_FILE_PLACEHOLDER
+            )));
+        }
         assert!(!argv[2].contains("--user="));
         assert!(!argv[2].contains("--workdir="));
         if argv[2].contains("fish") {

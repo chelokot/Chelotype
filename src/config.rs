@@ -20,7 +20,9 @@ pub enum CursorBlinking {
 }
 
 pub const DEFAULT_CURSOR_ANIMATION_DURATION_MS: u32 = 100;
+pub const DEFAULT_NEOVIDE_SHORT_ANIMATION_DURATION_MS: u32 = 40;
 pub const DEFAULT_NEOVIDE_TRAIL_SIZE: f64 = 0.65;
+pub const DEFAULT_NEOVIDE_BLOCK_OPACITY: f64 = 0.72;
 pub const DEFAULT_SMEAR_STIFFNESS: f64 = 0.6;
 pub const DEFAULT_SMEAR_TRAILING_STIFFNESS: f64 = 0.45;
 pub const DEFAULT_SMEAR_DAMPING: f64 = 0.85;
@@ -257,6 +259,24 @@ pub fn cursor_neovide_trail_size() -> f64 {
         "cursor_neovide_trail_size",
         DEFAULT_NEOVIDE_TRAIL_SIZE,
         0.0,
+        1.0,
+    )
+}
+
+pub fn cursor_neovide_short_animation_duration_ms() -> u32 {
+    read_u32(
+        "cursor_neovide_short_animation_duration_ms",
+        DEFAULT_NEOVIDE_SHORT_ANIMATION_DURATION_MS,
+        10,
+        150,
+    )
+}
+
+pub fn cursor_neovide_block_opacity() -> f64 {
+    read_f64(
+        "cursor_neovide_block_opacity",
+        DEFAULT_NEOVIDE_BLOCK_OPACITY,
+        0.1,
         1.0,
     )
 }
@@ -619,6 +639,14 @@ mod tests {
         assert_eq!(cursor_animation_duration_ms(), 500);
         write_value("cursor_neovide_trail_size", "2");
         assert_eq!(cursor_neovide_trail_size(), 1.0);
+        write_value("cursor_neovide_short_animation_duration_ms", "2");
+        assert_eq!(cursor_neovide_short_animation_duration_ms(), 10);
+        write_value("cursor_neovide_short_animation_duration_ms", "900");
+        assert_eq!(cursor_neovide_short_animation_duration_ms(), 150);
+        write_value("cursor_neovide_block_opacity", "0");
+        assert_eq!(cursor_neovide_block_opacity(), 0.1);
+        write_value("cursor_neovide_block_opacity", "2");
+        assert_eq!(cursor_neovide_block_opacity(), 1.0);
         write_value("cursor_smear_damping", "-1");
         assert_eq!(cursor_smear_damping(), 0.0);
 

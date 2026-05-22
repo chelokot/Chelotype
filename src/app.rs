@@ -10,8 +10,9 @@ use crate::input::{
 };
 use crate::input_selection::{
     DirectedSelectionRange, active_cursor_point, active_input_line_range,
-    cursor_movement_bytes_between_points, directed_selection_for_target, keyboard_cursor_bytes,
-    keyboard_cursor_target, keyboard_selection_collapse_target,
+    cursor_movement_bytes_between_points, directed_selection_for_target,
+    input_buffer_offset_for_position, keyboard_cursor_bytes, keyboard_cursor_target,
+    keyboard_selection_collapse_target,
 };
 use crate::interaction::{
     InteractionEffect, PointerInteraction, cursor_movement_bytes_between_editable_input_points,
@@ -4568,6 +4569,34 @@ fn populate_animation_settings(
                     unit: "",
                     default: crate::config::DEFAULT_NEOVIDE_TRAIL_SIZE,
                 },
+                canvas.clone(),
+            ));
+            advanced_content.append(&animation_slider_row(
+                AnimationSliderSpec {
+                    title: "Short jump duration",
+                    key: "cursor_neovide_short_animation_duration_ms",
+                    value: f64::from(crate::config::cursor_neovide_short_animation_duration_ms()),
+                    min: 10.0,
+                    max: 150.0,
+                    step: 1.0,
+                    digits: 0,
+                    unit: "ms",
+                    default: f64::from(crate::config::DEFAULT_NEOVIDE_SHORT_ANIMATION_DURATION_MS),
+                },
+                canvas.clone(),
+            ));
+            advanced_content.append(&animation_slider_row(
+                AnimationSliderSpec {
+                    title: "Block opacity",
+                    key: "cursor_neovide_block_opacity",
+                    value: crate::config::cursor_neovide_block_opacity(),
+                    min: 0.1,
+                    max: 1.0,
+                    step: 0.01,
+                    digits: 2,
+                    unit: "",
+                    default: crate::config::DEFAULT_NEOVIDE_BLOCK_OPACITY,
+                },
                 canvas,
             ));
             has_advanced_settings = true;
@@ -5095,6 +5124,22 @@ fn write_active_input_edit(
     }
 }
 
+fn write_active_input_cursor_target(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: &RenderableContentOwned,
+    target: MouseGridPosition,
+) -> std::io::Result<bool> {
+    if !shell_input_bridge_active(content) {
+        return Ok(false);
+    }
+    let Some(offset) = input_buffer_offset_for_position(content, target) else {
+        return Ok(false);
+    };
+    workspace
+        .borrow_mut()
+        .write_active_input_cursor_target(offset)
+}
+
 fn terminal_bytes_edit_input(data: &[u8]) -> bool {
     if data.is_empty() || data == b"\n" || data == b"\r" || data == [0x03] {
         return false;
@@ -5201,17 +5246,16 @@ fn move_cursor_from_keyboard(
             selection_dirty,
             keyboard_selection,
         );
+        let target_position = MouseGridPosition {
+            row: target.row.min(u16::MAX as usize) as u16,
+            column: target.column.min(u16::MAX as usize) as u16,
+        };
+        if let Ok(true) = write_active_input_cursor_target(workspace, &content, target_position) {
+            return;
+        }
         if let Some(bytes) = source
             .and_then(|source| cursor_movement_bytes_between_points(source, target))
-            .or_else(|| {
-                cursor_movement_bytes_for_content(
-                    &content,
-                    MouseGridPosition {
-                        row: target.row.min(u16::MAX as usize) as u16,
-                        column: target.column.min(u16::MAX as usize) as u16,
-                    },
-                )
-            })
+            .or_else(|| cursor_movement_bytes_for_content(&content, target_position))
         {
             let _ = workspace.borrow_mut().write_active(&bytes);
         }
@@ -5241,6 +5285,9 @@ fn move_cursor_from_keyboard(
             selection_dirty,
             keyboard_selection,
         );
+    }
+    if let Ok(true) = write_active_input_cursor_target(workspace, &content, target) {
+        return;
     }
     if let Some(bytes) = keyboard_cursor_bytes(&content, current_override, target) {
         let _ = workspace.borrow_mut().write_active(&bytes);
@@ -5857,6 +5904,11 @@ fn apply_interaction_effects(
             }
             InteractionEffect::MoveCursorTo(position) => {
                 if let Some(content) = content.borrow().as_ref()
+                    && let Ok(true) = write_active_input_cursor_target(workspace, content, position)
+                {
+                    continue;
+                }
+                if let Some(content) = content.borrow().as_ref()
                     && let Some(bytes) = cursor_movement_bytes_for_content(content, position)
                 {
                     let _ = workspace.borrow_mut().write_active(&bytes);
@@ -5905,6 +5957,16 @@ fn follow_input_selection_cursor(
     let Some(content) = content.borrow().as_ref().cloned() else {
         return false;
     };
+    let target = input_selection_cursor_target(state.anchor, focus);
+    if !input_position_in_editable_input(&content, target) {
+        return false;
+    }
+    if let Ok(true) = write_active_input_cursor_target(workspace, &content, target) {
+        state.cursor = Some(target);
+        drag.set(Some(state));
+        canvas.set_cursor_motion_suppressed(true);
+        return true;
+    }
     let Some((updated_state, bytes)) = input_selection_cursor_step(&content, state, focus) else {
         return false;
     };

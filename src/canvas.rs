@@ -1708,13 +1708,13 @@ impl CursorMotionState {
     }
 
     fn sync_neovide_target(&mut self, target: CursorDrawPosition, shape: CursorShape) {
-        let target_corners = cursor_corners_grid(target, shape);
-        let ranks = corner_ranks_grid(self.neovide_points_grid(), target_corners);
         let jump_vec = CursorPoint {
             x: target.column - self.from_column,
             y: target.line - self.from_line,
         };
         let short_jump = jump_vec.x.abs() <= 2.001 && jump_vec.y.abs() <= 0.001;
+        let target_corners = cursor_corners_grid(target, shape);
+        let ranks = neovide_corner_ranks_grid(self.neovide_points_grid(), target, shape);
         for (index, corner) in self.neovide_corners.iter_mut().enumerate() {
             let duration = neovide_corner_duration(ranks[index], short_jump);
             corner.jump(target_corners[index], duration);
@@ -1756,7 +1756,9 @@ fn cursor_animation_duration() -> Duration {
 }
 
 fn neovide_short_animation_duration() -> Duration {
-    Duration::from_millis(40)
+    Duration::from_millis(u64::from(
+        crate::config::cursor_neovide_short_animation_duration_ms(),
+    ))
 }
 
 fn neovide_corner_duration(rank: usize, short_jump: bool) -> Duration {
@@ -2151,7 +2153,7 @@ fn draw_neovide_points(context: &cairo::Context, points: [CursorPoint; 4], shape
         125.0 / 255.0,
         211.0 / 255.0,
         252.0 / 255.0,
-        cursor_alpha(shape),
+        neovide_cursor_alpha(shape),
     );
     draw_cursor_polygon(context, points);
 }
@@ -2194,7 +2196,8 @@ fn neovide_corners(
 ) -> [CursorPoint; 4] {
     let from = cursor_corners(path.from, shape, line_height, cell_width);
     let target = cursor_corners(path.target, shape, line_height, cell_width);
-    let ranks = corner_ranks(path.from, path.target, shape, line_height, cell_width);
+    let ranks =
+        neovide_corner_ranks_grid(cursor_corners_grid(path.from, shape), path.target, shape);
     let duration_ms = f64::from(crate::config::cursor_animation_duration_ms());
     let trail_size = crate::config::cursor_neovide_trail_size();
     let elapsed_ms = path.elapsed.as_secs_f64() * 1000.0;
@@ -2267,6 +2270,84 @@ fn cursor_size_cells(shape: CursorShape) -> (f64, f64) {
     }
 }
 
+fn neovide_corner_relative_positions(shape: CursorShape) -> [CursorPoint; 4] {
+    match shape {
+        CursorShape::Bar => {
+            let width = cursor_size_cells(shape).0;
+            [
+                CursorPoint { x: -0.5, y: -0.5 },
+                CursorPoint {
+                    x: width - 0.5,
+                    y: -0.5,
+                },
+                CursorPoint {
+                    x: width - 0.5,
+                    y: 0.5,
+                },
+                CursorPoint { x: -0.5, y: 0.5 },
+            ]
+        }
+        CursorShape::Block => [
+            CursorPoint { x: -0.5, y: -0.5 },
+            CursorPoint { x: 0.5, y: -0.5 },
+            CursorPoint { x: 0.5, y: 0.5 },
+            CursorPoint { x: -0.5, y: 0.5 },
+        ],
+    }
+}
+
+fn neovide_corner_ranks_grid(
+    current_corners: [CursorPoint; 4],
+    target: CursorDrawPosition,
+    shape: CursorShape,
+) -> [usize; 4] {
+    let target_center = CursorPoint {
+        x: target.column + 0.5,
+        y: target.line + 0.5,
+    };
+    let relative = neovide_corner_relative_positions(shape);
+    let mut alignments = relative
+        .iter()
+        .zip(current_corners)
+        .enumerate()
+        .map(|(index, (relative, current))| {
+            let destination = CursorPoint {
+                x: target_center.x + relative.x,
+                y: target_center.y + relative.y,
+            };
+            let travel = normalize_point(CursorPoint {
+                x: destination.x - current.x,
+                y: destination.y - current.y,
+            });
+            let corner = normalize_point(*relative);
+            let alignment = (travel.x * corner.x) + (travel.y * corner.y);
+            (index, alignment)
+        })
+        .collect::<Vec<_>>();
+    alignments.sort_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.0.cmp(&right.0))
+    });
+    let mut ranks = [0usize; 4];
+    for (rank, (index, _)) in alignments.into_iter().enumerate() {
+        ranks[index] = rank;
+    }
+    ranks
+}
+
+fn normalize_point(point: CursorPoint) -> CursorPoint {
+    let length = (point.x.powi(2) + point.y.powi(2)).sqrt();
+    if length <= f64::EPSILON {
+        return CursorPoint { x: 0.0, y: 0.0 };
+    }
+    CursorPoint {
+        x: point.x / length,
+        y: point.y / length,
+    }
+}
+
 fn cursor_rect_grid(position: CursorDrawPosition, shape: CursorShape) -> SmearRect {
     let (width, height) = cursor_size_cells(shape);
     SmearRect {
@@ -2292,52 +2373,6 @@ fn points_to_pixels(
     })
 }
 
-fn corner_ranks_grid(from: [CursorPoint; 4], target: [CursorPoint; 4]) -> [usize; 4] {
-    let from_center = polygon_center(from);
-    let target_center = polygon_center(target);
-    let travel_x = target_center.x - from_center.x;
-    let travel_y = target_center.y - from_center.y;
-    let travel_length = (travel_x.powi(2) + travel_y.powi(2)).sqrt();
-    if travel_length <= f64::EPSILON {
-        return [0, 1, 2, 3];
-    }
-    let travel_x = travel_x / travel_length;
-    let travel_y = travel_y / travel_length;
-    let mut alignments = from
-        .iter()
-        .enumerate()
-        .map(|(index, point)| {
-            let corner_x = point.x - from_center.x;
-            let corner_y = point.y - from_center.y;
-            let corner_length = (corner_x.powi(2) + corner_y.powi(2)).sqrt();
-            let alignment = if corner_length <= f64::EPSILON {
-                0.0
-            } else {
-                ((corner_x / corner_length) * travel_x) + ((corner_y / corner_length) * travel_y)
-            };
-            (index, alignment)
-        })
-        .collect::<Vec<_>>();
-    alignments.sort_by(|left, right| {
-        left.1
-            .partial_cmp(&right.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(left.0.cmp(&right.0))
-    });
-    let mut ranks = [0usize; 4];
-    for (rank, (index, _)) in alignments.into_iter().enumerate() {
-        ranks[index] = rank;
-    }
-    ranks
-}
-
-fn polygon_center(points: [CursorPoint; 4]) -> CursorPoint {
-    CursorPoint {
-        x: points.iter().map(|point| point.x).sum::<f64>() / points.len() as f64,
-        y: points.iter().map(|point| point.y).sum::<f64>() / points.len() as f64,
-    }
-}
-
 fn cursor_alpha(shape: CursorShape) -> f64 {
     match shape {
         CursorShape::Bar => 1.0,
@@ -2345,41 +2380,11 @@ fn cursor_alpha(shape: CursorShape) -> f64 {
     }
 }
 
-#[cfg(test)]
-fn corner_ranks(
-    from: CursorDrawPosition,
-    target: CursorDrawPosition,
-    shape: CursorShape,
-    line_height: f64,
-    cell_width: f64,
-) -> [usize; 4] {
-    let from_center = cursor_center(from, shape, line_height, cell_width);
-    let target_center = cursor_center(target, shape, line_height, cell_width);
-    let travel_x = target_center.x - from_center.x;
-    let travel_y = target_center.y - from_center.y;
-    let travel_length = (travel_x.powi(2) + travel_y.powi(2)).sqrt();
-    if travel_length <= f64::EPSILON {
-        return [0, 1, 2, 3];
+fn neovide_cursor_alpha(shape: CursorShape) -> f64 {
+    match shape {
+        CursorShape::Bar => 1.0,
+        CursorShape::Block => crate::config::cursor_neovide_block_opacity(),
     }
-    let travel_x = travel_x / travel_length;
-    let travel_y = travel_y / travel_length;
-    let relative = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
-    let mut alignments = relative
-        .iter()
-        .enumerate()
-        .map(|(index, (x, y))| (index, (x * travel_x) + (y * travel_y)))
-        .collect::<Vec<_>>();
-    alignments.sort_by(|left, right| {
-        left.1
-            .partial_cmp(&right.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(left.0.cmp(&right.0))
-    });
-    let mut ranks = [0usize; 4];
-    for (rank, (index, _)) in alignments.into_iter().enumerate() {
-        ranks[index] = rank;
-    }
-    ranks
 }
 
 #[cfg(test)]
@@ -3001,6 +3006,25 @@ mod tests {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn neovide_corner_ranks_use_each_corner_position_after_retarget() {
+        let current = [
+            CursorPoint { x: 4.0, y: 1.0 },
+            CursorPoint { x: 8.125, y: 1.0 },
+            CursorPoint { x: 8.125, y: 2.0 },
+            CursorPoint { x: 3.0, y: 2.0 },
+        ];
+        let target = CursorDrawPosition {
+            pane_id: 0,
+            line: 1.0,
+            column: 2.0,
+        };
+
+        let ranks = neovide_corner_ranks_grid(current, target, CursorShape::Bar);
+
+        assert_eq!(ranks, [2, 0, 1, 3]);
     }
 
     #[test]

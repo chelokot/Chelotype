@@ -43,6 +43,25 @@ pub fn active_input_line_range(content: &RenderableContentOwned) -> Option<Selec
     ))
 }
 
+pub fn input_buffer_offset_for_position(
+    content: &RenderableContentOwned,
+    target: MouseGridPosition,
+) -> Option<usize> {
+    let cursor_row = usize::try_from(content.cursor_line).ok()?;
+    let rows = active_wrapped_rows(content, cursor_row)?;
+    let absolute = input_absolute_column(
+        content,
+        rows.clone(),
+        usize::from(target.row),
+        usize::from(target.column),
+    )?;
+    let bounds = wrapped_input_bounds(content, rows)?;
+    if absolute < bounds.start || absolute > bounds.end {
+        return None;
+    }
+    Some(absolute - bounds.start)
+}
+
 pub fn active_cursor_point(content: &RenderableContentOwned) -> Option<GridPoint> {
     Some(GridPoint {
         row: usize::try_from(content.cursor_line).ok()?,
@@ -584,6 +603,42 @@ mod tests {
         );
         assert_eq!(
             keyboard_cursor_bytes(&content, None, MouseGridPosition { row: 0, column: 7 }),
+            None
+        );
+    }
+
+    #[test]
+    fn input_buffer_offset_maps_visual_position_inside_wrapped_input() {
+        let content = wrapped_content_with_cursor(&["❯ abc", "def"], 1, 3);
+
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 0, column: 2 }),
+            Some(0)
+        );
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 0, column: 4 }),
+            Some(2)
+        );
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 1, column: 0 }),
+            Some(3)
+        );
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 1, column: 3 }),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn input_buffer_offset_rejects_prompt_and_output_positions() {
+        let content = wrapped_content_with_cursor(&["❯ abc", "def"], 1, 3);
+
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 0, column: 1 }),
+            None
+        );
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 2, column: 0 }),
             None
         );
     }

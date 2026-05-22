@@ -5,6 +5,11 @@ const FISH_CANDIDATES: [&str; 2] = ["/usr/bin/fish", "/bin/fish"];
 pub const INPUT_UNDO_CAPTURE_SEQUENCE: &[u8] = b"\x1b[57344u";
 pub const INPUT_UNDO_SEQUENCE: &[u8] = b"\x1b[57345u";
 pub const INPUT_REDO_SEQUENCE: &[u8] = b"\x1b[57346u";
+pub const INPUT_CURSOR_TARGET_SEQUENCE: &[u8] = b"\x1b[57347u";
+pub const INPUT_CURSOR_BRIDGE_ENV: &str = "CHELOTYPE_INPUT_CURSOR_BRIDGE";
+pub const INPUT_CURSOR_BRIDGE_FISH: &str = "fish";
+pub const INPUT_CURSOR_TARGET_FILE_ENV: &str = "CHELOTYPE_CURSOR_TARGET_FILE";
+pub const INPUT_CURSOR_TARGET_FILE_PLACEHOLDER: &str = "__CHELOTYPE_CURSOR_TARGET_FILE__";
 
 const FISH_CHELOTYPE_INIT: &str = "\
 functions -q fish_prompt; and functions -c fish_prompt __chelotype_user_fish_prompt
@@ -44,12 +49,23 @@ function __chelotype_redo
     set -e __chelotype_redo_cursors[$count]
     commandline -f repaint
 end
+function __chelotype_move_cursor_to_target
+    set -l target_file $CHELOTYPE_CURSOR_TARGET_FILE
+    test -n \"$target_file\"; or return
+    test -f \"$target_file\"; or return
+    set -l target (string trim < \"$target_file\")
+    string match -qr '^[0-9]+$' -- $target; or return
+    commandline -C $target
+    commandline -f repaint
+end
 bind \\e\\[57344u __chelotype_capture_undo
 bind -M insert \\e\\[57344u __chelotype_capture_undo
 bind \\e\\[57345u __chelotype_undo
 bind -M insert \\e\\[57345u __chelotype_undo
 bind \\e\\[57346u __chelotype_redo
-bind -M insert \\e\\[57346u __chelotype_redo";
+bind -M insert \\e\\[57346u __chelotype_redo
+bind \\e\\[57347u __chelotype_move_cursor_to_target
+bind -M insert \\e\\[57347u __chelotype_move_cursor_to_target";
 
 pub fn default_shell_command() -> CommandBuilder {
     default_shell_command_with_size(None)
@@ -104,6 +120,9 @@ fn shell_command_for_path_with_size(path: &str, size: Option<ScreenSize>) -> Com
     let argv = shell_argv_for_path(path);
     let mut command = crate::host::command_builder_with_size(&argv[0], size);
     command.args(&argv[1..]);
+    if is_fish_path(path) {
+        command.env(INPUT_CURSOR_BRIDGE_ENV, INPUT_CURSOR_BRIDGE_FISH);
+    }
     command
 }
 
@@ -179,6 +198,10 @@ mod tests {
                 OsStr::new(FISH_CHELOTYPE_INIT),
             ]
         );
+        assert_eq!(
+            command.get_env(INPUT_CURSOR_BRIDGE_ENV),
+            Some(OsStr::new("fish"))
+        );
     }
 
     #[test]
@@ -191,6 +214,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(argv, vec![OsStr::new("/bin/bash")]);
+        assert_eq!(command.get_env(INPUT_CURSOR_BRIDGE_ENV), None);
     }
 
     #[test]
@@ -204,6 +228,7 @@ mod tests {
         assert!(line.starts_with("'/usr/bin/fish' '--init-command' 'functions -q fish_prompt"));
         assert!(line.contains("__chelotype_user_fish_prompt"));
         assert!(line.contains("__chelotype_redo"));
+        assert!(line.contains("__chelotype_move_cursor_to_target"));
     }
 
     #[test]

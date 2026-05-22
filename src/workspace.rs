@@ -406,6 +406,10 @@ impl TerminalWorkspace {
         self.active_pane_mut().write(data)
     }
 
+    pub fn write_active_input_cursor_target(&mut self, offset: usize) -> io::Result<bool> {
+        self.active_pane_mut().write_input_cursor_target(offset)
+    }
+
     pub fn resize_active(&mut self, size: ScreenSize) -> io::Result<()> {
         self.active_pane_mut().resize(size)
     }
