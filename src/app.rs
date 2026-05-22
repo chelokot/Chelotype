@@ -2961,7 +2961,9 @@ fn show_preferences_dialog(
         "applications-graphics-symbolic",
     );
     stack.set_visible_child_name("cursor");
-    if preference_geometry_trace.is_some() {
+    if preference_geometry_trace.is_some()
+        && environment_value("CHELOTYPE_PREFERENCES_GEOMETRY_PAGE").as_deref() != Some("cursor")
+    {
         stack.set_visible_child_name("appearance");
     }
 
@@ -3028,6 +3030,9 @@ fn write_preferences_geometry_trace(window: &adw::Window, path: &str) {
         ("card", "chelotype-scrolling-instant-card"),
         ("terminal", "chelotype-scrolling-instant-preview"),
         ("label", "chelotype-scrolling-instant-label"),
+        ("animation_speed", "chelotype-animation-speed-row"),
+        ("advanced", "chelotype-advanced-animation-settings"),
+        ("cursor_blinking", "chelotype-cursor-blinking-row"),
     ] {
         let Some(widget) = find_named_widget(root, widget_name) else {
             output.push_str(&format!("{name}=missing\n"));
@@ -3106,12 +3111,19 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         crate::config::cursor_style(),
         canvas.clone(),
     );
-    group.add(&animation_settings_group.container);
+    let cursor_options = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .build();
+    let cursor_blinking_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    cursor_blinking_list.append(&cursor_blinking_row(canvas.clone()));
+    cursor_options.append(&animation_settings_group.container);
+    cursor_options.append(&cursor_blinking_list);
+    group.add(&cursor_options);
     page.add(&group);
-
-    let behavior_group = adw::PreferencesGroup::builder().build();
-    behavior_group.add(&cursor_blinking_row(canvas.clone()));
-    page.add(&behavior_group);
     page
 }
 
@@ -3690,6 +3702,7 @@ fn cursor_blinking_row(canvas: TerminalCanvas) -> adw::ComboRow {
         .model(&model)
         .selected(crate::config::cursor_blinking().selected_index())
         .build();
+    row.set_widget_name("chelotype-cursor-blinking-row");
     row.connect_selected_notify(move |row| {
         let mode = crate::config::CursorBlinking::from_selected_index(row.selected());
         crate::config::write_value("cursor_blinking", mode.config_value());
@@ -4613,6 +4626,7 @@ fn populate_animation_settings(
             .selection_mode(gtk::SelectionMode::None)
             .css_classes(["boxed-list"])
             .build();
+        advanced_list.set_widget_name("chelotype-advanced-animation-settings");
         advanced_list.append(&advanced_expander);
         container.add(&advanced_list);
     }
@@ -4637,6 +4651,9 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
         .margin_top(12)
         .margin_bottom(12)
         .build();
+    if spec.title == "Animation speed" {
+        row.set_widget_name("chelotype-animation-speed-row");
+    }
     let header = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)

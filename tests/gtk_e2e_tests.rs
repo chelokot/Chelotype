@@ -534,6 +534,95 @@ fn gtk_e2e_lays_out_scrolling_preview_card_spacing_under_xvfb() {
 
 #[test]
 #[serial]
+fn gtk_e2e_lays_out_cursor_animation_settings_spacing_under_xvfb() {
+    if !has_command("xvfb-run") {
+        eprintln!("skipping gtk cursor settings layout e2e because xvfb-run is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-cursor-layout-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+
+    let run_case = |style: &str| {
+        let case_dir = dir.join(style);
+        let config_home = case_dir.join("config");
+        let config_dir = config_home.join("chelotype");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("config"),
+            format!("cursor_style={style}\nfirst_launch_preferences_shown=true\n"),
+        )
+        .expect("write config");
+        let geometry_trace = case_dir.join("preferences-geometry.env");
+
+        let output = Command::new("xvfb-run")
+            .args([
+                "-a",
+                "-s",
+                "-screen 0 1920x1080x24",
+                env!("CARGO_BIN_EXE_chelotype"),
+            ])
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("GDK_BACKEND", "x11")
+            .env("GSETTINGS_BACKEND", "memory")
+            .env("NO_AT_BRIDGE", "1")
+            .env("CHELOTYPE_SHELL", "/bin/sh")
+            .env("CHELOTYPE_MEDIA_OPEN_PREFERENCES", "1")
+            .env("CHELOTYPE_MEDIA_PREFERENCES_HEIGHT", "760")
+            .env("CHELOTYPE_PREFERENCES_GEOMETRY_TRACE", &geometry_trace)
+            .env("CHELOTYPE_PREFERENCES_GEOMETRY_PAGE", "cursor")
+            .env("CHELOTYPE_PREFERENCES_GEOMETRY_EXIT", "1")
+            .output()
+            .expect("run gtk cursor settings layout e2e under xvfb");
+
+        assert!(
+            output.status.success(),
+            "gtk cursor settings layout e2e failed for {style}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_clean_gtk_stderr(&stderr);
+        geometry_trace
+    };
+
+    let smooth_trace = run_case("smooth");
+    let smooth_geometry = read_to_string(&smooth_trace).expect("read smooth geometry trace");
+    assert!(
+        smooth_geometry
+            .lines()
+            .any(|line| line == "advanced=missing"),
+        "smooth cursor settings should not show advanced settings: {smooth_geometry}"
+    );
+    assert_eq!(
+        geometry_metric(&smooth_trace, "cursor_blinking.y_min")
+            - geometry_metric(&smooth_trace, "animation_speed.y_max"),
+        24.0
+    );
+
+    let neovide_trace = run_case("neovide");
+    assert_eq!(
+        geometry_metric(&neovide_trace, "advanced.y_min")
+            - geometry_metric(&neovide_trace, "animation_speed.y_max"),
+        24.0
+    );
+    assert_eq!(
+        geometry_metric(&neovide_trace, "cursor_blinking.y_min")
+            - geometry_metric(&neovide_trace, "advanced.y_max"),
+        24.0
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_exports_unicode_grapheme_and_width_cells_under_xvfb() {
     if !has_command("xvfb-run") {
         eprintln!("skipping gtk unicode e2e because xvfb-run is not installed");
