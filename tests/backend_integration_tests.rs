@@ -35,23 +35,20 @@ fn chelotype_fish_command() -> Option<CommandBuilder> {
         .into_iter()
         .find(|path| std::path::Path::new(path).is_file())
         .map(|path| {
-            let mut command = CommandBuilder::new(path);
-            command.arg("--init-command");
-            command.arg(
-                r#"
-function __chelotype_move_cursor_to_target
-    set -l target_file $CHELOTYPE_CURSOR_TARGET_FILE
-    test -n "$target_file"; or return
-    test -f "$target_file"; or return
-    set -l target (string trim < "$target_file")
-    string match -qr '^[0-9]+$' -- $target; or return
-    commandline -C $target
-end
-bind \e\[57347u __chelotype_move_cursor_to_target
-bind -M insert \e\[57347u __chelotype_move_cursor_to_target
-"#,
-            );
-            command.env("CHELOTYPE_INPUT_CURSOR_BRIDGE", "fish");
+            let previous_shell = std::env::var_os("CHELOTYPE_SHELL");
+            unsafe {
+                std::env::set_var("CHELOTYPE_SHELL", path);
+            }
+            let command = chelotype::shell::default_shell_command();
+            if let Some(previous_shell) = previous_shell {
+                unsafe {
+                    std::env::set_var("CHELOTYPE_SHELL", previous_shell);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var("CHELOTYPE_SHELL");
+                }
+            }
             command
         })
 }
@@ -199,6 +196,69 @@ fn backend_fish_cursor_target_bridge_moves_commandline_cursor_directly() {
 
     assert_eq!(snapshot.cursor_col, 4);
     let _ = backend.write(b"\x15exit\n");
+}
+
+#[test]
+#[serial]
+fn backend_fish_cursor_target_bridge_replaces_long_wrapped_input() {
+    let Some(command) = chelotype_fish_command() else {
+        eprintln!("skipping fish cursor target bridge test because fish is not installed");
+        return;
+    };
+
+    let mut backend =
+        TerminalBackend::spawn_with_size(command, ScreenSize::new(80, 24).expect("valid size"))
+            .expect("spawn fish");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| snapshot.cursor_visible);
+    let input = "a".repeat(1024);
+    backend
+        .write(input.as_bytes())
+        .expect("write long fish input");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_text(snapshot).contains("aaaaaaaaaaaaaaaa")
+    });
+    assert!(
+        backend
+            .write_input_cursor_target(0)
+            .expect("write cursor target"),
+        "fish backend should expose cursor target bridge"
+    );
+    let mut replacement = Vec::with_capacity(1024 * 4 + 7);
+    for _ in 0..1024 {
+        replacement.extend_from_slice(b"\x1b[3~");
+    }
+    replacement.extend_from_slice(b"PASTE");
+    backend.write(&replacement).expect("replace long input");
+
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        let text = snapshot_text(snapshot);
+        text.contains("PASTE") && !text.contains("aaaaaaaaaaaaaaaa")
+    });
+
+    assert!(snapshot_text(&snapshot).contains("PASTE"));
+    let _ = backend.write(b"\x15exit\n");
+}
+
+#[test]
+#[serial]
+fn backend_fish_accepts_bracketed_paste() {
+    let Some(command) = chelotype_fish_command() else {
+        eprintln!("skipping fish bracketed paste test because fish is not installed");
+        return;
+    };
+
+    let mut backend = TerminalBackend::spawn(command).expect("spawn fish");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| snapshot.cursor_visible);
+
+    backend
+        .write(b"\x1b[200~printf 'BRACKETED_PASTE_OK\\n'\x1b[201~\n")
+        .expect("write bracketed paste command");
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_contains(snapshot, "BRACKETED_PASTE_OK")
+    });
+
+    assert!(snapshot_contains(&snapshot, "BRACKETED_PASTE_OK"));
+    let _ = backend.write(b"exit\n");
 }
 
 #[test]

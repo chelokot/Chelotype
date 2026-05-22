@@ -316,7 +316,51 @@ fn active_semantic_prompt_rows(
     {
         return None;
     }
-    Some(start..=cursor_row)
+    let editable_start =
+        semantic_prompt_editable_start(content, start, cursor_row).unwrap_or(start);
+    Some(editable_start..=cursor_row)
+}
+
+fn semantic_prompt_editable_start(
+    content: &TerminalContent,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    (start..=end).find(|row| {
+        content
+            .lines
+            .get(*row)
+            .is_some_and(|line| prompt_leader_before_input(line))
+    })
+}
+
+fn prompt_leader_before_input(line: &[crate::terminal_grid::TerminalCell]) -> bool {
+    let Some(separator) = line
+        .iter()
+        .rposition(|cell| {
+            cell.text != " "
+                || cell.fg.is_some()
+                || cell.bg.is_some()
+                || cell.bold
+                || cell.italic
+                || cell.underline
+                || cell.inverse
+                || cell.strikeout
+                || cell.wide
+                || cell.wide_spacer
+        })
+        .and_then(|last| line.iter().take(last + 1).position(|cell| cell.text == " "))
+    else {
+        return false;
+    };
+    if separator == 0 {
+        return false;
+    }
+    line.get(separator - 1).is_some_and(|cell| {
+        cell.text
+            .chars()
+            .any(|ch| matches!(ch, '❯' | '>' | '$' | '#' | '%' | 'λ' | '➜'))
+    })
 }
 
 fn active_wrapped_rows(
@@ -406,6 +450,15 @@ mod tests {
             sgr: true,
             utf8: false,
         }
+    }
+
+    fn line(text: &str) -> Vec<TerminalCell> {
+        text.chars()
+            .map(|ch| TerminalCell {
+                text: ch.to_string().into(),
+                ..TerminalCell::blank()
+            })
+            .collect()
     }
 
     #[test]
@@ -655,6 +708,41 @@ mod tests {
         );
         assert_eq!(cursor_movement_bytes_for_content(&content, pos(1, 0)), None);
         assert_eq!(cursor_movement_bytes_for_content(&content, pos(0, 3)), None);
+    }
+
+    #[test]
+    fn cursor_movement_skips_decorative_semantic_prompt_header() {
+        let content = TerminalContent {
+            lines: vec![
+                line("~/Documents/Projects/Chelotype on main"),
+                line("❯ abc"),
+            ],
+            line_metadata: vec![
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Prompt,
+                    ..TerminalLineMetadata::default()
+                },
+                TerminalLineMetadata {
+                    semantic_prompt: TerminalSemanticPrompt::Continuation,
+                    ..TerminalLineMetadata::default()
+                },
+            ],
+            cursor_line: 1,
+            cursor_col: 5,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        };
+
+        assert_eq!(
+            cursor_movement_bytes_for_content(&content, pos(2, 1)).as_deref(),
+            Some(&b"\x1b[D\x1b[D\x1b[D"[..])
+        );
+        assert_eq!(
+            cursor_movement_bytes_for_content(&content, pos(10, 0)),
+            None
+        );
     }
 
     #[test]

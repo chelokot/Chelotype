@@ -1,6 +1,6 @@
 [package]
 name = "chelotype"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 description = "Opinionated GTK terminal"
 repository = "https://github.com/chelokot/Chelotype"

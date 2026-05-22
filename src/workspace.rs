@@ -410,6 +410,10 @@ impl TerminalWorkspace {
         self.active_pane_mut().write_input_cursor_target(offset)
     }
 
+    pub fn active_bracketed_paste_mode(&mut self) -> bool {
+        self.active_pane_mut().bracketed_paste_mode()
+    }
+
     pub fn resize_active(&mut self, size: ScreenSize) -> io::Result<()> {
         self.active_pane_mut().resize(size)
     }

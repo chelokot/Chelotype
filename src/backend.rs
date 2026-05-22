@@ -1,7 +1,7 @@
 use crate::cell_text::cells_to_text;
 use crate::ghostty_snapshot::GhosttySnapshotter;
 pub use crate::terminal_grid::{MouseMode, TerminalContent as RenderableContentOwned};
-use libghostty_vt::terminal::ScrollViewport;
+use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{Terminal, TerminalOptions};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::cell::RefCell;
@@ -178,6 +178,11 @@ impl TerminalBackend {
         std::fs::write(path, offset.to_string())?;
         self.write(crate::shell::INPUT_CURSOR_TARGET_SEQUENCE)?;
         Ok(true)
+    }
+
+    pub fn bracketed_paste_mode(&mut self) -> bool {
+        let _ = self.process_pending();
+        self.terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
 
     pub fn resize(&mut self, size: ScreenSize) -> std::io::Result<()> {

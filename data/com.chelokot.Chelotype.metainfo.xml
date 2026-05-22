@@ -37,6 +37,11 @@
     <binary>chelotype</binary>
   </provides>
   <releases>
+    <release version="0.1.15" date="2026-05-22">
+      <description>
+        <p>Adds Snappy cursor motion, improves multiline input editing, and expands Neovide cursor tuning.</p>
+      </description>
+    </release>
     <release version="0.1.14" date="2026-05-22">
       <description>
         <p>Polishes cursor preference spacing and keeps preview-card layout covered by GTK geometry tests.</p>

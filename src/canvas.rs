@@ -1326,7 +1326,6 @@ struct CursorMotionState {
     started_at: Option<Instant>,
     last_updated_at: Option<Instant>,
     neovide_corners: [NeovideCornerMotion; 4],
-    smear_rect: SmearRectMotion,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1366,19 +1365,6 @@ struct NeovideCornerMotion {
     animation_duration: Duration,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct SmearRectMotion {
-    left: f64,
-    right: f64,
-    top: f64,
-    velocity_left: f64,
-    velocity_right: f64,
-    velocity_top: f64,
-    target_left: f64,
-    target_right: f64,
-    target_top: f64,
-}
-
 impl Default for AxisSpring {
     fn default() -> Self {
         Self {
@@ -1400,22 +1386,6 @@ impl Default for NeovideCornerMotion {
     }
 }
 
-impl Default for SmearRectMotion {
-    fn default() -> Self {
-        Self {
-            left: 0.0,
-            right: 1.0,
-            top: 0.0,
-            velocity_left: 0.0,
-            velocity_right: 0.0,
-            velocity_top: 0.0,
-            target_left: 0.0,
-            target_right: 1.0,
-            target_top: 0.0,
-        }
-    }
-}
-
 impl Default for CursorMotionState {
     fn default() -> Self {
         Self {
@@ -1430,7 +1400,6 @@ impl Default for CursorMotionState {
             started_at: None,
             last_updated_at: None,
             neovide_corners: [NeovideCornerMotion::default(); 4],
-            smear_rect: SmearRectMotion::default(),
         }
     }
 }
@@ -1530,12 +1499,10 @@ impl CursorMotionState {
             started_at: Some(now),
             last_updated_at: Some(now),
             neovide_corners: current_state.neovide_corners,
-            smear_rect: current_state.smear_rect,
         };
         match style {
             CursorStyle::Neovide => next.sync_neovide_target(target, shape),
-            CursorStyle::Smear => next.sync_smear_target(target, shape),
-            CursorStyle::Smooth | CursorStyle::Steady => {}
+            CursorStyle::Smooth | CursorStyle::Snappy | CursorStyle::Steady => {}
         }
         next
     }
@@ -1560,7 +1527,6 @@ impl CursorMotionState {
             started_at: None,
             last_updated_at: Some(now),
             neovide_corners,
-            smear_rect: SmearRectMotion::settled(target, shape),
         }
     }
 
@@ -1576,13 +1542,6 @@ impl CursorMotionState {
                 column: top_left.x,
             });
         }
-        if self.style == CursorStyle::Smear {
-            return Some(CursorDrawPosition {
-                pane_id: self.pane_id,
-                line: self.smear_rect.top,
-                column: self.smear_rect.left,
-            });
-        }
         let Some(progress) = self.progress(now) else {
             return Some(CursorDrawPosition {
                 pane_id: self.pane_id,
@@ -1590,7 +1549,12 @@ impl CursorMotionState {
                 column: self.to_column,
             });
         };
-        let eased = 1.0 - (1.0 - progress).powi(3);
+        let eased = match self.style {
+            CursorStyle::Snappy => snappy_cursor_progress(progress),
+            CursorStyle::Smooth | CursorStyle::Steady | CursorStyle::Neovide => {
+                smooth_cursor_progress(progress)
+            }
+        };
         Some(CursorDrawPosition {
             pane_id: self.pane_id,
             line: self.from_line + ((self.to_line - self.from_line) * eased),
@@ -1631,8 +1595,9 @@ impl CursorMotionState {
     fn active(self, now: Instant) -> bool {
         match self.style {
             CursorStyle::Neovide => self.neovide_corners.iter().any(|corner| corner.active()),
-            CursorStyle::Smear => self.smear_rect.active(),
-            CursorStyle::Smooth => self.progress(now).is_some_and(|progress| progress < 1.0),
+            CursorStyle::Smooth | CursorStyle::Snappy => {
+                self.progress(now).is_some_and(|progress| progress < 1.0)
+            }
             CursorStyle::Steady => false,
         }
     }
@@ -1701,8 +1666,7 @@ impl CursorMotionState {
         };
         match self.style {
             CursorStyle::Neovide => next.advance_neovide(dt, shape),
-            CursorStyle::Smear => next.advance_smear(dt, shape),
-            CursorStyle::Smooth | CursorStyle::Steady => {}
+            CursorStyle::Smooth | CursorStyle::Snappy | CursorStyle::Steady => {}
         }
         next
     }
@@ -1712,7 +1676,9 @@ impl CursorMotionState {
             x: target.column - self.from_column,
             y: target.line - self.from_line,
         };
-        let short_jump = jump_vec.x.abs() <= 2.001 && jump_vec.y.abs() <= 0.001;
+        let short_jump = jump_vec.x.abs()
+            <= crate::config::cursor_neovide_short_jump_distance() + 0.001
+            && jump_vec.y.abs() <= 0.001;
         let target_corners = cursor_corners_grid(target, shape);
         let ranks = neovide_corner_ranks_grid(self.neovide_points_grid(), target, shape);
         for (index, corner) in self.neovide_corners.iter_mut().enumerate() {
@@ -1736,23 +1702,19 @@ impl CursorMotionState {
     fn neovide_points_grid(self) -> [CursorPoint; 4] {
         self.neovide_corners.map(|corner| corner.current)
     }
-
-    fn sync_smear_target(&mut self, target: CursorDrawPosition, shape: CursorShape) {
-        self.smear_rect
-            .sync_target(target, shape, !self.smear_rect.active());
-    }
-
-    fn advance_smear(&mut self, dt: Duration, shape: CursorShape) {
-        self.smear_rect.advance(dt, shape);
-    }
-
-    fn smear_points_grid(self, shape: CursorShape) -> [CursorPoint; 4] {
-        self.smear_rect.limited_points(shape)
-    }
 }
 
 fn cursor_animation_duration() -> Duration {
     Duration::from_millis(u64::from(crate::config::cursor_animation_duration_ms()))
+}
+
+fn smooth_cursor_progress(progress: f64) -> f64 {
+    1.0 - (1.0 - progress).powi(3)
+}
+
+fn snappy_cursor_progress(progress: f64) -> f64 {
+    let root = progress.cbrt();
+    3.0 * root - (3.0 * root * root) + progress
 }
 
 fn neovide_short_animation_duration() -> Duration {
@@ -1853,203 +1815,6 @@ impl AxisSpring {
     }
 }
 
-impl SmearRectMotion {
-    fn settled(target: CursorDrawPosition, shape: CursorShape) -> Self {
-        let rect = cursor_rect_grid(target, shape);
-        Self {
-            left: rect.left,
-            right: rect.right,
-            top: rect.top,
-            velocity_left: 0.0,
-            velocity_right: 0.0,
-            velocity_top: 0.0,
-            target_left: rect.left,
-            target_right: rect.right,
-            target_top: rect.top,
-        }
-    }
-
-    fn sync_target(&mut self, target: CursorDrawPosition, shape: CursorShape, initial_jump: bool) {
-        let rect = cursor_rect_grid(target, shape);
-        if self.target_left == rect.left
-            && self.target_right == rect.right
-            && self.target_top == rect.top
-        {
-            return;
-        }
-        self.target_left = rect.left;
-        self.target_right = rect.right;
-        self.target_top = rect.top;
-        if initial_jump {
-            let anticipation = crate::config::cursor_smear_anticipation();
-            self.velocity_left = (self.left - self.target_left) * anticipation;
-            self.velocity_right = (self.right - self.target_right) * anticipation;
-            self.velocity_top = (self.top - self.target_top) * anticipation;
-        }
-    }
-
-    fn advance(&mut self, dt: Duration, shape: CursorShape) {
-        let dt_ms = dt.as_secs_f64() * 1000.0;
-        if dt_ms <= 0.0 {
-            return;
-        }
-        let target_center = (self.target_left + self.target_right) * 0.5;
-        let head_stiffness = crate::config::cursor_smear_stiffness();
-        let tail_stiffness = crate::config::cursor_smear_trailing_stiffness();
-        let exponent = crate::config::cursor_smear_trailing_exponent();
-        let left_distance = (self.left - target_center).abs();
-        let right_distance = (self.right - target_center).abs();
-        let min_distance = left_distance.min(right_distance);
-        let max_distance = left_distance.max(right_distance);
-        let left_side_stiffness = smear_stiffness_for_distance(
-            left_distance,
-            min_distance,
-            max_distance,
-            head_stiffness,
-            tail_stiffness,
-            exponent,
-        );
-        let right_side_stiffness = smear_stiffness_for_distance(
-            right_distance,
-            min_distance,
-            max_distance,
-            head_stiffness,
-            tail_stiffness,
-            exponent,
-        );
-        let damping = crate::config::cursor_smear_damping();
-        smear_axis_step(
-            &mut self.left,
-            &mut self.velocity_left,
-            self.target_left,
-            left_side_stiffness,
-            damping,
-            dt_ms,
-        );
-        smear_axis_step(
-            &mut self.right,
-            &mut self.velocity_right,
-            self.target_right,
-            right_side_stiffness,
-            damping,
-            dt_ms,
-        );
-        smear_axis_step(
-            &mut self.top,
-            &mut self.velocity_top,
-            self.target_top,
-            head_stiffness,
-            damping,
-            dt_ms,
-        );
-        let target_width = cursor_size_cells(shape).0;
-        if self.right < self.left + target_width {
-            let center = (self.left + self.right) * 0.5;
-            self.left = center - (target_width * 0.5);
-            self.right = center + (target_width * 0.5);
-        }
-    }
-
-    fn active(self) -> bool {
-        let max_distance = (self.left - self.target_left)
-            .abs()
-            .max((self.right - self.target_right).abs())
-            .max((self.top - self.target_top).abs());
-        let max_velocity = self
-            .velocity_left
-            .abs()
-            .max(self.velocity_right.abs())
-            .max(self.velocity_top.abs());
-        max_distance > SMEAR_STOP_DISTANCE_CELLS || max_velocity > SMEAR_STOP_DISTANCE_CELLS
-    }
-
-    fn limited_points(self, shape: CursorShape) -> [CursorPoint; 4] {
-        let mut rect = SmearRect {
-            left: self.left,
-            right: self.right,
-            top: self.top,
-            height: cursor_size_cells(shape).1,
-        };
-        let max_width = cursor_size_cells(shape).0 + crate::config::cursor_smear_max_length();
-        if rect.right - rect.left > max_width {
-            let moving_right = (self.target_left + self.target_right) >= (self.left + self.right);
-            if moving_right {
-                rect.left = rect.right - max_width;
-            } else {
-                rect.right = rect.left + max_width;
-            }
-        }
-        rect.points()
-    }
-}
-
-fn smear_axis_step(
-    current: &mut f64,
-    velocity: &mut f64,
-    target: f64,
-    stiffness: f64,
-    damping: f64,
-    dt_ms: f64,
-) {
-    let speed_correction = dt_ms / SMEAR_BASE_FRAME_MS;
-    let velocity_conservation = (1.0 - damping).powf(speed_correction);
-    let damping_correction = 1.0 / (1.0 + (2.5 * velocity_conservation));
-    let effective_stiffness = 1.0 - (1.0 - (stiffness * damping_correction)).powf(speed_correction);
-    *velocity += (target - *current) * effective_stiffness;
-    *current += *velocity;
-    *velocity *= velocity_conservation;
-}
-
-fn smear_stiffness_for_distance(
-    distance: f64,
-    min_distance: f64,
-    max_distance: f64,
-    head_stiffness: f64,
-    trailing_stiffness: f64,
-    trailing_exponent: f64,
-) -> f64 {
-    if (max_distance - min_distance).abs() <= f64::EPSILON {
-        return head_stiffness;
-    }
-    let factor = (distance - min_distance) / (max_distance - min_distance);
-    (head_stiffness + ((trailing_stiffness - head_stiffness) * factor.powf(trailing_exponent)))
-        .min(1.0)
-}
-
-#[derive(Clone, Copy)]
-struct SmearRect {
-    left: f64,
-    right: f64,
-    top: f64,
-    height: f64,
-}
-
-impl SmearRect {
-    fn points(self) -> [CursorPoint; 4] {
-        [
-            CursorPoint {
-                x: self.left,
-                y: self.top,
-            },
-            CursorPoint {
-                x: self.right,
-                y: self.top,
-            },
-            CursorPoint {
-                x: self.right,
-                y: self.top + self.height,
-            },
-            CursorPoint {
-                x: self.left,
-                y: self.top + self.height,
-            },
-        ]
-    }
-}
-
-const SMEAR_BASE_FRAME_MS: f64 = 17.0;
-const SMEAR_STOP_DISTANCE_CELLS: f64 = 0.1;
-
 impl CursorIdentity {
     fn hidden() -> Self {
         Self {
@@ -2103,7 +1868,7 @@ fn draw_cursor(
             line_height,
             cell_width,
         ),
-        CursorStyle::Smooth => draw_caret_at(
+        CursorStyle::Smooth | CursorStyle::Snappy => draw_caret_at(
             context,
             path.map(|path| path.current).unwrap_or(target),
             cursor_options.shape,
@@ -2125,26 +1890,6 @@ fn draw_cursor(
                 );
             }
         }
-        CursorStyle::Smear => {
-            if let Some(motion) = cursor_motion {
-                let points = points_to_pixels(
-                    motion.smear_points_grid(cursor_options.shape),
-                    line_height,
-                    cell_width,
-                );
-                let target_center =
-                    cursor_center(target, cursor_options.shape, line_height, cell_width);
-                draw_smear_points(context, points, target_center, cursor_options.shape);
-            } else {
-                draw_caret_at(
-                    context,
-                    target,
-                    cursor_options.shape,
-                    line_height,
-                    cell_width,
-                );
-            }
-        }
     }
 }
 
@@ -2155,35 +1900,6 @@ fn draw_neovide_points(context: &cairo::Context, points: [CursorPoint; 4], shape
         252.0 / 255.0,
         neovide_cursor_alpha(shape),
     );
-    draw_cursor_polygon(context, points);
-}
-
-fn draw_smear_points(
-    context: &cairo::Context,
-    points: [CursorPoint; 4],
-    target_center: CursorPoint,
-    shape: CursorShape,
-) {
-    let mut head = points[0];
-    let mut tail = points[0];
-    for point in points {
-        if squared_distance(point, target_center) < squared_distance(head, target_center) {
-            head = point;
-        }
-        if squared_distance(point, target_center) > squared_distance(tail, target_center) {
-            tail = point;
-        }
-    }
-    let gradient = cairo::LinearGradient::new(head.x, head.y, tail.x, tail.y);
-    gradient.add_color_stop_rgba(
-        0.0,
-        125.0 / 255.0,
-        211.0 / 255.0,
-        252.0 / 255.0,
-        cursor_alpha(shape),
-    );
-    gradient.add_color_stop_rgba(1.0, 125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, 0.16);
-    let _ = context.set_source(&gradient);
     draw_cursor_polygon(context, points);
 }
 
@@ -2243,6 +1959,7 @@ fn cursor_corners(
     ]
 }
 
+#[cfg(test)]
 fn cursor_center(
     position: CursorDrawPosition,
     shape: CursorShape,
@@ -2348,18 +2065,26 @@ fn normalize_point(point: CursorPoint) -> CursorPoint {
     }
 }
 
-fn cursor_rect_grid(position: CursorDrawPosition, shape: CursorShape) -> SmearRect {
-    let (width, height) = cursor_size_cells(shape);
-    SmearRect {
-        left: position.column,
-        right: position.column + width,
-        top: position.line,
-        height,
-    }
-}
-
 fn cursor_corners_grid(position: CursorDrawPosition, shape: CursorShape) -> [CursorPoint; 4] {
-    cursor_rect_grid(position, shape).points()
+    let (width, height) = cursor_size_cells(shape);
+    [
+        CursorPoint {
+            x: position.column,
+            y: position.line,
+        },
+        CursorPoint {
+            x: position.column + width,
+            y: position.line,
+        },
+        CursorPoint {
+            x: position.column + width,
+            y: position.line + height,
+        },
+        CursorPoint {
+            x: position.column,
+            y: position.line + height,
+        },
+    ]
 }
 
 fn points_to_pixels(
@@ -2371,13 +2096,6 @@ fn points_to_pixels(
         x: point.x * cell_width,
         y: point.y * line_height,
     })
-}
-
-fn cursor_alpha(shape: CursorShape) -> f64 {
-    match shape {
-        CursorShape::Bar => 1.0,
-        CursorShape::Block => 0.72,
-    }
 }
 
 fn neovide_cursor_alpha(shape: CursorShape) -> f64 {
@@ -2403,10 +2121,6 @@ fn lerp_point(from: CursorPoint, target: CursorPoint, progress: f64) -> CursorPo
         x: from.x + ((target.x - from.x) * progress),
         y: from.y + ((target.y - from.y) * progress),
     }
-}
-
-fn squared_distance(left: CursorPoint, right: CursorPoint) -> f64 {
-    (left.x - right.x).powi(2) + (left.y - right.y).powi(2)
 }
 
 fn draw_cursor_polygon(context: &cairo::Context, points: [CursorPoint; 4]) {
@@ -2814,100 +2528,130 @@ mod tests {
     }
 
     #[test]
-    fn cursor_motion_exposes_trail_path_for_smear_styles() {
-        let start = Instant::now();
-        let first = CursorIdentity {
-            pane_id: 7,
-            line: 2,
-            column: 4,
-            visible: true,
-        };
-        let second = CursorIdentity {
-            line: 3,
-            column: 14,
-            ..first
-        };
-
-        let state =
-            CursorMotionState::default().sync(first, start, CursorStyle::Smear, CursorShape::Bar);
-        let moved = state.sync(
-            second,
-            start + Duration::from_millis(1),
-            CursorStyle::Smear,
-            CursorShape::Bar,
-        );
-        let path = moved
-            .path(start + Duration::from_millis(1) + (cursor_animation_duration() / 2))
-            .expect("cursor trail path");
-        let points = moved
-            .advance(start + Duration::from_millis(18), CursorShape::Bar)
-            .smear_points_grid(CursorShape::Bar);
-
-        assert_eq!(path.from.pane_id, 7);
-        assert_eq!(path.target.column, 14.0);
-        assert_eq!(points[0].x, points[3].x, "{points:?}");
-        assert_eq!(points[1].x, points[2].x, "{points:?}");
-        assert_eq!(points[0].y, points[1].y, "{points:?}");
-        assert_eq!(points[2].y, points[3].y, "{points:?}");
-        assert!((points[2].y - points[0].y - 1.0).abs() < f64::EPSILON);
-        assert!(points[1].x > points[0].x, "{points:?}");
-        assert_eq!(moved.for_pane(7), Some(moved));
-        assert_eq!(moved.for_pane(8), None);
+    fn snappy_cursor_progress_matches_ninja_curve() {
+        let cases = [
+            (0.0, 0.0),
+            (0.02, 0.6132833950600489),
+            (0.05, 0.7480468071028801),
+            (0.1, 0.8461462430742686),
+            (0.2, 0.9284250749217013),
+            (0.5, 0.9912200031099894),
+            (1.0, 1.0),
+        ];
+        for (progress, expected) in cases {
+            assert!(
+                (snappy_cursor_progress(progress) - expected).abs() < 1e-12,
+                "{progress}"
+            );
+        }
     }
 
     #[test]
-    fn smear_motion_keeps_axis_aligned_rect_across_frames_and_retargets() {
+    #[serial]
+    fn snappy_cursor_motion_reaches_target_faster_than_smooth() {
+        let dir = temp_config_dir("snappy-reaches-target");
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
         let start = Instant::now();
         let first = CursorIdentity {
             pane_id: 7,
-            line: 2,
-            column: 4,
+            line: 1,
+            column: 0,
             visible: true,
         };
         let second = CursorIdentity {
-            line: 4,
-            column: 24,
+            column: 100,
+            ..first
+        };
+
+        let smooth = CursorMotionState::default()
+            .sync(first, start, CursorStyle::Smooth, CursorShape::Bar)
+            .sync(
+                second,
+                start + Duration::from_millis(1),
+                CursorStyle::Smooth,
+                CursorShape::Bar,
+            );
+        let snappy = CursorMotionState::default()
+            .sync(first, start, CursorStyle::Snappy, CursorShape::Bar)
+            .sync(
+                second,
+                start + Duration::from_millis(1),
+                CursorStyle::Snappy,
+                CursorShape::Bar,
+            );
+        let sample_at = start + Duration::from_millis(1) + (cursor_animation_duration() / 10);
+        let smooth_position = smooth
+            .position(sample_at)
+            .expect("smooth cursor position")
+            .column;
+        let snappy_position = snappy
+            .position(sample_at)
+            .expect("snappy cursor position")
+            .column;
+
+        assert!(smooth_position > 0.0);
+        assert!(snappy_position > 80.0, "{snappy_position}");
+        assert!(
+            snappy_position > smooth_position,
+            "{smooth_position} {snappy_position}"
+        );
+        assert_eq!(snappy.for_pane(7), Some(snappy));
+        assert_eq!(snappy.for_pane(8), None);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn snappy_cursor_motion_retargets_from_current_position() {
+        let dir = temp_config_dir("snappy-retarget");
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+        let start = Instant::now();
+        let first = CursorIdentity {
+            pane_id: 7,
+            line: 1,
+            column: 0,
+            visible: true,
+        };
+        let second = CursorIdentity {
+            column: 80,
             ..first
         };
         let third = CursorIdentity {
-            line: 7,
-            column: 1,
+            column: 12,
             ..first
         };
 
-        let state =
-            CursorMotionState::default().sync(first, start, CursorStyle::Smear, CursorShape::Bar);
-        let moved = state.sync(
-            second,
-            start + Duration::from_millis(1),
-            CursorStyle::Smear,
-            CursorShape::Bar,
-        );
-        for offset_ms in [2, 18, 35, 70, 120] {
-            assert_axis_aligned_cursor_points(
-                moved
-                    .advance(start + Duration::from_millis(offset_ms), CursorShape::Bar)
-                    .smear_points_grid(CursorShape::Bar),
-                1.0,
-            );
-        }
-
-        let retargeted = moved
-            .advance(start + Duration::from_millis(35), CursorShape::Bar)
+        let moved = CursorMotionState::default()
+            .sync(first, start, CursorStyle::Snappy, CursorShape::Bar)
             .sync(
-                third,
-                start + Duration::from_millis(36),
-                CursorStyle::Smear,
+                second,
+                start + Duration::from_millis(1),
+                CursorStyle::Snappy,
                 CursorShape::Bar,
             );
-        for offset_ms in [37, 54, 90, 140] {
-            assert_axis_aligned_cursor_points(
-                retargeted
-                    .advance(start + Duration::from_millis(offset_ms), CursorShape::Bar)
-                    .smear_points_grid(CursorShape::Bar),
-                1.0,
-            );
+        let retarget_at = start + Duration::from_millis(1) + (cursor_animation_duration() / 10);
+        let before_retarget = moved
+            .position(retarget_at)
+            .expect("snappy cursor position before retarget");
+        let retargeted = moved.sync(third, retarget_at, CursorStyle::Snappy, CursorShape::Bar);
+        let path = retargeted.path(retarget_at).expect("snappy retarget path");
+
+        assert_eq!(path.from, before_retarget);
+        assert_eq!(path.target.column, 12.0);
+        assert!(path.from.column > path.target.column);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
         }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3028,20 +2772,66 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn neovide_short_jump_distance_controls_fast_path() {
+        let dir = temp_config_dir("neovide-short-jump-distance");
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+        crate::config::write_value("cursor_animation_duration_ms", "120");
+        crate::config::write_value("cursor_neovide_short_animation_duration_ms", "25");
+        let start = Instant::now();
+        let first = CursorIdentity {
+            pane_id: 0,
+            line: 1,
+            column: 1,
+            visible: true,
+        };
+        let second = CursorIdentity { column: 3, ..first };
+
+        crate::config::write_value("cursor_neovide_short_jump_distance", "2");
+        let short = CursorMotionState::default()
+            .sync(first, start, CursorStyle::Neovide, CursorShape::Bar)
+            .sync(
+                second,
+                start + Duration::from_millis(1),
+                CursorStyle::Neovide,
+                CursorShape::Bar,
+            );
+        assert!(
+            short
+                .neovide_corners
+                .iter()
+                .all(|corner| corner.animation_duration <= Duration::from_millis(25))
+        );
+
+        crate::config::write_value("cursor_neovide_short_jump_distance", "1");
+        let long = CursorMotionState::default()
+            .sync(first, start, CursorStyle::Neovide, CursorShape::Bar)
+            .sync(
+                second,
+                start + Duration::from_millis(1),
+                CursorStyle::Neovide,
+                CursorShape::Bar,
+            );
+        assert!(
+            long.neovide_corners
+                .iter()
+                .any(|corner| corner.animation_duration > Duration::from_millis(25))
+        );
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn row_clip_intersection_keeps_partially_visible_rows() {
         assert!(row_intersects_clip(20.0, 10.0, 25.0, 35.0));
         assert!(row_intersects_clip(20.0, 10.0, 30.0, 40.0));
         assert!(row_intersects_clip(20.0, 10.0, 10.0, 20.0));
         assert!(!row_intersects_clip(20.0, 10.0, 30.1, 40.0));
         assert!(!row_intersects_clip(20.0, 10.0, 0.0, 19.9));
-    }
-
-    fn assert_axis_aligned_cursor_points(points: [CursorPoint; 4], expected_height: f64) {
-        assert_eq!(points[0].x, points[3].x, "{points:?}");
-        assert_eq!(points[1].x, points[2].x, "{points:?}");
-        assert_eq!(points[0].y, points[1].y, "{points:?}");
-        assert_eq!(points[2].y, points[3].y, "{points:?}");
-        assert!((points[2].y - points[0].y - expected_height).abs() < 1e-9);
-        assert!(points[1].x >= points[0].x, "{points:?}");
     }
 }

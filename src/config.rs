@@ -2,7 +2,7 @@
 pub enum CursorStyle {
     Steady,
     Smooth,
-    Smear,
+    Snappy,
     Neovide,
 }
 
@@ -21,14 +21,9 @@ pub enum CursorBlinking {
 
 pub const DEFAULT_CURSOR_ANIMATION_DURATION_MS: u32 = 100;
 pub const DEFAULT_NEOVIDE_SHORT_ANIMATION_DURATION_MS: u32 = 40;
+pub const DEFAULT_NEOVIDE_SHORT_JUMP_DISTANCE: f64 = 2.0;
 pub const DEFAULT_NEOVIDE_TRAIL_SIZE: f64 = 0.65;
 pub const DEFAULT_NEOVIDE_BLOCK_OPACITY: f64 = 0.72;
-pub const DEFAULT_SMEAR_STIFFNESS: f64 = 0.6;
-pub const DEFAULT_SMEAR_TRAILING_STIFFNESS: f64 = 0.45;
-pub const DEFAULT_SMEAR_DAMPING: f64 = 0.85;
-pub const DEFAULT_SMEAR_ANTICIPATION: f64 = 0.2;
-pub const DEFAULT_SMEAR_TRAILING_EXPONENT: f64 = 3.0;
-pub const DEFAULT_SMEAR_MAX_LENGTH: f64 = 25.0;
 pub const DEFAULT_SMOOTH_SCROLLING: bool = true;
 pub const DEFAULT_LINE_SPACING: f64 = 1.0;
 pub const DEFAULT_COLUMN_SPACING: f64 = 1.0;
@@ -36,13 +31,13 @@ const MIN_TERMINAL_SPACING: f64 = 0.5;
 const MAX_TERMINAL_SPACING: f64 = 2.0;
 
 impl CursorStyle {
-    pub const ALL: [Self; 4] = [Self::Steady, Self::Smooth, Self::Smear, Self::Neovide];
+    pub const ALL: [Self; 4] = [Self::Steady, Self::Smooth, Self::Snappy, Self::Neovide];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Steady => "Instant",
             Self::Smooth => "Smooth",
-            Self::Smear => "Smear",
+            Self::Snappy => "Snappy",
             Self::Neovide => "Neovide",
         }
     }
@@ -51,7 +46,7 @@ impl CursorStyle {
         match self {
             Self::Steady => "steady",
             Self::Smooth => "smooth",
-            Self::Smear => "smear",
+            Self::Snappy => "snappy",
             Self::Neovide => "neovide",
         }
     }
@@ -75,7 +70,7 @@ impl CursorStyle {
         match value {
             "off" | "steady" => Some(Self::Steady),
             "on" | "smooth" => Some(Self::Smooth),
-            "smear" => Some(Self::Smear),
+            "snappy" => Some(Self::Snappy),
             "neovide" => Some(Self::Neovide),
             _ => None,
         }
@@ -221,10 +216,8 @@ pub fn take_first_launch_preferences() -> bool {
 }
 
 pub fn cursor_style() -> CursorStyle {
-    if let Some(style) =
-        read_value("cursor_style").and_then(|value| CursorStyle::from_config_value(&value))
-    {
-        return style;
+    if let Some(value) = read_value("cursor_style") {
+        return CursorStyle::from_config_value(&value).unwrap_or(CursorStyle::Neovide);
     }
     match read_value("cursor_animation").as_deref() {
         Some("off") => CursorStyle::Steady,
@@ -272,56 +265,21 @@ pub fn cursor_neovide_short_animation_duration_ms() -> u32 {
     )
 }
 
+pub fn cursor_neovide_short_jump_distance() -> f64 {
+    read_f64(
+        "cursor_neovide_short_jump_distance",
+        DEFAULT_NEOVIDE_SHORT_JUMP_DISTANCE,
+        0.0,
+        8.0,
+    )
+}
+
 pub fn cursor_neovide_block_opacity() -> f64 {
     read_f64(
         "cursor_neovide_block_opacity",
         DEFAULT_NEOVIDE_BLOCK_OPACITY,
         0.1,
         1.0,
-    )
-}
-
-pub fn cursor_smear_stiffness() -> f64 {
-    read_f64("cursor_smear_stiffness", DEFAULT_SMEAR_STIFFNESS, 0.05, 1.0)
-}
-
-pub fn cursor_smear_trailing_stiffness() -> f64 {
-    read_f64(
-        "cursor_smear_trailing_stiffness",
-        DEFAULT_SMEAR_TRAILING_STIFFNESS,
-        0.05,
-        1.0,
-    )
-}
-
-pub fn cursor_smear_damping() -> f64 {
-    read_f64("cursor_smear_damping", DEFAULT_SMEAR_DAMPING, 0.0, 0.99)
-}
-
-pub fn cursor_smear_anticipation() -> f64 {
-    read_f64(
-        "cursor_smear_anticipation",
-        DEFAULT_SMEAR_ANTICIPATION,
-        0.0,
-        2.0,
-    )
-}
-
-pub fn cursor_smear_trailing_exponent() -> f64 {
-    read_f64(
-        "cursor_smear_trailing_exponent",
-        DEFAULT_SMEAR_TRAILING_EXPONENT,
-        0.1,
-        8.0,
-    )
-}
-
-pub fn cursor_smear_max_length() -> f64 {
-    read_f64(
-        "cursor_smear_max_length",
-        DEFAULT_SMEAR_MAX_LENGTH,
-        1.0,
-        80.0,
     )
 }
 
@@ -456,9 +414,12 @@ mod tests {
         write_value("cursor_animation", "on");
         assert!(cursor_animation_enabled());
         assert_eq!(cursor_style(), CursorStyle::Smooth);
-        write_value("cursor_style", "smear");
+        write_value("cursor_style", "unknown");
         assert!(cursor_animation_enabled());
-        assert_eq!(cursor_style(), CursorStyle::Smear);
+        assert_eq!(cursor_style(), CursorStyle::Neovide);
+        write_value("cursor_style", "snappy");
+        assert!(cursor_animation_enabled());
+        assert_eq!(cursor_style(), CursorStyle::Snappy);
         write_value("cursor_style", "neovide");
         assert_eq!(cursor_style(), CursorStyle::Neovide);
         write_value("cursor_style", "steady");
@@ -643,12 +604,14 @@ mod tests {
         assert_eq!(cursor_neovide_short_animation_duration_ms(), 10);
         write_value("cursor_neovide_short_animation_duration_ms", "900");
         assert_eq!(cursor_neovide_short_animation_duration_ms(), 150);
+        write_value("cursor_neovide_short_jump_distance", "-1");
+        assert_eq!(cursor_neovide_short_jump_distance(), 0.0);
+        write_value("cursor_neovide_short_jump_distance", "20");
+        assert_eq!(cursor_neovide_short_jump_distance(), 8.0);
         write_value("cursor_neovide_block_opacity", "0");
         assert_eq!(cursor_neovide_block_opacity(), 0.1);
         write_value("cursor_neovide_block_opacity", "2");
         assert_eq!(cursor_neovide_block_opacity(), 1.0);
-        write_value("cursor_smear_damping", "-1");
-        assert_eq!(cursor_smear_damping(), 0.0);
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");

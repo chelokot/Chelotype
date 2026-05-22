@@ -12,7 +12,7 @@ use crate::input_selection::{
     DirectedSelectionRange, active_cursor_point, active_input_line_range,
     cursor_movement_bytes_between_points, directed_selection_for_target,
     input_buffer_offset_for_position, keyboard_cursor_bytes, keyboard_cursor_target,
-    keyboard_selection_collapse_target,
+    keyboard_selection_collapse_target, selection_within_active_input,
 };
 use crate::interaction::{
     InteractionEffect, PointerInteraction, cursor_movement_bytes_between_editable_input_points,
@@ -2518,6 +2518,14 @@ fn paste_clipboard_text(widget: &gtk::DrawingArea, context: PasteClipboardContex
                 return;
             };
             mark_pending_input_latency(&context.pending_input_latency);
+            let shell_bridge_active = context
+                .content
+                .borrow()
+                .as_ref()
+                .is_some_and(shell_input_bridge_active);
+            let bracketed_paste =
+                shell_bridge_active || context.workspace.borrow_mut().active_bracketed_paste_mode();
+            let data = terminal_paste_bytes(bracketed_paste, text.as_bytes());
             write_key_with_selection(
                 &context.workspace,
                 &context.content,
@@ -2525,9 +2533,24 @@ fn paste_clipboard_text(widget: &gtk::DrawingArea, context: PasteClipboardContex
                 &context.selection_text,
                 &context.selection_dirty,
                 &context.keyboard_selection,
-                text.as_bytes().to_vec(),
+                data,
             );
         });
+}
+
+fn terminal_paste_bytes(bracketed_paste: bool, text: &[u8]) -> Vec<u8> {
+    const START: &[u8] = b"\x1b[200~";
+    const END: &[u8] = b"\x1b[201~";
+
+    if bracketed_paste && !text.windows(END.len()).any(|window| window == END) {
+        let mut bytes = Vec::with_capacity(START.len() + text.len() + END.len());
+        bytes.extend_from_slice(START);
+        bytes.extend_from_slice(text);
+        bytes.extend_from_slice(END);
+        bytes
+    } else {
+        text.to_vec()
+    }
 }
 
 #[derive(Clone)]
@@ -2765,9 +2788,12 @@ fn issue_url(debug_info: &str) -> String {
 }
 
 fn release_notes() -> &'static str {
-    "<p>Polishes preference preview cards, scrolling previews, and palette layout.</p>
+    "<p>Adds Snappy cursor motion, improves multiline input editing, and expands Neovide cursor tuning.</p>
     <p>Earlier releases:</p>
     <ul>
+      <li>0.1.14: Cursor preference spacing and preview-card layout geometry tests.</li>
+      <li>0.1.13: Wrapped input selection, mouse drag cursor following, and shell autosuggestion cursor handoff.</li>
+      <li>0.1.12: Polished preference preview cards, scrolling previews, and palette layout.</li>
       <li>0.1.11: Curated palette picker with alphabetical expanded view and search.</li>
       <li>0.1.10: Polished What's New release history layout.</li>
       <li>0.1.9: AppStream-compatible About dialog changelog markup.</li>
@@ -3110,6 +3136,7 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     populate_animation_settings(
         &animation_settings_group,
         crate::config::cursor_style(),
+        crate::config::cursor_shape(),
         canvas.clone(),
     );
     let cursor_options = gtk::Box::builder()
@@ -3749,6 +3776,12 @@ fn populate_cursor_shape_grid(
                     canvas.clone(),
                     animation_settings.clone(),
                 );
+                populate_animation_settings(
+                    &animation_settings,
+                    crate::config::cursor_style(),
+                    shape,
+                    canvas.clone(),
+                );
                 canvas.refresh_cursor_options();
             });
         }
@@ -3790,7 +3823,7 @@ fn populate_cursor_animation_grid(
                         "on"
                     },
                 );
-                populate_animation_settings(&animation_settings, style, canvas.clone());
+                populate_animation_settings(&animation_settings, style, shape, canvas.clone());
                 canvas.refresh_cursor_options();
             });
         }
@@ -4518,6 +4551,7 @@ impl AnimationSettingsGroup {
 fn populate_animation_settings(
     container: &AnimationSettingsGroup,
     style: crate::config::CursorStyle,
+    shape: crate::config::CursorShape,
     canvas: TerminalCanvas,
 ) {
     container.clear();
@@ -4559,7 +4593,7 @@ fn populate_animation_settings(
         crate::config::CursorStyle::Neovide => {
             advanced_content.append(&animation_slider_row(
                 AnimationSliderSpec {
-                    title: "Trail size",
+                    title: "Trail length",
                     key: "cursor_neovide_trail_size",
                     value: crate::config::cursor_neovide_trail_size(),
                     min: 0.0,
@@ -4573,7 +4607,21 @@ fn populate_animation_settings(
             ));
             advanced_content.append(&animation_slider_row(
                 AnimationSliderSpec {
-                    title: "Short jump duration",
+                    title: "Short jump distance",
+                    key: "cursor_neovide_short_jump_distance",
+                    value: crate::config::cursor_neovide_short_jump_distance(),
+                    min: 0.0,
+                    max: 8.0,
+                    step: 0.1,
+                    digits: 1,
+                    unit: "cells",
+                    default: crate::config::DEFAULT_NEOVIDE_SHORT_JUMP_DISTANCE,
+                },
+                canvas.clone(),
+            ));
+            advanced_content.append(&animation_slider_row(
+                AnimationSliderSpec {
+                    title: "Short jump speed",
                     key: "cursor_neovide_short_animation_duration_ms",
                     value: f64::from(crate::config::cursor_neovide_short_animation_duration_ms()),
                     min: 10.0,
@@ -4585,68 +4633,27 @@ fn populate_animation_settings(
                 },
                 canvas.clone(),
             ));
-            advanced_content.append(&animation_slider_row(
-                AnimationSliderSpec {
-                    title: "Block opacity",
-                    key: "cursor_neovide_block_opacity",
-                    value: crate::config::cursor_neovide_block_opacity(),
-                    min: 0.1,
-                    max: 1.0,
-                    step: 0.01,
-                    digits: 2,
-                    unit: "",
-                    default: crate::config::DEFAULT_NEOVIDE_BLOCK_OPACITY,
-                },
-                canvas,
-            ));
+            if shape == crate::config::CursorShape::Block {
+                advanced_content.append(&animation_slider_row(
+                    AnimationSliderSpec {
+                        title: "Block cursor opacity",
+                        key: "cursor_neovide_block_opacity",
+                        value: crate::config::cursor_neovide_block_opacity(),
+                        min: 0.1,
+                        max: 1.0,
+                        step: 0.01,
+                        digits: 2,
+                        unit: "",
+                        default: crate::config::DEFAULT_NEOVIDE_BLOCK_OPACITY,
+                    },
+                    canvas,
+                ));
+            }
             has_advanced_settings = true;
         }
-        crate::config::CursorStyle::Smear => {
-            advanced_content.append(&animation_slider_row(
-                AnimationSliderSpec {
-                    title: "Head stiffness",
-                    key: "cursor_smear_stiffness",
-                    value: crate::config::cursor_smear_stiffness(),
-                    min: 0.05,
-                    max: 1.0,
-                    step: 0.01,
-                    digits: 2,
-                    unit: "",
-                    default: crate::config::DEFAULT_SMEAR_STIFFNESS,
-                },
-                canvas.clone(),
-            ));
-            advanced_content.append(&animation_slider_row(
-                AnimationSliderSpec {
-                    title: "Tail stiffness",
-                    key: "cursor_smear_trailing_stiffness",
-                    value: crate::config::cursor_smear_trailing_stiffness(),
-                    min: 0.05,
-                    max: 1.0,
-                    step: 0.01,
-                    digits: 2,
-                    unit: "",
-                    default: crate::config::DEFAULT_SMEAR_TRAILING_STIFFNESS,
-                },
-                canvas.clone(),
-            ));
-            advanced_content.append(&animation_slider_row(
-                AnimationSliderSpec {
-                    title: "Damping",
-                    key: "cursor_smear_damping",
-                    value: crate::config::cursor_smear_damping(),
-                    min: 0.0,
-                    max: 0.99,
-                    step: 0.01,
-                    digits: 2,
-                    unit: "",
-                    default: crate::config::DEFAULT_SMEAR_DAMPING,
-                },
-                canvas,
-            ));
-            has_advanced_settings = true;
-        }
-        crate::config::CursorStyle::Smooth | crate::config::CursorStyle::Steady => {}
+        crate::config::CursorStyle::Smooth
+        | crate::config::CursorStyle::Snappy
+        | crate::config::CursorStyle::Steady => {}
     }
     if has_advanced_settings {
         container.container.set_margin_bottom(12);
@@ -5022,6 +5029,9 @@ fn write_key_with_selection(
     keyboard_selection: &std::rc::Rc<std::cell::Cell<Option<DirectedSelectionRange>>>,
     data: Vec<u8>,
 ) {
+    if let Some(fresh_content) = workspace.borrow_mut().snapshot_active_renderable() {
+        *content.borrow_mut() = Some(fresh_content);
+    }
     let Some(selection_range) = selection.get() else {
         let content = content.borrow();
         let _ = write_active_input_edit(workspace, content.as_ref(), &data);
@@ -5061,6 +5071,18 @@ fn write_key_with_selection(
         let _ = write_active_input_edit(workspace, Some(&content), &data);
         return;
     };
+    if !selection_within_active_input(&content, viewport_selection) {
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
+        if data.as_slice() != [0x7f] && data.as_slice() != b"\x1b[3~" {
+            let _ = write_active_input_edit(workspace, Some(&content), &data);
+        }
+        return;
+    }
     let target = MouseGridPosition {
         column: viewport_selection.start.column.min(u16::MAX as usize) as u16,
         row: viewport_selection.start.row.min(u16::MAX as usize) as u16,
@@ -5069,7 +5091,9 @@ fn write_key_with_selection(
         row: viewport_selection.start.row + content.display_offset,
         column: viewport_selection.start.column,
     };
-    let movement = if let Some(bytes) = keyboard_selection
+    let movement = if let Ok(true) = write_active_input_cursor_target(workspace, &content, target) {
+        Vec::new()
+    } else if let Some(bytes) = keyboard_selection
         .get()
         .and_then(|range| cursor_movement_bytes_between_points(range.focus, target_point))
     {
@@ -6507,6 +6531,24 @@ mod tests {
                 .expect("next discrete input drag step");
         assert_eq!(bytes, right_arrows(1));
         assert_eq!(state.cursor, Some(MouseGridPosition { row: 0, column: 6 }));
+    }
+
+    #[test]
+    fn paste_bytes_use_bracketed_paste_when_terminal_requests_it() {
+        assert_eq!(
+            terminal_paste_bytes(true, b"hello"),
+            b"\x1b[200~hello\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn paste_bytes_leave_end_marker_unwrapped() {
+        assert_eq!(terminal_paste_bytes(true, b"a\x1b[201~b"), b"a\x1b[201~b");
+    }
+
+    #[test]
+    fn paste_bytes_are_plain_without_bracketed_paste_mode() {
+        assert_eq!(terminal_paste_bytes(false, b"hello"), b"hello");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use crate::mouse::MouseGridPosition;
 use crate::selection::{
     GridPoint, SelectionRange, line_significant_len, viewport_range_for_display,
 };
-use crate::terminal_grid::TerminalCell;
+use crate::terminal_grid::{TerminalCell, TerminalSemanticPrompt};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectedSelectionRange {
@@ -33,14 +33,36 @@ pub fn input_start_column(line: &[TerminalCell]) -> usize {
 
 pub fn active_input_line_range(content: &RenderableContentOwned) -> Option<SelectionRange> {
     let row = usize::try_from(content.cursor_line).ok()?;
-    let line = content.lines.get(row)?;
-    let start = input_start_column(line);
+    let rows = active_input_rows(content, row)?;
+    let start_row = *rows.start();
+    let end_row = *rows.end();
+    let start = input_start_column(content.lines.get(start_row)?);
     let cursor = usize::try_from(content.cursor_col).ok();
-    let end = active_input_end_column(line, cursor);
-    (end > start).then_some(SelectionRange::new(
-        GridPoint { row, column: start },
-        GridPoint { row, column: end },
-    ))
+    let end = active_input_end_column(content.lines.get(end_row)?, cursor);
+    let range = SelectionRange::new(
+        GridPoint {
+            row: start_row,
+            column: start,
+        },
+        GridPoint {
+            row: end_row,
+            column: end,
+        },
+    );
+    (!range.is_empty()).then_some(range)
+}
+
+pub fn selection_within_active_input(
+    content: &RenderableContentOwned,
+    selection: SelectionRange,
+) -> bool {
+    active_input_line_range(content).is_some_and(|input| {
+        point_le(input.start, selection.start) && point_le(selection.end, input.end)
+    })
+}
+
+fn point_le(left: GridPoint, right: GridPoint) -> bool {
+    left.row < right.row || (left.row == right.row && left.column <= right.column)
 }
 
 pub fn input_buffer_offset_for_position(
@@ -48,7 +70,7 @@ pub fn input_buffer_offset_for_position(
     target: MouseGridPosition,
 ) -> Option<usize> {
     let cursor_row = usize::try_from(content.cursor_line).ok()?;
-    let rows = active_wrapped_rows(content, cursor_row)?;
+    let rows = active_input_rows(content, cursor_row)?;
     let absolute = input_absolute_column(
         content,
         rows.clone(),
@@ -75,7 +97,7 @@ pub fn keyboard_cursor_target(
     unit: CursorUnit,
     current: Option<GridPoint>,
 ) -> Option<MouseGridPosition> {
-    if let Some(target) = keyboard_cursor_target_in_wrapped_input(content, direction, unit, current)
+    if let Some(target) = keyboard_cursor_target_in_active_input(content, direction, unit, current)
     {
         return Some(target);
     }
@@ -104,14 +126,14 @@ pub fn keyboard_cursor_target(
     })
 }
 
-fn keyboard_cursor_target_in_wrapped_input(
+fn keyboard_cursor_target_in_active_input(
     content: &RenderableContentOwned,
     direction: CursorDirection,
     unit: CursorUnit,
     current: Option<GridPoint>,
 ) -> Option<MouseGridPosition> {
     let cursor_row = usize::try_from(content.cursor_line).ok()?;
-    let rows = active_wrapped_rows(content, cursor_row)?;
+    let rows = active_input_rows(content, cursor_row)?;
     let row = current
         .map(|point| point.row)
         .or_else(|| usize::try_from(content.cursor_line).ok())?;
@@ -279,6 +301,100 @@ fn next_word_boundary(line: &[TerminalCell], cursor: usize, end: usize) -> usize
         column += 1;
     }
     column
+}
+
+fn active_input_rows(
+    content: &RenderableContentOwned,
+    cursor_row: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    if cursor_row >= content.lines.len() {
+        return None;
+    }
+    if let Some(rows) = active_semantic_prompt_rows(content, cursor_row) {
+        return Some(rows);
+    }
+    active_wrapped_rows(content, cursor_row)
+}
+
+fn active_semantic_prompt_rows(
+    content: &RenderableContentOwned,
+    cursor_row: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let metadata = content
+        .line_metadata
+        .get(cursor_row)
+        .copied()
+        .unwrap_or_default();
+    if metadata.semantic_prompt == TerminalSemanticPrompt::None {
+        return None;
+    }
+    let mut start = cursor_row;
+    while start > 0 {
+        let current = content
+            .line_metadata
+            .get(start)
+            .copied()
+            .unwrap_or_default();
+        let previous = content
+            .line_metadata
+            .get(start - 1)
+            .copied()
+            .unwrap_or_default();
+        if current.semantic_prompt == TerminalSemanticPrompt::Continuation
+            && matches!(
+                previous.semantic_prompt,
+                TerminalSemanticPrompt::Prompt | TerminalSemanticPrompt::Continuation
+            )
+        {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if content
+        .line_metadata
+        .get(start)
+        .copied()
+        .unwrap_or_default()
+        .semantic_prompt
+        != TerminalSemanticPrompt::Prompt
+    {
+        return None;
+    }
+    let editable_start =
+        semantic_prompt_editable_start(content, start, cursor_row).unwrap_or(start);
+    Some(editable_start..=cursor_row)
+}
+
+fn semantic_prompt_editable_start(
+    content: &RenderableContentOwned,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    (start..=end).find(|row| {
+        content
+            .lines
+            .get(*row)
+            .is_some_and(|line| prompt_leader_before_input(line))
+    })
+}
+
+fn prompt_leader_before_input(line: &[TerminalCell]) -> bool {
+    let Some(separator) = line
+        .iter()
+        .take(line_significant_len(line))
+        .position(|cell| cell.text == " ")
+    else {
+        return false;
+    };
+    if separator == 0 {
+        return false;
+    }
+    line.get(separator - 1).is_some_and(|cell| {
+        cell.text
+            .chars()
+            .any(|ch| matches!(ch, '❯' | '>' | '$' | '#' | '%' | 'λ' | '➜'))
+    })
 }
 
 fn active_wrapped_rows(
@@ -558,6 +674,40 @@ mod tests {
         }
     }
 
+    fn semantic_content_with_cursor(
+        lines: &[&str],
+        cursor_row: i32,
+        cursor_col: i32,
+    ) -> TerminalContent {
+        let mut line_metadata = vec![TerminalLineMetadata::default(); lines.len()];
+        if let Some(first) = line_metadata.first_mut() {
+            first.semantic_prompt = TerminalSemanticPrompt::Prompt;
+        }
+        for metadata in line_metadata.iter_mut().skip(1) {
+            metadata.semantic_prompt = TerminalSemanticPrompt::Continuation;
+        }
+        TerminalContent {
+            lines: lines
+                .iter()
+                .map(|line| {
+                    line.chars()
+                        .map(|ch| TerminalCell {
+                            text: ch.to_string().into(),
+                            ..TerminalCell::blank()
+                        })
+                        .collect()
+                })
+                .collect(),
+            line_metadata,
+            cursor_line: cursor_row,
+            cursor_col,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        }
+    }
+
     #[test]
     fn active_input_range_stops_before_fish_autosuggestion_tail() {
         let mut content = content_with_cursor("", 7);
@@ -580,6 +730,67 @@ mod tests {
                 GridPoint { row: 0, column: 7 }
             ))
         );
+    }
+
+    #[test]
+    fn active_input_range_spans_semantic_prompt_continuations() {
+        let content = semantic_content_with_cursor(&["❯ import {", "  Foo,", "  Bar", "}"], 3, 1);
+
+        assert_eq!(
+            active_input_line_range(&content),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 2 },
+                GridPoint { row: 3, column: 1 }
+            ))
+        );
+    }
+
+    #[test]
+    fn active_input_range_skips_decorative_semantic_prompt_header() {
+        let content = semantic_content_with_cursor(
+            &["~/Documents/Projects/Chelotype on main", "❯ φiв"],
+            1,
+            5,
+        );
+
+        assert_eq!(
+            active_input_line_range(&content),
+            Some(SelectionRange::new(
+                GridPoint { row: 1, column: 2 },
+                GridPoint { row: 1, column: 5 }
+            ))
+        );
+    }
+
+    #[test]
+    fn selection_within_active_input_rejects_output_tail() {
+        let mut content =
+            semantic_content_with_cursor(&["❯ import {", "  Foo,", "  Bar", "}"], 3, 1);
+        content.lines.push(
+            "OUTPUT"
+                .chars()
+                .map(|ch| TerminalCell {
+                    text: ch.to_string().into(),
+                    ..TerminalCell::blank()
+                })
+                .collect(),
+        );
+        content.line_metadata.push(TerminalLineMetadata::default());
+
+        assert!(selection_within_active_input(
+            &content,
+            SelectionRange::new(
+                GridPoint { row: 0, column: 2 },
+                GridPoint { row: 3, column: 1 }
+            )
+        ));
+        assert!(!selection_within_active_input(
+            &content,
+            SelectionRange::new(
+                GridPoint { row: 0, column: 2 },
+                GridPoint { row: 4, column: 3 }
+            )
+        ));
     }
 
     #[test]
@@ -626,6 +837,47 @@ mod tests {
         assert_eq!(
             input_buffer_offset_for_position(&content, MouseGridPosition { row: 1, column: 3 }),
             Some(6)
+        );
+    }
+
+    #[test]
+    fn input_buffer_offset_maps_visual_position_inside_semantic_input() {
+        let content = semantic_content_with_cursor(&["❯ abc", "def"], 1, 3);
+
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 0, column: 2 }),
+            Some(0)
+        );
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 0, column: 5 }),
+            Some(3)
+        );
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 1, column: 0 }),
+            Some(3)
+        );
+        assert_eq!(
+            input_buffer_offset_for_position(&content, MouseGridPosition { row: 1, column: 3 }),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn directed_shift_left_selection_crosses_semantic_prompt_rows() {
+        let content = semantic_content_with_cursor(&["❯ abc ", "def"], 1, 0);
+        let target =
+            keyboard_cursor_target(&content, CursorDirection::Left, CursorUnit::Cell, None)
+                .expect("left target across semantic input rows");
+        let directed = directed_selection_for_target(&content, target, None, None)
+            .expect("directed semantic selection");
+
+        assert_eq!(target, MouseGridPosition { row: 0, column: 5 });
+        assert_eq!(
+            directed.range(),
+            Some(SelectionRange::new(
+                GridPoint { row: 0, column: 5 },
+                GridPoint { row: 1, column: 0 }
+            ))
         );
     }
 

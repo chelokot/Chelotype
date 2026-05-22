@@ -11,60 +11,175 @@ pub const INPUT_CURSOR_BRIDGE_FISH: &str = "fish";
 pub const INPUT_CURSOR_TARGET_FILE_ENV: &str = "CHELOTYPE_CURSOR_TARGET_FILE";
 pub const INPUT_CURSOR_TARGET_FILE_PLACEHOLDER: &str = "__CHELOTYPE_CURSOR_TARGET_FILE__";
 
-const FISH_CHELOTYPE_INIT: &str = "\
-functions -q fish_prompt; and functions -c fish_prompt __chelotype_user_fish_prompt
+const FISH_CHELOTYPE_INIT: &str = r#"functions -q fish_prompt; and functions -c fish_prompt __chelotype_user_fish_prompt
 function fish_prompt
-    printf '\\e]133;A\\e\\\\'
+    printf '\e]133;A\e\\'
     __chelotype_user_fish_prompt
-    printf '\\e]133;B\\e\\\\'
-end
-function __chelotype_capture_undo
-    set -g __chelotype_undo_lines $__chelotype_undo_lines x(string escape --style=var -- (commandline))
-    set -g __chelotype_undo_cursors $__chelotype_undo_cursors (commandline -C)
-    set -e __chelotype_redo_lines
-    set -e __chelotype_redo_cursors
+    printf '\e]133;B\e\\'
 end
 function __chelotype_decode_line
-    string sub -s 2 -- $argv[1] | string unescape --style=var
+    set -l encoded (string sub -s 2 -- $argv[1] | string collect)
+    test -n "$encoded"; or return 0
+    printf '%s' "$encoded" | string unescape --style=var | string collect --allow-empty
+end
+function __chelotype_encode_line
+    printf 'x%s' (string escape --style=var -- $argv[1])
+end
+function __chelotype_slice --argument-names value start length
+    test $length -gt 0; or return
+    string sub -s $start -l $length -- "$value"
+end
+function __chelotype_common_prefix --argument-names old_line new_line
+    set -l old_len (string length -- "$old_line")
+    set -l new_len (string length -- "$new_line")
+    set -l prefix 0
+    while test $prefix -lt $old_len; and test $prefix -lt $new_len
+        set -l index (math $prefix + 1)
+        test (string sub -s $index -l 1 -- "$old_line") = (string sub -s $index -l 1 -- "$new_line"); or break
+        set prefix (math $prefix + 1)
+    end
+    echo $prefix
+end
+function __chelotype_common_suffix --argument-names old_line new_line prefix
+    set -l old_len (string length -- "$old_line")
+    set -l new_len (string length -- "$new_line")
+    set -l suffix 0
+    while test (math $prefix + $suffix) -lt $old_len; and test (math $prefix + $suffix) -lt $new_len
+        set -l old_index (math $old_len - $suffix)
+        set -l new_index (math $new_len - $suffix)
+        test (string sub -s $old_index -l 1 -- "$old_line") = (string sub -s $new_index -l 1 -- "$new_line"); or break
+        set suffix (math $suffix + 1)
+    end
+    echo $suffix
+end
+function __chelotype_clear_redo
+    set -e __chelotype_redo_prefixes
+    set -e __chelotype_redo_suffixes
+    set -e __chelotype_redo_old_mids
+    set -e __chelotype_redo_new_mids
+    set -e __chelotype_redo_old_cursors
+    set -e __chelotype_redo_new_cursors
+end
+function __chelotype_push_encoded_patch --argument-names stack prefix suffix old_mid new_mid old_cursor new_cursor
+    if test "$stack" = undo
+        set -g __chelotype_undo_prefixes $__chelotype_undo_prefixes $prefix
+        set -g __chelotype_undo_suffixes $__chelotype_undo_suffixes $suffix
+        set -g __chelotype_undo_old_mids $__chelotype_undo_old_mids $old_mid
+        set -g __chelotype_undo_new_mids $__chelotype_undo_new_mids $new_mid
+        set -g __chelotype_undo_old_cursors $__chelotype_undo_old_cursors $old_cursor
+        set -g __chelotype_undo_new_cursors $__chelotype_undo_new_cursors $new_cursor
+    else
+        set -g __chelotype_redo_prefixes $__chelotype_redo_prefixes $prefix
+        set -g __chelotype_redo_suffixes $__chelotype_redo_suffixes $suffix
+        set -g __chelotype_redo_old_mids $__chelotype_redo_old_mids $old_mid
+        set -g __chelotype_redo_new_mids $__chelotype_redo_new_mids $new_mid
+        set -g __chelotype_redo_old_cursors $__chelotype_redo_old_cursors $old_cursor
+        set -g __chelotype_redo_new_cursors $__chelotype_redo_new_cursors $new_cursor
+    end
+end
+function __chelotype_push_patch --argument-names stack prefix suffix old_mid new_mid old_cursor new_cursor
+    __chelotype_push_encoded_patch $stack $prefix $suffix (__chelotype_encode_line "$old_mid") (__chelotype_encode_line "$new_mid") $old_cursor $new_cursor
+end
+function __chelotype_finalize_pending_undo
+    set -q __chelotype_pending_line; or return 1
+    set -l old_line (__chelotype_decode_line $__chelotype_pending_line)
+    set -l old_cursor $__chelotype_pending_cursor
+    set -l new_line (commandline)
+    set -l new_cursor (commandline -C)
+    set -e __chelotype_pending_line
+    set -e __chelotype_pending_cursor
+    test "$old_line" != "$new_line"; or test "$old_cursor" != "$new_cursor"; or return 0
+    set -l prefix (__chelotype_common_prefix "$old_line" "$new_line")
+    set -l suffix (__chelotype_common_suffix "$old_line" "$new_line" $prefix)
+    set -l old_len (string length -- "$old_line")
+    set -l new_len (string length -- "$new_line")
+    set -l old_mid_len (math $old_len - $prefix - $suffix)
+    set -l new_mid_len (math $new_len - $prefix - $suffix)
+    set -l mid_start (math $prefix + 1)
+    set -l old_mid (__chelotype_slice "$old_line" $mid_start $old_mid_len)
+    set -l new_mid (__chelotype_slice "$new_line" $mid_start $new_mid_len)
+    __chelotype_push_patch undo $prefix $suffix "$old_mid" "$new_mid" $old_cursor $new_cursor
+    return 0
+end
+function __chelotype_apply_patch --argument-names prefix suffix next_mid next_cursor
+    set -l line (commandline)
+    set -l line_len (string length -- "$line")
+    set -l before (__chelotype_slice "$line" 1 $prefix)
+    set -l after_start (math $line_len - $suffix + 1)
+    set -l after (__chelotype_slice "$line" $after_start $suffix)
+    set -l replacement (__chelotype_decode_line $next_mid)
+    commandline --replace "$before$replacement$after"
+    commandline -C $next_cursor
+    commandline -f repaint
+end
+function __chelotype_capture_undo
+    __chelotype_finalize_pending_undo
+    set -g __chelotype_pending_line (__chelotype_encode_line (commandline))
+    set -g __chelotype_pending_cursor (commandline -C)
+    __chelotype_clear_redo
 end
 function __chelotype_undo
-    set -l count (count $__chelotype_undo_lines)
+    __chelotype_finalize_pending_undo
+    set -l count (count $__chelotype_undo_prefixes)
     test $count -gt 0; or return
-    set -g __chelotype_redo_lines $__chelotype_redo_lines x(string escape --style=var -- (commandline))
-    set -g __chelotype_redo_cursors $__chelotype_redo_cursors (commandline -C)
-    commandline --replace (__chelotype_decode_line $__chelotype_undo_lines[$count])
-    commandline -C $__chelotype_undo_cursors[$count]
-    set -e __chelotype_undo_lines[$count]
-    set -e __chelotype_undo_cursors[$count]
-    commandline -f repaint
+    set -l prefix $__chelotype_undo_prefixes[$count]
+    set -l suffix $__chelotype_undo_suffixes[$count]
+    set -l old_mid $__chelotype_undo_old_mids[$count]
+    set -l new_mid $__chelotype_undo_new_mids[$count]
+    set -l old_cursor $__chelotype_undo_old_cursors[$count]
+    set -l new_cursor $__chelotype_undo_new_cursors[$count]
+    set -e __chelotype_undo_prefixes[$count]
+    set -e __chelotype_undo_suffixes[$count]
+    set -e __chelotype_undo_old_mids[$count]
+    set -e __chelotype_undo_new_mids[$count]
+    set -e __chelotype_undo_old_cursors[$count]
+    set -e __chelotype_undo_new_cursors[$count]
+    __chelotype_push_encoded_patch redo $prefix $suffix $old_mid $new_mid $old_cursor $new_cursor
+    __chelotype_apply_patch $prefix $suffix $old_mid $old_cursor
 end
 function __chelotype_redo
-    set -l count (count $__chelotype_redo_lines)
+    if set -q __chelotype_pending_line
+        __chelotype_finalize_pending_undo
+        __chelotype_clear_redo
+        return
+    end
+    set -l count (count $__chelotype_redo_prefixes)
     test $count -gt 0; or return
-    set -g __chelotype_undo_lines $__chelotype_undo_lines x(string escape --style=var -- (commandline))
-    set -g __chelotype_undo_cursors $__chelotype_undo_cursors (commandline -C)
-    commandline --replace (__chelotype_decode_line $__chelotype_redo_lines[$count])
-    commandline -C $__chelotype_redo_cursors[$count]
-    set -e __chelotype_redo_lines[$count]
-    set -e __chelotype_redo_cursors[$count]
-    commandline -f repaint
+    set -l prefix $__chelotype_redo_prefixes[$count]
+    set -l suffix $__chelotype_redo_suffixes[$count]
+    set -l old_mid $__chelotype_redo_old_mids[$count]
+    set -l new_mid $__chelotype_redo_new_mids[$count]
+    set -l old_cursor $__chelotype_redo_old_cursors[$count]
+    set -l new_cursor $__chelotype_redo_new_cursors[$count]
+    set -e __chelotype_redo_prefixes[$count]
+    set -e __chelotype_redo_suffixes[$count]
+    set -e __chelotype_redo_old_mids[$count]
+    set -e __chelotype_redo_new_mids[$count]
+    set -e __chelotype_redo_old_cursors[$count]
+    set -e __chelotype_redo_new_cursors[$count]
+    __chelotype_push_encoded_patch undo $prefix $suffix $old_mid $new_mid $old_cursor $new_cursor
+    __chelotype_apply_patch $prefix $suffix $new_mid $new_cursor
+end
+function __chelotype_discard_pending_undo --on-event fish_preexec
+    set -e __chelotype_pending_line
+    set -e __chelotype_pending_cursor
 end
 function __chelotype_move_cursor_to_target
     set -l target_file $CHELOTYPE_CURSOR_TARGET_FILE
-    test -n \"$target_file\"; or return
-    test -f \"$target_file\"; or return
-    set -l target (string trim < \"$target_file\")
+    test -n "$target_file"; or return
+    test -f "$target_file"; or return
+    set -l target (string trim < "$target_file")
     string match -qr '^[0-9]+$' -- $target; or return
     commandline -C $target
 end
-bind \\e\\[57344u __chelotype_capture_undo
-bind -M insert \\e\\[57344u __chelotype_capture_undo
-bind \\e\\[57345u __chelotype_undo
-bind -M insert \\e\\[57345u __chelotype_undo
-bind \\e\\[57346u __chelotype_redo
-bind -M insert \\e\\[57346u __chelotype_redo
-bind \\e\\[57347u __chelotype_move_cursor_to_target
-bind -M insert \\e\\[57347u __chelotype_move_cursor_to_target";
+bind \e\[57344u __chelotype_capture_undo
+bind -M insert \e\[57344u __chelotype_capture_undo
+bind \e\[57345u __chelotype_undo
+bind -M insert \e\[57345u __chelotype_undo
+bind \e\[57346u __chelotype_redo
+bind -M insert \e\[57346u __chelotype_redo
+bind \e\[57347u __chelotype_move_cursor_to_target
+bind -M insert \e\[57347u __chelotype_move_cursor_to_target"#;
 
 pub fn default_shell_command() -> CommandBuilder {
     default_shell_command_with_size(None)
@@ -150,6 +265,7 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::process::Command;
 
     #[test]
     fn configured_shell_overrides_product_default() {
@@ -228,6 +344,89 @@ mod tests {
         assert!(line.contains("__chelotype_user_fish_prompt"));
         assert!(line.contains("__chelotype_redo"));
         assert!(line.contains("__chelotype_move_cursor_to_target"));
+    }
+
+    #[test]
+    fn fish_undo_stack_stores_compact_insert_patch() {
+        let Some(fish_path) = FISH_CANDIDATES
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+        else {
+            eprintln!("skipping fish undo patch test because fish is not installed");
+            return;
+        };
+
+        let output = Command::new(fish_path)
+            .args([
+                "--init-command",
+                FISH_CHELOTYPE_INIT,
+                "-ic",
+                r#"
+set -l base (string repeat -n 1024 a)
+set -l paste (string repeat -n 64 b)
+commandline --replace $base
+commandline -C (string length -- $base)
+__chelotype_capture_undo
+commandline --insert $paste
+__chelotype_capture_undo
+set -l old_mid (__chelotype_decode_line $__chelotype_undo_old_mids[1])
+set -l new_mid (__chelotype_decode_line $__chelotype_undo_new_mids[1])
+printf '%s %s %s %s %s\n' (count $__chelotype_undo_prefixes) $__chelotype_undo_prefixes[1] $__chelotype_undo_suffixes[1] (string length -- "$old_mid") (string length -- "$new_mid")
+__chelotype_undo
+printf '%s %s\n' (string length -- (commandline)) (commandline -C)
+__chelotype_redo
+printf '%s %s\n' (string length -- (commandline)) (commandline -C)
+"#,
+            ])
+            .output()
+            .expect("run fish undo patch check");
+
+        assert!(
+            output.status.success(),
+            "fish undo patch check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "1 1024 0 0 64\n1024 1024\n1088 1088\n"
+        );
+    }
+
+    #[test]
+    fn fish_undo_pending_edit_does_not_cross_command_execution() {
+        let Some(fish_path) = FISH_CANDIDATES
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+        else {
+            eprintln!("skipping fish undo preexec test because fish is not installed");
+            return;
+        };
+
+        let output = Command::new(fish_path)
+            .args([
+                "--init-command",
+                FISH_CHELOTYPE_INIT,
+                "-ic",
+                r#"
+commandline --replace abc
+commandline -C 3
+__chelotype_capture_undo
+commandline --insert def
+emit fish_preexec
+commandline --replace ''
+__chelotype_capture_undo
+printf '%s\n' (count $__chelotype_undo_prefixes)
+"#,
+            ])
+            .output()
+            .expect("run fish undo preexec check");
+
+        assert!(
+            output.status.success(),
+            "fish undo preexec check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
     }
 
     #[test]
