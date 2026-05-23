@@ -13,13 +13,27 @@ pub enum CursorShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorCornerStyle {
+    Square,
+    Rounded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CursorBlinking {
     FollowSystem,
     Enabled,
     Disabled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorBlinkAnimation {
+    Instant,
+    Smooth,
+}
+
 pub const DEFAULT_CURSOR_ANIMATION_DURATION_MS: u32 = 100;
+pub const DEFAULT_CURSOR_BLINK_INTERVAL_MS: u32 = 530;
+pub const DEFAULT_CURSOR_WIDTH_RATIO: f64 = 0.125;
 pub const DEFAULT_NEOVIDE_SHORT_ANIMATION_DURATION_MS: u32 = 40;
 pub const DEFAULT_NEOVIDE_SHORT_JUMP_DISTANCE: f64 = 2.0;
 pub const DEFAULT_NEOVIDE_TRAIL_SIZE: f64 = 0.65;
@@ -115,6 +129,32 @@ impl CursorShape {
     }
 }
 
+impl CursorCornerStyle {
+    pub const ALL: [Self; 2] = [Self::Square, Self::Rounded];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Square => "Square",
+            Self::Rounded => "Rounded",
+        }
+    }
+
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::Square => "square",
+            Self::Rounded => "rounded",
+        }
+    }
+
+    fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "square" => Some(Self::Square),
+            "rounded" => Some(Self::Rounded),
+            _ => None,
+        }
+    }
+}
+
 impl CursorBlinking {
     pub const ALL: [Self; 3] = [Self::FollowSystem, Self::Enabled, Self::Disabled];
 
@@ -154,6 +194,32 @@ impl CursorBlinking {
             "system" | "follow-system" => Some(Self::FollowSystem),
             "on" | "true" | "enabled" => Some(Self::Enabled),
             "off" | "false" | "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+impl CursorBlinkAnimation {
+    pub const ALL: [Self; 2] = [Self::Instant, Self::Smooth];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Instant => "Instant",
+            Self::Smooth => "Smooth",
+        }
+    }
+
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::Instant => "instant",
+            Self::Smooth => "smooth",
+        }
+    }
+
+    fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "instant" => Some(Self::Instant),
+            "smooth" => Some(Self::Smooth),
             _ => None,
         }
     }
@@ -232,10 +298,35 @@ pub fn cursor_shape() -> CursorShape {
         .unwrap_or(CursorShape::Bar)
 }
 
+pub fn cursor_corner_style() -> CursorCornerStyle {
+    read_value("cursor_corner_style")
+        .and_then(|value| CursorCornerStyle::from_config_value(&value))
+        .unwrap_or(CursorCornerStyle::Square)
+}
+
+pub fn cursor_width_ratio() -> f64 {
+    read_f64("cursor_width_ratio", DEFAULT_CURSOR_WIDTH_RATIO, 0.05, 1.0)
+}
+
 pub fn cursor_blinking() -> CursorBlinking {
     read_value("cursor_blinking")
         .and_then(|value| CursorBlinking::from_config_value(&value))
         .unwrap_or(CursorBlinking::FollowSystem)
+}
+
+pub fn cursor_blink_animation() -> CursorBlinkAnimation {
+    read_value("cursor_blink_animation")
+        .and_then(|value| CursorBlinkAnimation::from_config_value(&value))
+        .unwrap_or(CursorBlinkAnimation::Instant)
+}
+
+pub fn cursor_blink_interval_ms() -> u32 {
+    read_u32(
+        "cursor_blink_interval_ms",
+        DEFAULT_CURSOR_BLINK_INTERVAL_MS,
+        150,
+        1500,
+    )
 }
 
 pub fn cursor_animation_duration_ms() -> u32 {
@@ -522,6 +613,41 @@ mod tests {
 
     #[test]
     #[serial]
+    fn cursor_corner_style_defaults_to_square_and_reads_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-cursor-corner-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert_eq!(cursor_corner_style(), CursorCornerStyle::Square);
+        assert_eq!(cursor_width_ratio(), DEFAULT_CURSOR_WIDTH_RATIO);
+        write_value("cursor_corner_style", "rounded");
+        assert_eq!(cursor_corner_style(), CursorCornerStyle::Rounded);
+        write_value("cursor_corner_style", "square");
+        assert_eq!(cursor_corner_style(), CursorCornerStyle::Square);
+        write_value("cursor_corner_style", "unknown");
+        assert_eq!(cursor_corner_style(), CursorCornerStyle::Square);
+        write_value("cursor_width_ratio", "0.25");
+        assert_eq!(cursor_width_ratio(), 0.25);
+        write_value("cursor_width_ratio", "0.01");
+        assert_eq!(cursor_width_ratio(), 0.05);
+        write_value("cursor_width_ratio", "2");
+        assert_eq!(cursor_width_ratio(), 1.0);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
     fn cursor_blinking_defaults_to_system_and_reads_config() {
         let dir = std::env::temp_dir().join(format!(
             "chelotype-cursor-blinking-config-{}",
@@ -541,6 +667,39 @@ mod tests {
         assert_eq!(cursor_blinking(), CursorBlinking::Disabled);
         write_value("cursor_blinking", "unexpected");
         assert_eq!(cursor_blinking(), CursorBlinking::FollowSystem);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn cursor_blink_animation_and_interval_default_and_clamp() {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-cursor-blink-animation-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+
+        assert_eq!(cursor_blink_animation(), CursorBlinkAnimation::Instant);
+        write_value("cursor_blink_animation", "smooth");
+        assert_eq!(cursor_blink_animation(), CursorBlinkAnimation::Smooth);
+        write_value("cursor_blink_animation", "instant");
+        assert_eq!(cursor_blink_animation(), CursorBlinkAnimation::Instant);
+        write_value("cursor_blink_animation", "unknown");
+        assert_eq!(cursor_blink_animation(), CursorBlinkAnimation::Instant);
+        assert_eq!(cursor_blink_interval_ms(), DEFAULT_CURSOR_BLINK_INTERVAL_MS);
+        write_value("cursor_blink_interval_ms", "100");
+        assert_eq!(cursor_blink_interval_ms(), 150);
+        write_value("cursor_blink_interval_ms", "2500");
+        assert_eq!(cursor_blink_interval_ms(), 1500);
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");

@@ -1,5 +1,5 @@
 use crate::backend::{MouseMode, RenderableContentOwned, ScreenSize};
-use crate::canvas::TerminalCanvas;
+use crate::canvas::{CursorOptionsOverride, TerminalCanvas};
 use crate::cell_text::lines_to_text;
 use crate::command_blocks::{
     command_block_output_range, command_block_output_range_near_cursor, command_blocks,
@@ -3098,7 +3098,7 @@ fn find_named_widget(root: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
 
 fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().title("General").build();
-    let group = adw::PreferencesGroup::builder()
+    let animation_group = adw::PreferencesGroup::builder()
         .title("Cursor animation")
         .build();
     let cursor_shape_grid = gtk::Grid::builder()
@@ -3113,6 +3113,11 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         .margin_bottom(8)
         .build();
     let animation_settings_group = AnimationSettingsGroup::new();
+    let blink_animation_grid = gtk::Grid::builder()
+        .column_spacing(10)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
     populate_cursor_shape_grid(
         &cursor_shape_grid,
         canvas.clone(),
@@ -3126,7 +3131,7 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     shape_group.add(&cursor_shape_grid);
     page.add(&shape_group);
 
-    group.add(&cursor_animation_grid);
+    animation_group.add(&cursor_animation_grid);
     populate_cursor_animation_grid(
         &cursor_animation_grid,
         crate::config::cursor_shape(),
@@ -3139,7 +3144,63 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         crate::config::cursor_shape(),
         canvas.clone(),
     );
-    let cursor_options = gtk::Box::builder()
+    animation_group.add(&animation_settings_group.container);
+    page.add(&animation_group);
+
+    let corner_grid = gtk::Grid::builder()
+        .column_spacing(10)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
+    populate_cursor_corner_grid(&corner_grid, canvas.clone());
+    let corner_group = adw::PreferencesGroup::builder()
+        .title("Cursor corners")
+        .build();
+    corner_group.add(&corner_grid);
+    corner_group.add(&animation_slider_row_with_update(
+        AnimationSliderSpec {
+            title: "Cursor width",
+            key: "cursor_width_ratio",
+            value: crate::config::cursor_width_ratio(),
+            min: 0.05,
+            max: 1.0,
+            step: 0.005,
+            digits: 3,
+            unit: "",
+            default: crate::config::DEFAULT_CURSOR_WIDTH_RATIO,
+        },
+        canvas.clone(),
+        {
+            let cursor_shape_grid = cursor_shape_grid.clone();
+            let cursor_animation_grid = cursor_animation_grid.clone();
+            let animation_settings_group = animation_settings_group.clone();
+            let corner_grid = corner_grid.clone();
+            let blink_animation_grid = blink_animation_grid.clone();
+            let canvas = canvas.clone();
+            move || {
+                populate_cursor_shape_grid(
+                    &cursor_shape_grid,
+                    canvas.clone(),
+                    cursor_animation_grid.clone(),
+                    animation_settings_group.clone(),
+                );
+                populate_cursor_animation_grid(
+                    &cursor_animation_grid,
+                    crate::config::cursor_shape(),
+                    canvas.clone(),
+                    animation_settings_group.clone(),
+                );
+                populate_cursor_corner_grid(&corner_grid, canvas.clone());
+                populate_cursor_blink_animation_grid(&blink_animation_grid, canvas.clone());
+            }
+        },
+    ));
+    page.add(&corner_group);
+
+    let blink_group = adw::PreferencesGroup::builder()
+        .title("Cursor blinking")
+        .build();
+    let blink_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
@@ -3147,11 +3208,37 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         .selection_mode(gtk::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
-    cursor_blinking_list.append(&cursor_blinking_row(canvas.clone()));
-    cursor_options.append(&animation_settings_group.container);
-    cursor_options.append(&cursor_blinking_list);
-    group.add(&cursor_options);
-    page.add(&group);
+    let blink_interval_container = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .build();
+    let blink_controls_visible = cursor_blink_controls_visible(crate::config::cursor_blinking());
+    blink_animation_grid.set_visible(blink_controls_visible);
+    blink_interval_container.set_visible(blink_controls_visible);
+    blink_interval_container.append(&animation_slider_row(
+        AnimationSliderSpec {
+            title: "Blink interval",
+            key: "cursor_blink_interval_ms",
+            value: f64::from(crate::config::cursor_blink_interval_ms()),
+            min: 150.0,
+            max: 1500.0,
+            step: 10.0,
+            digits: 0,
+            unit: "ms",
+            default: f64::from(crate::config::DEFAULT_CURSOR_BLINK_INTERVAL_MS),
+        },
+        canvas.clone(),
+    ));
+    cursor_blinking_list.append(&cursor_blinking_row(
+        canvas.clone(),
+        blink_animation_grid.clone(),
+        blink_interval_container.clone(),
+    ));
+    populate_cursor_blink_animation_grid(&blink_animation_grid, canvas.clone());
+    blink_box.append(&cursor_blinking_list);
+    blink_box.append(&blink_animation_grid);
+    blink_box.append(&blink_interval_container);
+    blink_group.add(&blink_box);
+    page.add(&blink_group);
     page
 }
 
@@ -3722,7 +3809,11 @@ fn show_custom_font_dialog(
     dialog.present();
 }
 
-fn cursor_blinking_row(canvas: TerminalCanvas) -> adw::ComboRow {
+fn cursor_blinking_row(
+    canvas: TerminalCanvas,
+    blink_animation_grid: gtk::Grid,
+    blink_interval_container: gtk::Box,
+) -> adw::ComboRow {
     let labels = crate::config::CursorBlinking::ALL.map(crate::config::CursorBlinking::label);
     let model = gtk::StringList::new(&labels);
     let row = adw::ComboRow::builder()
@@ -3734,9 +3825,16 @@ fn cursor_blinking_row(canvas: TerminalCanvas) -> adw::ComboRow {
     row.connect_selected_notify(move |row| {
         let mode = crate::config::CursorBlinking::from_selected_index(row.selected());
         crate::config::write_value("cursor_blinking", mode.config_value());
+        let controls_visible = cursor_blink_controls_visible(mode);
+        blink_animation_grid.set_visible(controls_visible);
+        blink_interval_container.set_visible(controls_visible);
         canvas.refresh_cursor_options();
     });
     row
+}
+
+fn cursor_blink_controls_visible(mode: crate::config::CursorBlinking) -> bool {
+    mode != crate::config::CursorBlinking::Disabled
 }
 
 fn set_pointer_cursor(widget: &impl IsA<gtk::Widget>) {
@@ -3789,6 +3887,37 @@ fn populate_cursor_shape_grid(
     }
 }
 
+fn populate_cursor_corner_grid(grid: &gtk::Grid, canvas: TerminalCanvas) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+    let mut first_button = None::<gtk::ToggleButton>;
+    for (index, corners) in crate::config::CursorCornerStyle::ALL
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let button = cursor_corner_tile(corners);
+        if let Some(first_button) = &first_button {
+            button.set_group(Some(first_button));
+        } else {
+            first_button = Some(button.clone());
+        }
+        button.set_active(corners == crate::config::cursor_corner_style());
+        {
+            let canvas = canvas.clone();
+            button.connect_toggled(move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                crate::config::write_value("cursor_corner_style", corners.config_value());
+                canvas.refresh_cursor_options();
+            });
+        }
+        grid.attach(&button, index as i32, 0, 1, 1);
+    }
+}
+
 fn populate_cursor_animation_grid(
     grid: &gtk::Grid,
     shape: crate::config::CursorShape,
@@ -3831,17 +3960,137 @@ fn populate_cursor_animation_grid(
     }
 }
 
+fn populate_cursor_blink_animation_grid(grid: &gtk::Grid, canvas: TerminalCanvas) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+    let mut first_button = None::<gtk::ToggleButton>;
+    for (index, animation) in crate::config::CursorBlinkAnimation::ALL
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let button = cursor_blink_animation_tile(animation);
+        if let Some(first_button) = &first_button {
+            button.set_group(Some(first_button));
+        } else {
+            first_button = Some(button.clone());
+        }
+        button.set_active(animation == crate::config::cursor_blink_animation());
+        {
+            let canvas = canvas.clone();
+            button.connect_toggled(move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                crate::config::write_value("cursor_blink_animation", animation.config_value());
+                canvas.refresh_cursor_options();
+            });
+        }
+        grid.attach(&button, index as i32, 0, 1, 1);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CursorPreviewSettings {
+    options: CursorOptionsOverride,
+    blink_animation: Option<crate::config::CursorBlinkAnimation>,
+    blinking_enabled: Option<bool>,
+}
+
+impl CursorPreviewSettings {
+    fn from_config_with_overrides() -> Self {
+        Self {
+            options: CursorOptionsOverride::default(),
+            blink_animation: None,
+            blinking_enabled: None,
+        }
+    }
+
+    fn with_style(mut self, style: crate::config::CursorStyle) -> Self {
+        self.options.style = Some(style);
+        self
+    }
+
+    fn with_shape(mut self, shape: crate::config::CursorShape) -> Self {
+        self.options.shape = Some(shape);
+        self
+    }
+
+    fn with_corners(mut self, corners: crate::config::CursorCornerStyle) -> Self {
+        self.options.corners = Some(corners);
+        self
+    }
+
+    fn with_blink_animation(
+        mut self,
+        blink_animation: crate::config::CursorBlinkAnimation,
+    ) -> Self {
+        self.blink_animation = Some(blink_animation);
+        self.blinking_enabled = Some(true);
+        self
+    }
+
+    fn card_corners(self) -> crate::config::CursorCornerStyle {
+        self.options
+            .corners
+            .unwrap_or_else(crate::config::cursor_corner_style)
+    }
+}
+
 fn cursor_shape_tile(shape: crate::config::CursorShape) -> gtk::ToggleButton {
-    preference_preview_tile(shape.label(), &cursor_shape_preview(shape))
+    let settings = CursorPreviewSettings::from_config_with_overrides().with_shape(shape);
+    preference_cursor_preview_tile(
+        shape.label(),
+        settings.card_corners(),
+        &cursor_shape_preview(settings),
+    )
+}
+
+fn cursor_corner_tile(corners: crate::config::CursorCornerStyle) -> gtk::ToggleButton {
+    let settings = CursorPreviewSettings::from_config_with_overrides().with_corners(corners);
+    preference_cursor_preview_tile(
+        corners.label(),
+        settings.card_corners(),
+        &cursor_corner_preview(settings),
+    )
+}
+
+fn cursor_blink_animation_tile(
+    animation: crate::config::CursorBlinkAnimation,
+) -> gtk::ToggleButton {
+    let settings =
+        CursorPreviewSettings::from_config_with_overrides().with_blink_animation(animation);
+    preference_cursor_preview_tile(
+        animation.label(),
+        settings.card_corners(),
+        &cursor_blink_animation_preview(settings),
+    )
 }
 
 fn preference_preview_tile(label: &str, preview: &impl IsA<gtk::Widget>) -> gtk::ToggleButton {
+    preference_cursor_preview_tile(label, crate::config::CursorCornerStyle::Rounded, preview)
+}
+
+fn preference_cursor_preview_tile(
+    label: &str,
+    corners: crate::config::CursorCornerStyle,
+    preview: &impl IsA<gtk::Widget>,
+) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::builder()
         .css_classes(["preview-card-button"])
         .hexpand(true)
         .halign(gtk::Align::Fill)
         .vexpand(false)
         .build();
+    match corners {
+        crate::config::CursorCornerStyle::Square => {
+            button.add_css_class("cursor-corners-square");
+        }
+        crate::config::CursorCornerStyle::Rounded => {
+            button.add_css_class("cursor-corners-rounded");
+        }
+    }
     set_pointer_cursor(&button);
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -3870,14 +4119,14 @@ fn cursor_animation_tile(
     shape: crate::config::CursorShape,
     style: crate::config::CursorStyle,
 ) -> gtk::ToggleButton {
-    preference_preview_tile(style.label(), &cursor_animation_preview(shape, style))
+    let settings = CursorPreviewSettings::from_config_with_overrides()
+        .with_shape(shape)
+        .with_style(style);
+    preference_preview_tile(style.label(), &cursor_animation_preview(settings))
 }
 
-fn cursor_animation_preview(
-    shape: crate::config::CursorShape,
-    style: crate::config::CursorStyle,
-) -> gtk::DrawingArea {
-    let preview = terminal_preview_canvas(290, 169, style, shape, 6.5);
+fn cursor_animation_preview(settings: CursorPreviewSettings) -> gtk::DrawingArea {
+    let preview = terminal_preview_canvas(290, 169, settings, 6.5);
     preview.set_render(preview_render_frame(
         ANIMATION_PREVIEW_LINES,
         animation_preview_target(0),
@@ -3924,8 +4173,7 @@ const ANIMATION_PREVIEW_TARGETS: [PreviewCursorTarget; 5] = [
 fn terminal_preview_canvas(
     width: i32,
     height: i32,
-    style: crate::config::CursorStyle,
-    shape: crate::config::CursorShape,
+    settings: CursorPreviewSettings,
     font_size_pt: f64,
 ) -> TerminalCanvas {
     let preview = TerminalCanvas::new();
@@ -3938,7 +4186,9 @@ fn terminal_preview_canvas(
     preview.widget().set_cursor_from_name(None);
     preview.widget().set_overflow(gtk::Overflow::Hidden);
     preview.add_preview_corners();
-    preview.set_cursor_options_override(Some((style, shape)));
+    preview.set_cursor_options_override(Some(settings.options));
+    preview.set_cursor_blink_animation_override(settings.blink_animation);
+    preview.set_cursor_blinking_enabled_override(settings.blinking_enabled);
     preview.set_font_size_override(Some(font_size_pt));
     preview
 }
@@ -4507,13 +4757,28 @@ const PREVIEW_SCROLL_LINES: &[PreviewScrollLine] = &[
     PreviewScrollLine::Output("ready"),
 ];
 
-fn cursor_shape_preview(shape: crate::config::CursorShape) -> gtk::DrawingArea {
-    let preview = terminal_preview_canvas(290, 46, crate::config::CursorStyle::Steady, shape, 10.0);
+fn cursor_shape_preview(settings: CursorPreviewSettings) -> gtk::DrawingArea {
+    cursor_single_line_preview("let cursor = shape", settings)
+}
+
+fn cursor_corner_preview(settings: CursorPreviewSettings) -> gtk::DrawingArea {
+    cursor_single_line_preview("let cursor = corners", settings)
+}
+
+fn cursor_blink_animation_preview(settings: CursorPreviewSettings) -> gtk::DrawingArea {
+    cursor_single_line_preview("let cursor = blink", settings)
+}
+
+fn cursor_single_line_preview(
+    line: &'static str,
+    settings: CursorPreviewSettings,
+) -> gtk::DrawingArea {
+    let preview = terminal_preview_canvas(290, 46, settings, 10.0);
     preview.set_render(preview_render_frame(
-        &["let cursor = shape"],
+        &[line],
         PreviewCursorTarget {
             line: 0,
-            column: 11,
+            column: display_columns(line) as i32,
         },
     ));
     add_terminal_preview_tick(preview.clone(), None);
@@ -4681,6 +4946,14 @@ struct AnimationSliderSpec {
 }
 
 fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gtk::Box {
+    animation_slider_row_with_update(spec, canvas, || {})
+}
+
+fn animation_slider_row_with_update(
+    spec: AnimationSliderSpec,
+    canvas: TerminalCanvas,
+    update: impl Fn() + Clone + 'static,
+) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(5)
@@ -4741,6 +5014,7 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
     {
         let reset = reset.clone();
         let value_label = value_label.clone();
+        let update = update.clone();
         scale.connect_value_changed(move |scale| {
             let value = scale.value();
             let formatted = if spec.digits == 0 {
@@ -4752,6 +5026,7 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
             set_slider_value_label(&value_label, value, spec.digits, spec.unit);
             reset.set_visible(!slider_value_is_default(value, spec.default, spec.step));
             canvas.widget().queue_draw();
+            update();
         });
     }
     header.append(&label);
@@ -5501,6 +5776,18 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
             min-width: 0;
             min-height: 0;
             padding: 0;
+        }
+        button.preview-card-button.cursor-corners-square {
+            border-radius: 0;
+        }
+        button.preview-card-button.cursor-corners-square > * {
+            border-radius: 0;
+        }
+        button.preview-card-button.cursor-corners-rounded {
+            border-radius: 0.5rem;
+        }
+        button.preview-card-button.cursor-corners-rounded > * {
+            border-radius: 0.5rem;
         }
         flowboxchild.palette-flow-child {
             padding: 0;

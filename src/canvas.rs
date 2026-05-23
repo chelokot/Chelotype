@@ -1,4 +1,6 @@
-use crate::config::{CursorBlinking, CursorShape, CursorStyle};
+use crate::config::{
+    CursorBlinkAnimation, CursorBlinking, CursorCornerStyle, CursorShape, CursorStyle,
+};
 use crate::render::{RenderFrame, RenderRegion, RenderRun, RenderStyle};
 use crate::terminal_font::{TerminalFontMetrics, layout_for_size, metrics_for_widget_size};
 use crate::terminal_palette::default_terminal_palette;
@@ -10,7 +12,6 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-const CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(530);
 const PALETTE_TRANSITION_DURATION: Duration = Duration::from_millis(300);
 const MAX_TEXT_LAYOUT_CACHE_ENTRIES: usize = 4096;
 const MAX_ROW_SURFACE_CACHE_ENTRIES: usize = 512;
@@ -56,7 +57,9 @@ pub struct TerminalCanvas {
     cursor_blink: Rc<Cell<CursorBlinkState>>,
     cursor_motion: Rc<Cell<CursorMotionState>>,
     cursor_motion_suppressed: Rc<Cell<bool>>,
-    cursor_options_override: Rc<Cell<Option<CursorOptions>>>,
+    cursor_options_override: Rc<Cell<Option<CursorOptionsOverride>>>,
+    cursor_blink_animation_override: Rc<Cell<Option<CursorBlinkAnimation>>>,
+    cursor_blinking_enabled_override: Rc<Cell<Option<bool>>>,
     font_size_override: Rc<Cell<Option<f64>>>,
     scroll_visual_offset_px: Rc<Cell<f64>>,
 }
@@ -78,7 +81,9 @@ impl TerminalCanvas {
         let cursor_blink = Rc::new(Cell::new(CursorBlinkState::default()));
         let cursor_motion = Rc::new(Cell::new(CursorMotionState::default()));
         let cursor_motion_suppressed = Rc::new(Cell::new(false));
-        let cursor_options_override = Rc::new(Cell::new(None::<CursorOptions>));
+        let cursor_options_override = Rc::new(Cell::new(None::<CursorOptionsOverride>));
+        let cursor_blink_animation_override = Rc::new(Cell::new(None::<CursorBlinkAnimation>));
+        let cursor_blinking_enabled_override = Rc::new(Cell::new(None::<bool>));
         let font_size_override = Rc::new(Cell::new(None::<f64>));
         let scroll_visual_offset_px = Rc::new(Cell::new(0.0));
         let text_layout_cache = Rc::new(RefCell::new(TextLayoutCache::default()));
@@ -90,6 +95,7 @@ impl TerminalCanvas {
         let draw_cursor_blink = cursor_blink.clone();
         let draw_cursor_motion = cursor_motion.clone();
         let draw_cursor_options_override = cursor_options_override.clone();
+        let draw_cursor_blink_animation_override = cursor_blink_animation_override.clone();
         let draw_font_size_override = font_size_override.clone();
         let draw_scroll_visual_offset_px = scroll_visual_offset_px.clone();
         let draw_text_layout_cache = text_layout_cache.clone();
@@ -118,7 +124,11 @@ impl TerminalCanvas {
                     cursor_motion: draw_cursor_motion.get(),
                     cursor_options: draw_cursor_options_override
                         .get()
+                        .map(CursorOptionsOverride::resolve)
                         .unwrap_or_else(CursorOptions::from_config),
+                    cursor_blink_animation: draw_cursor_blink_animation_override
+                        .get()
+                        .unwrap_or_else(crate::config::cursor_blink_animation),
                     font_size_pt: draw_font_size_override
                         .get()
                         .unwrap_or_else(crate::terminal_font::font_size_pt),
@@ -188,6 +198,8 @@ impl TerminalCanvas {
             cursor_motion,
             cursor_motion_suppressed,
             cursor_options_override,
+            cursor_blink_animation_override,
+            cursor_blinking_enabled_override,
             font_size_override,
             scroll_visual_offset_px,
         }
@@ -213,17 +225,23 @@ impl TerminalCanvas {
         self.set_canvas_render(CanvasRenderFrame::Workspace(render));
     }
 
-    pub fn set_cursor_options_override(
-        &self,
-        style: Option<(crate::config::CursorStyle, crate::config::CursorShape)>,
-    ) {
-        self.cursor_options_override
-            .set(style.map(|(style, shape)| CursorOptions { style, shape }));
+    pub fn set_cursor_options_override(&self, options: Option<CursorOptionsOverride>) {
+        self.cursor_options_override.set(options);
         self.area.queue_draw();
     }
 
     pub fn set_font_size_override(&self, font_size_pt: Option<f64>) {
         self.font_size_override.set(font_size_pt);
+        self.area.queue_draw();
+    }
+
+    pub fn set_cursor_blink_animation_override(&self, animation: Option<CursorBlinkAnimation>) {
+        self.cursor_blink_animation_override.set(animation);
+        self.area.queue_draw();
+    }
+
+    pub fn set_cursor_blinking_enabled_override(&self, enabled: Option<bool>) {
+        self.cursor_blinking_enabled_override.set(enabled);
         self.area.queue_draw();
     }
 
@@ -376,16 +394,21 @@ impl TerminalCanvas {
             render.active_cursor_visible()
         };
         let now = Instant::now();
-        let next =
-            self.cursor_blink
-                .get()
-                .tick(cursor_visible, self.cursor_blinking_enabled(), now);
+        let blink_enabled = self.cursor_blinking_enabled();
+        let next = self
+            .cursor_blink
+            .get()
+            .tick(cursor_visible, blink_enabled, now);
         let current_motion = self.cursor_motion.get();
         let next_motion = current_motion.settle_if_complete(now, self.cursor_options().shape);
         if current_motion != next_motion {
             self.cursor_motion.set(next_motion);
         }
+        let smooth_blinking = cursor_visible
+            && blink_enabled
+            && self.cursor_blink_animation() == CursorBlinkAnimation::Smooth;
         if self.cursor_blink.get() != next
+            || smooth_blinking
             || current_motion.active(now)
             || current_motion != next_motion
         {
@@ -397,10 +420,14 @@ impl TerminalCanvas {
     fn cursor_options(&self) -> CursorOptions {
         self.cursor_options_override
             .get()
+            .map(CursorOptionsOverride::resolve)
             .unwrap_or_else(CursorOptions::from_config)
     }
 
     fn cursor_blinking_enabled(&self) -> bool {
+        if let Some(enabled) = self.cursor_blinking_enabled_override.get() {
+            return enabled;
+        }
         match crate::config::cursor_blinking() {
             CursorBlinking::FollowSystem => gtk::Settings::default()
                 .map(|settings| settings.is_gtk_cursor_blink())
@@ -408,6 +435,12 @@ impl TerminalCanvas {
             CursorBlinking::Enabled => true,
             CursorBlinking::Disabled => false,
         }
+    }
+
+    fn cursor_blink_animation(&self) -> CursorBlinkAnimation {
+        self.cursor_blink_animation_override
+            .get()
+            .unwrap_or_else(crate::config::cursor_blink_animation)
     }
 }
 
@@ -602,7 +635,9 @@ fn draw_canvas_render(
         .text_layout_cache
         .set_font_size(paint.font_size_pt);
     let cursor_paint = CursorPaintState {
-        visible: paint.cursor_blink.visible,
+        opacity: paint
+            .cursor_blink
+            .opacity(paint.now, paint.cursor_blink_animation),
         pane_id: 0,
         motion: paint.cursor_motion,
         options: paint.cursor_options,
@@ -618,7 +653,7 @@ fn draw_canvas_render(
                 widget,
                 context,
                 render,
-                cursor_paint.with_blink(paint.cursor_blink.visible),
+                cursor_paint,
                 metrics,
                 paint_resources,
                 PaintViewport {
@@ -813,7 +848,8 @@ fn draw_render_frame(
         );
     }
 
-    if render.cursor.visible && cursor_paint.visible {
+    let opacity = cursor_paint.opacity.clamp(0.0, 1.0);
+    if render.cursor.visible && opacity > 0.0 {
         if let Some(preedit) = &render.preedit {
             draw_preedit(
                 widget,
@@ -831,6 +867,7 @@ fn draw_render_frame(
                 cursor_paint.motion.for_pane(cursor_paint.pane_id),
                 cursor_paint.options,
                 cursor_paint.now,
+                opacity,
                 line_height,
                 cell_width,
             );
@@ -958,7 +995,7 @@ fn draw_pane_separator(context: &cairo::Context, left: f64, top: f64, height: f6
 
 #[derive(Clone, Copy)]
 struct CursorPaintState {
-    visible: bool,
+    opacity: f64,
     pane_id: u64,
     motion: CursorMotionState,
     options: CursorOptions,
@@ -970,6 +1007,7 @@ struct CanvasPaint {
     cursor_blink: CursorBlinkState,
     cursor_motion: CursorMotionState,
     cursor_options: CursorOptions,
+    cursor_blink_animation: CursorBlinkAnimation,
     font_size_pt: f64,
     scroll_visual_offset_px: f64,
     now: Instant,
@@ -1279,6 +1317,28 @@ impl TextLayoutCacheSignature {
 struct CursorOptions {
     style: CursorStyle,
     shape: CursorShape,
+    corners: CursorCornerStyle,
+    width_ratio: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CursorOptionsOverride {
+    pub style: Option<CursorStyle>,
+    pub shape: Option<CursorShape>,
+    pub corners: Option<CursorCornerStyle>,
+    pub width_ratio: Option<f64>,
+}
+
+impl CursorOptionsOverride {
+    fn resolve(self) -> CursorOptions {
+        let config = CursorOptions::from_config();
+        CursorOptions {
+            style: self.style.unwrap_or(config.style),
+            shape: self.shape.unwrap_or(config.shape),
+            corners: self.corners.unwrap_or(config.corners),
+            width_ratio: self.width_ratio.unwrap_or(config.width_ratio),
+        }
+    }
 }
 
 impl CursorOptions {
@@ -1286,6 +1346,8 @@ impl CursorOptions {
         Self {
             style: crate::config::cursor_style(),
             shape: crate::config::cursor_shape(),
+            corners: crate::config::cursor_corner_style(),
+            width_ratio: crate::config::cursor_width_ratio(),
         }
     }
 }
@@ -1293,7 +1355,7 @@ impl CursorOptions {
 impl CursorPaintState {
     fn hidden() -> Self {
         Self {
-            visible: false,
+            opacity: 0.0,
             pane_id: 0,
             motion: CursorMotionState::default(),
             options: CursorOptions::from_config(),
@@ -1301,13 +1363,9 @@ impl CursorPaintState {
         }
     }
 
-    fn with_blink(self, visible: bool) -> Self {
-        Self { visible, ..self }
-    }
-
     fn for_pane(self, pane_id: u64, active: bool) -> Self {
         Self {
-            visible: self.visible && active,
+            opacity: if active { self.opacity } else { 0.0 },
             pane_id,
             ..self
         }
@@ -1455,13 +1513,29 @@ impl CursorBlinkState {
             };
         }
         let reset_at = self.reset_at.unwrap_or(now);
-        let elapsed_periods =
-            now.saturating_duration_since(reset_at).as_millis() / CURSOR_BLINK_PERIOD.as_millis();
+        let elapsed_periods = now.saturating_duration_since(reset_at).as_millis()
+            / cursor_blink_interval().as_millis();
         Self {
             visible: elapsed_periods.is_multiple_of(2),
             cursor: self.cursor,
             reset_at: Some(reset_at),
         }
+    }
+
+    fn opacity(self, now: Instant, animation: CursorBlinkAnimation) -> f64 {
+        if self.cursor.is_none() {
+            return 0.0;
+        }
+        if animation == CursorBlinkAnimation::Instant {
+            return if self.visible { 1.0 } else { 0.0 };
+        }
+        let Some(reset_at) = self.reset_at else {
+            return if self.visible { 1.0 } else { 0.0 };
+        };
+        cursor_blink_smooth_opacity(
+            now.saturating_duration_since(reset_at),
+            cursor_blink_interval(),
+        )
     }
 }
 
@@ -1495,6 +1569,9 @@ impl CursorMotionState {
         };
         if current_state.pane_id != target.pane_id {
             return Self::settled(target, identity.visible, style, shape, now);
+        }
+        if current_state.to_line == target.line && current_state.to_column == target.column {
+            return current_state;
         }
 
         let current = current_state.position(now);
@@ -1724,6 +1801,34 @@ fn cursor_animation_duration() -> Duration {
     Duration::from_millis(u64::from(crate::config::cursor_animation_duration_ms()))
 }
 
+fn cursor_blink_interval() -> Duration {
+    Duration::from_millis(u64::from(crate::config::cursor_blink_interval_ms()))
+}
+
+fn cursor_blink_smooth_opacity(elapsed: Duration, interval: Duration) -> f64 {
+    let interval_ms = interval.as_secs_f64().max(f64::EPSILON);
+    let phase = (elapsed.as_secs_f64() % (interval_ms * 2.0)) / interval_ms;
+    if phase < 1.0 {
+        1.0 - ease_in_out_cubic(phase)
+    } else {
+        ease_out_quint(phase - 1.0)
+    }
+}
+
+fn ease_out_quint(progress: f64) -> f64 {
+    let inverse = 1.0 - progress.clamp(0.0, 1.0);
+    1.0 - inverse.powi(5)
+}
+
+fn ease_in_out_cubic(progress: f64) -> f64 {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress < 0.5 {
+        4.0 * progress.powi(3)
+    } else {
+        1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
+    }
+}
+
 fn smooth_cursor_progress(progress: f64) -> f64 {
     progress * ((((-5.4 * progress + 17.6) * progress - 20.6) * progress + 9.0) * progress + 0.4)
 }
@@ -1867,6 +1972,7 @@ fn draw_cursor(
     cursor_motion: Option<CursorMotionState>,
     cursor_options: CursorOptions,
     now: Instant,
+    opacity: f64,
     line_height: f64,
     cell_width: f64,
 ) {
@@ -1881,6 +1987,9 @@ fn draw_cursor(
             context,
             target,
             cursor_options.shape,
+            cursor_options.corners,
+            cursor_options.width_ratio,
+            opacity,
             line_height,
             cell_width,
         ),
@@ -1888,19 +1997,38 @@ fn draw_cursor(
             context,
             path.map(|path| path.current).unwrap_or(target),
             cursor_options.shape,
+            cursor_options.corners,
+            cursor_options.width_ratio,
+            opacity,
             line_height,
             cell_width,
         ),
         CursorStyle::Neovide => {
             if let Some(motion) = cursor_motion {
-                let points =
-                    points_to_pixels(motion.neovide_points_grid(), line_height, cell_width);
-                draw_neovide_points(context, points, cursor_options.shape);
+                if motion.active(now) {
+                    let points =
+                        points_to_pixels(motion.neovide_points_grid(), line_height, cell_width);
+                    draw_neovide_points(context, points, cursor_options.shape, opacity);
+                } else {
+                    draw_caret_at(
+                        context,
+                        target,
+                        cursor_options.shape,
+                        cursor_options.corners,
+                        cursor_options.width_ratio,
+                        opacity,
+                        line_height,
+                        cell_width,
+                    );
+                }
             } else {
                 draw_caret_at(
                     context,
                     target,
                     cursor_options.shape,
+                    cursor_options.corners,
+                    cursor_options.width_ratio,
+                    opacity,
                     line_height,
                     cell_width,
                 );
@@ -1909,12 +2037,17 @@ fn draw_cursor(
     }
 }
 
-fn draw_neovide_points(context: &cairo::Context, points: [CursorPoint; 4], shape: CursorShape) {
+fn draw_neovide_points(
+    context: &cairo::Context,
+    points: [CursorPoint; 4],
+    shape: CursorShape,
+    opacity: f64,
+) {
     context.set_source_rgba(
         125.0 / 255.0,
         211.0 / 255.0,
         252.0 / 255.0,
-        neovide_cursor_alpha(shape),
+        neovide_cursor_alpha(shape) * opacity,
     );
     draw_cursor_polygon(context, points);
 }
@@ -1989,16 +2122,41 @@ fn cursor_center(
     }
 }
 
+#[cfg(test)]
 fn cursor_size(shape: CursorShape, line_height: f64, cell_width: f64) -> (f64, f64) {
+    cursor_size_with_ratio(
+        shape,
+        line_height,
+        cell_width,
+        crate::config::cursor_width_ratio(),
+    )
+}
+
+fn cursor_size_with_ratio(
+    shape: CursorShape,
+    line_height: f64,
+    cell_width: f64,
+    width_ratio: f64,
+) -> (f64, f64) {
     match shape {
-        CursorShape::Bar => (cursor_size_cells(shape).0 * cell_width, line_height),
-        CursorShape::Block => (cursor_size_cells(shape).0 * cell_width, line_height),
+        CursorShape::Bar => (
+            cursor_size_cells_with_ratio(shape, width_ratio).0 * cell_width,
+            line_height,
+        ),
+        CursorShape::Block => (
+            cursor_size_cells_with_ratio(shape, width_ratio).0 * cell_width,
+            line_height,
+        ),
     }
 }
 
 fn cursor_size_cells(shape: CursorShape) -> (f64, f64) {
+    cursor_size_cells_with_ratio(shape, crate::config::cursor_width_ratio())
+}
+
+fn cursor_size_cells_with_ratio(shape: CursorShape, width_ratio: f64) -> (f64, f64) {
     match shape {
-        CursorShape::Bar => (1.0 / 8.0, 1.0),
+        CursorShape::Bar => (width_ratio.clamp(0.05, 1.0), 1.0),
         CursorShape::Block => (1.0, 1.0),
     }
 }
@@ -2152,6 +2310,9 @@ fn draw_caret_at(
     context: &cairo::Context,
     position: CursorDrawPosition,
     shape: CursorShape,
+    corners: CursorCornerStyle,
+    width_ratio: f64,
+    opacity: f64,
     line_height: f64,
     cell_width: f64,
 ) {
@@ -2159,6 +2320,9 @@ fn draw_caret_at(
         context,
         position,
         shape,
+        corners,
+        width_ratio,
+        opacity,
         line_height,
         cell_width,
         CursorPixelSnap::Integer,
@@ -2169,6 +2333,9 @@ fn draw_caret_at_fractional(
     context: &cairo::Context,
     position: CursorDrawPosition,
     shape: CursorShape,
+    corners: CursorCornerStyle,
+    width_ratio: f64,
+    opacity: f64,
     line_height: f64,
     cell_width: f64,
 ) {
@@ -2176,6 +2343,9 @@ fn draw_caret_at_fractional(
         context,
         position,
         shape,
+        corners,
+        width_ratio,
+        opacity,
         line_height,
         cell_width,
         CursorPixelSnap::Fractional,
@@ -2192,23 +2362,43 @@ fn draw_caret_rect(
     context: &cairo::Context,
     position: CursorDrawPosition,
     shape: CursorShape,
+    corners: CursorCornerStyle,
+    width_ratio: f64,
+    opacity: f64,
     line_height: f64,
     cell_width: f64,
     snap: CursorPixelSnap,
 ) {
     let (x, y) = caret_pixel_position(position, line_height, cell_width, snap);
-    let (width, height) = cursor_size(shape, line_height, cell_width);
+    let (width, height) = cursor_size_with_ratio(shape, line_height, cell_width, width_ratio);
     match shape {
         CursorShape::Bar => {
-            context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
-            context.rectangle(x, y, width, height);
+            context.set_source_rgba(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, opacity);
+            draw_caret_shape(context, corners, x, y, width, height);
         }
         CursorShape::Block => {
-            context.set_source_rgba(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, 0.72);
-            context.rectangle(x, y, width, height);
+            context.set_source_rgba(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, 0.72 * opacity);
+            draw_caret_shape(context, corners, x, y, width, height);
         }
     }
     let _ = context.fill();
+}
+
+fn draw_caret_shape(
+    context: &cairo::Context,
+    corners: CursorCornerStyle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) {
+    match corners {
+        CursorCornerStyle::Square => context.rectangle(x, y, width, height),
+        CursorCornerStyle::Rounded => {
+            let radius = (width.min(height) * 0.45).max(1.0);
+            draw_rounded_rectangle(context, x, y, width, height, radius);
+        }
+    }
 }
 
 fn snap_cursor_pixel(value: f64, snap: CursorPixelSnap) -> f64 {
@@ -2473,13 +2663,13 @@ mod tests {
         };
         let state = CursorBlinkState::default().sync(cursor, start);
         assert!(state.visible);
-        let hidden = state.tick(true, true, start + CURSOR_BLINK_PERIOD);
+        let hidden = state.tick(true, true, start + cursor_blink_interval());
         assert!(!hidden.visible);
         assert!(
             !hidden
                 .sync(
                     cursor,
-                    start + CURSOR_BLINK_PERIOD + Duration::from_millis(1)
+                    start + cursor_blink_interval() + Duration::from_millis(1)
                 )
                 .visible
         );
@@ -2488,7 +2678,7 @@ mod tests {
                 column: 3,
                 ..cursor
             },
-            start + CURSOR_BLINK_PERIOD + Duration::from_millis(1),
+            start + cursor_blink_interval() + Duration::from_millis(1),
         );
         assert!(moved.visible);
         assert!(
@@ -2496,7 +2686,7 @@ mod tests {
                 .tick(
                     true,
                     true,
-                    start + CURSOR_BLINK_PERIOD + Duration::from_millis(120)
+                    start + cursor_blink_interval() + Duration::from_millis(120)
                 )
                 .visible
         );
@@ -2512,12 +2702,76 @@ mod tests {
             visible: true,
         };
         let state = CursorBlinkState::default().sync(cursor, start);
-        let visible = state.tick(false, false, start + CURSOR_BLINK_PERIOD);
+        let visible = state.tick(false, false, start + cursor_blink_interval());
         assert!(!visible.visible);
 
-        let visible = state.tick(true, false, start + CURSOR_BLINK_PERIOD);
+        let visible = state.tick(true, false, start + cursor_blink_interval());
         assert!(visible.visible);
         assert_eq!(visible.reset_at, None);
+    }
+
+    #[test]
+    #[serial]
+    fn smooth_cursor_blink_interpolates_opacity() {
+        let dir = temp_config_dir("smooth-cursor-blink");
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+        crate::config::write_value("cursor_blink_animation", "smooth");
+        crate::config::write_value("cursor_blink_interval_ms", "1000");
+        let start = Instant::now();
+        let cursor = CursorIdentity {
+            pane_id: 0,
+            line: 1,
+            column: 2,
+            visible: true,
+        };
+        let state = CursorBlinkState::default().sync(cursor, start);
+
+        assert_eq!(state.opacity(start, CursorBlinkAnimation::Smooth), 1.0);
+        assert!(
+            (state.opacity(
+                start + Duration::from_millis(500),
+                CursorBlinkAnimation::Smooth
+            ) - 0.5)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(
+            state.opacity(
+                start + Duration::from_millis(1000),
+                CursorBlinkAnimation::Smooth
+            ),
+            0.0
+        );
+        assert!(
+            (state.opacity(
+                start + Duration::from_millis(1250),
+                CursorBlinkAnimation::Smooth
+            ) - 0.7626953125)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (state.opacity(
+                start + Duration::from_millis(1500),
+                CursorBlinkAnimation::Smooth
+            ) - 0.96875)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(
+            state.opacity(
+                start + Duration::from_millis(2000),
+                CursorBlinkAnimation::Smooth
+            ),
+            1.0
+        );
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2775,6 +3029,61 @@ mod tests {
         assert_eq!(path.from, before_retarget);
         assert_eq!(path.target.column, 12.0);
         assert!(path.from.column > path.target.column);
+
+        unsafe {
+            std::env::remove_var("CHELOTYPE_CONFIG_DIR");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[serial]
+    fn smooth_cursor_motion_keeps_same_target_animation_start() {
+        let dir = temp_config_dir("smooth-same-target");
+        unsafe {
+            std::env::set_var("CHELOTYPE_CONFIG_DIR", &dir);
+        }
+        crate::config::write_value("cursor_animation_duration_ms", "100");
+        let start = Instant::now();
+        let first = CursorIdentity {
+            pane_id: 7,
+            line: 1,
+            column: 0,
+            visible: true,
+        };
+        let second = CursorIdentity {
+            column: 80,
+            ..first
+        };
+
+        let moved = CursorMotionState::default()
+            .sync(first, start, CursorStyle::Smooth, CursorShape::Bar)
+            .sync(
+                second,
+                start + Duration::from_millis(1),
+                CursorStyle::Smooth,
+                CursorShape::Bar,
+            );
+        let repeated = moved.sync(
+            second,
+            start + Duration::from_millis(30),
+            CursorStyle::Smooth,
+            CursorShape::Bar,
+        );
+        let finished_at = start + Duration::from_millis(101);
+
+        assert_eq!(repeated.started_at, moved.started_at);
+        assert_eq!(repeated.from_column, moved.from_column);
+        let finished = repeated
+            .position(finished_at)
+            .expect("finished smooth cursor position");
+        assert_eq!(finished.pane_id, 7);
+        assert_eq!(finished.line, 1.0);
+        assert!(
+            (finished.column - 80.0).abs() < 1e-10,
+            "{}",
+            finished.column
+        );
 
         unsafe {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");
