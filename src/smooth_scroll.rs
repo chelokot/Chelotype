@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-const BASE_SCROLL_LINES_PER_SECOND: f64 = 50.0;
-const SCROLL_ACCELERATION_PER_LINE: f64 = 8.0;
+const SCROLL_ANIMATION_LENGTH: Duration = Duration::from_millis(100);
+const SCROLL_SETTLE_LINES: f64 = 0.01;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SmoothScrollFrame {
@@ -12,9 +12,9 @@ pub struct SmoothScrollFrame {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SmoothScroll {
-    target_px: f64,
-    visual_px: f64,
-    applied_lines: i32,
+    pending_px: f64,
+    offset_px: f64,
+    velocity_px: f64,
     fresh: bool,
 }
 
@@ -25,7 +25,7 @@ impl SmoothScroll {
 
     pub fn enqueue_pixels(&mut self, pixels: f64) {
         let was_active = self.is_active();
-        self.target_px += pixels;
+        self.pending_px += pixels;
         if !was_active && self.is_active() {
             self.fresh = true;
         }
@@ -40,9 +40,7 @@ impl SmoothScroll {
         if pixels == 0.0 || line_height <= 0.0 {
             return 0.0;
         }
-        let base_px = f64::from(self.applied_lines) * line_height;
-        let current_unapplied_px = self.target_px - base_px;
-        let candidate_unapplied_px = current_unapplied_px + pixels;
+        let candidate_unapplied_px = self.pending_px + pixels;
         let clamped_unapplied_px = if candidate_unapplied_px.signum() == pixels.signum() {
             let available_px = available_lines as f64 * line_height;
             candidate_unapplied_px
@@ -53,9 +51,8 @@ impl SmoothScroll {
             candidate_unapplied_px
         };
         let was_active = self.is_active();
-        let next_target_px = base_px + clamped_unapplied_px;
-        let enqueued_px = next_target_px - self.target_px;
-        self.target_px = next_target_px;
+        let enqueued_px = clamped_unapplied_px - self.pending_px;
+        self.pending_px = clamped_unapplied_px;
         if !was_active && self.is_active() {
             self.fresh = true;
         }
@@ -76,64 +73,75 @@ impl SmoothScroll {
         } else {
             frame_duration
         };
-        let remaining = self.target_px - self.visual_px;
-        let speed_lines_per_second = scroll_speed_lines_per_second((remaining / line_height).abs());
-        let step_px = line_height * frame_duration.as_secs_f64() * speed_lines_per_second;
-        let scroll_direction = remaining.signum();
-        let step_px = step_px.min(remaining.abs());
-        self.visual_px += scroll_direction * step_px;
 
-        if (self.target_px - self.visual_px).abs() < 0.5 {
-            self.visual_px = self.target_px;
+        let line_delta = (self.pending_px / line_height).trunc() as i32;
+        if line_delta != 0 {
+            let applied_px = f64::from(line_delta) * line_height;
+            self.pending_px -= applied_px;
+            self.offset_px -= applied_px;
+        } else if self.offset_px == 0.0 {
+            self.offset_px += self.pending_px;
+            self.pending_px = 0.0;
         }
-        let line_position = self.visual_px / line_height;
-        let target_line_distance = (self.target_px / line_height).abs();
-        let visual_lines = if target_line_distance >= 1.0 && line_position > 0.0 {
-            line_position.ceil() as i32
-        } else if target_line_distance >= 1.0 && line_position < 0.0 {
-            line_position.floor() as i32
-        } else {
-            0
-        };
-        let line_delta = visual_lines - self.applied_lines;
-        self.applied_lines = visual_lines;
-        let offset_px = self.visual_px - (f64::from(self.applied_lines) * line_height);
-        let remaining_px = (self.target_px - self.visual_px).abs();
-        if remaining_px < 0.5 && offset_px.abs() < 0.5 {
-            self.target_px = 0.0;
-            self.visual_px = 0.0;
-            self.applied_lines = 0;
-            self.fresh = false;
-        }
+
+        self.advance_spring(frame_duration, line_height);
+
+        let remaining_px = self.remaining_px();
         Some(SmoothScrollFrame {
             line_delta,
-            offset_px,
+            offset_px: self.offset_px,
             remaining_px,
         })
     }
 
     pub fn remaining_px(&self) -> f64 {
-        (self.target_px - self.visual_px).abs()
+        self.pending_px.abs() + self.offset_px.abs()
     }
 
     pub fn visual_px(&self) -> f64 {
-        self.visual_px
+        self.offset_px
     }
 
     pub fn is_active(&self) -> bool {
-        (self.target_px - self.visual_px).abs() >= 0.5
+        self.pending_px.abs() >= 0.5 || self.offset_px != 0.0
     }
 
     pub fn cancel(&mut self) {
-        self.target_px = 0.0;
-        self.visual_px = 0.0;
-        self.applied_lines = 0;
+        self.pending_px = 0.0;
+        self.offset_px = 0.0;
+        self.velocity_px = 0.0;
         self.fresh = false;
     }
-}
 
-fn scroll_speed_lines_per_second(remaining_lines: f64) -> f64 {
-    BASE_SCROLL_LINES_PER_SECOND + (remaining_lines * SCROLL_ACCELERATION_PER_LINE)
+    fn advance_spring(&mut self, frame_duration: Duration, line_height: f64) {
+        if self.offset_px == 0.0 {
+            self.velocity_px = 0.0;
+            return;
+        }
+
+        if SCROLL_ANIMATION_LENGTH <= frame_duration {
+            self.offset_px = 0.0;
+            self.velocity_px = 0.0;
+            return;
+        }
+
+        let dt = frame_duration.as_secs_f64();
+        let animation_length = SCROLL_ANIMATION_LENGTH.as_secs_f64();
+        let omega = 4.0 / animation_length;
+        let position = self.offset_px;
+        let velocity = self.velocity_px;
+        let a = position;
+        let b = position * omega + velocity;
+        let decay = (-omega * dt).exp();
+
+        self.offset_px = (a + b * dt) * decay;
+        self.velocity_px = decay * (-a * omega - b * dt * omega + b);
+
+        if self.offset_px.abs() < line_height * SCROLL_SETTLE_LINES {
+            self.offset_px = 0.0;
+            self.velocity_px = 0.0;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -148,9 +156,9 @@ mod tests {
         let frame = scroll
             .advance(crate::frame_timing::TARGET_FRAME_DURATION, 20.0)
             .expect("smooth scroll frame");
-        assert_eq!(frame.line_delta, 1);
-        assert!((-13.9..-13.8).contains(&frame.offset_px), "{frame:?}");
-        assert!((53.8..53.9).contains(&frame.remaining_px), "{frame:?}");
+        assert_eq!(frame.line_delta, 3);
+        assert!((-59.3..-59.2).contains(&frame.offset_px), "{frame:?}");
+        assert!((59.2..59.3).contains(&frame.remaining_px), "{frame:?}");
     }
 
     #[test]
@@ -162,9 +170,9 @@ mod tests {
         let frame = scroll
             .advance(crate::frame_timing::TARGET_FRAME_DURATION, 20.0)
             .expect("smooth scroll frame");
-        assert_eq!(frame.line_delta, 1);
-        assert!((-14.6..-14.5).contains(&frame.offset_px), "{frame:?}");
-        assert!((34.5..34.6).contains(&frame.remaining_px), "{frame:?}");
+        assert_eq!(frame.line_delta, 2);
+        assert!((-39.6..-39.5).contains(&frame.offset_px), "{frame:?}");
+        assert!((39.5..39.6).contains(&frame.remaining_px), "{frame:?}");
     }
 
     #[test]
@@ -177,8 +185,8 @@ mod tests {
             .expect("smooth scroll frame");
 
         assert_eq!(frame.line_delta, 0);
-        assert_eq!(frame.offset_px, 2.5);
-        assert_eq!(frame.remaining_px, 0.0);
+        assert!((2.4..2.5).contains(&frame.offset_px), "{frame:?}");
+        assert!((2.4..2.5).contains(&frame.remaining_px), "{frame:?}");
     }
 
     #[test]
@@ -191,8 +199,9 @@ mod tests {
         let frame = scroll
             .advance(crate::frame_timing::TARGET_FRAME_DURATION, 20.0)
             .expect("clamped scroll frame");
-        assert_eq!(frame.line_delta, 1);
-        assert!((34.5..34.6).contains(&frame.remaining_px), "{frame:?}");
+        assert_eq!(frame.line_delta, 2);
+        assert!((-39.6..-39.5).contains(&frame.offset_px), "{frame:?}");
+        assert!((39.5..39.6).contains(&frame.remaining_px), "{frame:?}");
     }
 
     #[test]
@@ -222,7 +231,7 @@ mod tests {
             .advance(crate::frame_timing::TARGET_FRAME_DURATION, 20.0)
             .expect("scroll start frame");
         assert_eq!(frame.line_delta, 1);
-        assert!((-15.2..-15.1).contains(&frame.offset_px), "{frame:?}");
+        assert!((-19.8..-19.7).contains(&frame.offset_px), "{frame:?}");
     }
 
     #[test]
@@ -234,7 +243,7 @@ mod tests {
             .advance(crate::frame_timing::TARGET_FRAME_DURATION, 20.0)
             .expect("scroll start frame");
         assert_eq!(frame.line_delta, -1);
-        assert!((15.1..15.2).contains(&frame.offset_px), "{frame:?}");
+        assert!((19.7..19.8).contains(&frame.offset_px), "{frame:?}");
     }
 
     #[test]
@@ -245,19 +254,19 @@ mod tests {
         let first = scroll
             .advance(Duration::from_millis(8), 20.0)
             .expect("first partial-line frame");
-        assert_eq!(first.line_delta, 1);
-        assert!((-14.6..-14.5).contains(&first.offset_px), "{first:?}");
+        assert_eq!(first.line_delta, 2);
+        assert!((-39.6..-39.5).contains(&first.offset_px), "{first:?}");
 
         let second = scroll
             .advance(Duration::from_millis(8), 20.0)
             .expect("second partial-line frame");
         assert_eq!(second.line_delta, 0);
-        assert!((-4.4..-4.2).contains(&second.offset_px), "{second:?}");
+        assert!((-36.6..-36.5).contains(&second.offset_px), "{second:?}");
 
         let final_frame = scroll
             .advance(Duration::from_millis(100), 20.0)
             .expect("final frame");
-        assert_eq!(final_frame.line_delta, 1);
+        assert_eq!(final_frame.line_delta, 0);
         assert_eq!(final_frame.offset_px, 0.0);
         assert_eq!(final_frame.remaining_px, 0.0);
     }
@@ -267,7 +276,7 @@ mod tests {
         let mut scroll = SmoothScroll::default();
         scroll.enqueue_lines(-1, 20.0);
 
-        for _ in 0..20 {
+        for _ in 0..80 {
             let _ = scroll.advance(crate::frame_timing::TARGET_FRAME_DURATION, 20.0);
         }
         assert!(!scroll.is_active());
@@ -353,25 +362,16 @@ mod tests {
             .advance(crate::frame_timing::TARGET_FRAME_DURATION, 20.0)
             .expect("backlog frame");
 
-        assert!((-13.9..-13.8).contains(&single_frame.offset_px));
-        assert_eq!(backlog_frame.line_delta, 2);
+        assert!((-59.3..-59.2).contains(&single_frame.offset_px));
+        assert_eq!(backlog_frame.line_delta, 24);
         assert!(
-            (-19.9..-19.8).contains(&backlog_frame.offset_px),
+            (-474.1..-474.0).contains(&backlog_frame.offset_px),
             "{backlog_frame:?}"
         );
         assert!(
-            (459.8..459.9).contains(&backlog_frame.remaining_px),
+            (474.0..474.1).contains(&backlog_frame.remaining_px),
             "{backlog_frame:?}"
         );
-    }
-
-    #[test]
-    fn scroll_speed_is_constant_plus_distance_gain_without_global_cap() {
-        assert_eq!(scroll_speed_lines_per_second(1.0), 58.0);
-        assert_eq!(scroll_speed_lines_per_second(3.0), 74.0);
-        assert_eq!(scroll_speed_lines_per_second(4.0), 82.0);
-        assert_eq!(scroll_speed_lines_per_second(12.0), 146.0);
-        assert_eq!(scroll_speed_lines_per_second(24.0), 242.0);
     }
 
     #[test]

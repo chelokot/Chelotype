@@ -724,41 +724,57 @@ fn draw_scroll_underlay_frame_in_rect(
         return;
     }
     let line_height = metrics.line_height;
+    let Some(underlay) = scroll_underlay_paint(scroll_visual_offset_px, line_height, rect.height)
+    else {
+        return;
+    };
     let _ = context.save();
-    if scroll_visual_offset_px < 0.0 {
-        let missing = (-scroll_visual_offset_px).min(line_height);
-        context.rectangle(0.0, rect.height - missing, rect.width, missing);
-        context.clip();
-        draw_render_frame(
-            widget,
-            context,
-            render,
-            CursorPaintState::hidden(),
-            metrics,
-            paint_resources,
-            PaintViewport {
-                scroll_visual_offset_px: scroll_visual_offset_px + line_height,
-                width: rect.width,
-            },
-        );
-    } else {
-        let missing = scroll_visual_offset_px.min(line_height);
-        context.rectangle(0.0, 0.0, rect.width, missing);
-        context.clip();
-        draw_render_frame(
-            widget,
-            context,
-            render,
-            CursorPaintState::hidden(),
-            metrics,
-            paint_resources,
-            PaintViewport {
-                scroll_visual_offset_px: scroll_visual_offset_px - line_height,
-                width: rect.width,
-            },
-        );
-    }
+    context.rectangle(0.0, underlay.clip_y, rect.width, underlay.clip_height);
+    context.clip();
+    draw_render_frame(
+        widget,
+        context,
+        render,
+        CursorPaintState::hidden(),
+        metrics,
+        paint_resources,
+        PaintViewport {
+            scroll_visual_offset_px: underlay.scroll_visual_offset_px,
+            width: rect.width,
+        },
+    );
     let _ = context.restore();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollUnderlayPaint {
+    clip_y: f64,
+    clip_height: f64,
+    scroll_visual_offset_px: f64,
+}
+
+fn scroll_underlay_paint(
+    scroll_visual_offset_px: f64,
+    line_height: f64,
+    rect_height: f64,
+) -> Option<ScrollUnderlayPaint> {
+    if scroll_visual_offset_px.abs() < 0.1 || line_height <= 0.0 || rect_height <= 0.0 {
+        return None;
+    }
+    let missing = scroll_visual_offset_px.abs().min(rect_height);
+    let missing_lines = (scroll_visual_offset_px.abs() / line_height).ceil();
+    let offset_correction = missing_lines * line_height * scroll_visual_offset_px.signum();
+    let scroll_visual_offset_px = scroll_visual_offset_px - offset_correction;
+    let clip_y = if offset_correction < 0.0 {
+        rect_height - missing
+    } else {
+        0.0
+    };
+    Some(ScrollUnderlayPaint {
+        clip_y,
+        clip_height: missing,
+        scroll_visual_offset_px,
+    })
 }
 
 fn draw_render_frame(
@@ -1709,7 +1725,7 @@ fn cursor_animation_duration() -> Duration {
 }
 
 fn smooth_cursor_progress(progress: f64) -> f64 {
-    1.0 - (1.0 - progress).powi(3)
+    progress * ((((-5.4 * progress + 17.6) * progress - 20.6) * progress + 9.0) * progress + 0.4)
 }
 
 fn snappy_cursor_progress(progress: f64) -> f64 {
@@ -1868,7 +1884,7 @@ fn draw_cursor(
             line_height,
             cell_width,
         ),
-        CursorStyle::Smooth | CursorStyle::Snappy => draw_caret_at(
+        CursorStyle::Smooth | CursorStyle::Snappy => draw_caret_at_fractional(
             context,
             path.map(|path| path.current).unwrap_or(target),
             cursor_options.shape,
@@ -2139,20 +2155,79 @@ fn draw_caret_at(
     line_height: f64,
     cell_width: f64,
 ) {
-    let x = position.column * cell_width;
-    let y = position.line * line_height;
+    draw_caret_rect(
+        context,
+        position,
+        shape,
+        line_height,
+        cell_width,
+        CursorPixelSnap::Integer,
+    );
+}
+
+fn draw_caret_at_fractional(
+    context: &cairo::Context,
+    position: CursorDrawPosition,
+    shape: CursorShape,
+    line_height: f64,
+    cell_width: f64,
+) {
+    draw_caret_rect(
+        context,
+        position,
+        shape,
+        line_height,
+        cell_width,
+        CursorPixelSnap::Fractional,
+    );
+}
+
+#[derive(Clone, Copy)]
+enum CursorPixelSnap {
+    Integer,
+    Fractional,
+}
+
+fn draw_caret_rect(
+    context: &cairo::Context,
+    position: CursorDrawPosition,
+    shape: CursorShape,
+    line_height: f64,
+    cell_width: f64,
+    snap: CursorPixelSnap,
+) {
+    let (x, y) = caret_pixel_position(position, line_height, cell_width, snap);
     let (width, height) = cursor_size(shape, line_height, cell_width);
     match shape {
         CursorShape::Bar => {
             context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
-            context.rectangle(x.round(), y.round(), width, height);
+            context.rectangle(x, y, width, height);
         }
         CursorShape::Block => {
             context.set_source_rgba(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, 0.72);
-            context.rectangle(x.round(), y.round(), width, height);
+            context.rectangle(x, y, width, height);
         }
     }
     let _ = context.fill();
+}
+
+fn snap_cursor_pixel(value: f64, snap: CursorPixelSnap) -> f64 {
+    match snap {
+        CursorPixelSnap::Integer => value.round(),
+        CursorPixelSnap::Fractional => value,
+    }
+}
+
+fn caret_pixel_position(
+    position: CursorDrawPosition,
+    line_height: f64,
+    cell_width: f64,
+    snap: CursorPixelSnap,
+) -> (f64, f64) {
+    (
+        snap_cursor_pixel(position.column * cell_width, snap),
+        snap_cursor_pixel(position.line * line_height, snap),
+    )
 }
 
 fn draw_preedit(
@@ -2275,6 +2350,19 @@ mod tests {
         ))
     }
 
+    fn assert_underlay_paint(actual: Option<ScrollUnderlayPaint>, expected: ScrollUnderlayPaint) {
+        let actual = actual.expect("scroll underlay paint");
+        assert!((actual.clip_y - expected.clip_y).abs() < 1e-9, "{actual:?}");
+        assert!(
+            (actual.clip_height - expected.clip_height).abs() < 1e-9,
+            "{actual:?}"
+        );
+        assert!(
+            (actual.scroll_visual_offset_px - expected.scroll_visual_offset_px).abs() < 1e-9,
+            "{actual:?}"
+        );
+    }
+
     #[test]
     fn run_markup_escapes_text_and_preserves_style() {
         let style = RenderStyle {
@@ -2340,6 +2428,30 @@ mod tests {
         assert_eq!(
             RowSurfaceLineKey::from(&first),
             RowSurfaceLineKey::from(&shifted)
+        );
+    }
+
+    #[test]
+    fn scroll_underlay_paint_covers_multi_line_positive_offsets() {
+        assert_underlay_paint(
+            scroll_underlay_paint(51.35, 18.0, 400.0),
+            ScrollUnderlayPaint {
+                clip_y: 0.0,
+                clip_height: 51.35,
+                scroll_visual_offset_px: -2.65,
+            },
+        );
+    }
+
+    #[test]
+    fn scroll_underlay_paint_covers_multi_line_negative_offsets() {
+        assert_underlay_paint(
+            scroll_underlay_paint(-59.25, 20.0, 400.0),
+            ScrollUnderlayPaint {
+                clip_y: 340.75,
+                clip_height: 59.25,
+                scroll_visual_offset_px: 0.75,
+            },
         );
     }
 
@@ -2447,14 +2559,12 @@ mod tests {
         assert!(halfway.column < 10.0);
         assert!(moved.active(start + Duration::from_millis(1)));
         assert!(!moved.active(start + Duration::from_millis(1) + animation_duration));
-        assert_eq!(
-            moved.position(start + Duration::from_millis(1) + animation_duration),
-            Some(CursorDrawPosition {
-                pane_id: 0,
-                line: 1.0,
-                column: 10.0
-            })
-        );
+        let finished = moved
+            .position(start + Duration::from_millis(1) + animation_duration)
+            .expect("finished cursor position");
+        assert_eq!(finished.pane_id, 0);
+        assert_eq!(finished.line, 1.0);
+        assert!((finished.column - 10.0).abs() < 1e-9, "{finished:?}");
     }
 
     #[test]
@@ -2525,6 +2635,24 @@ mod tests {
                 column: 8.0
             })
         );
+    }
+
+    #[test]
+    fn smooth_cursor_progress_matches_jetbrains_ease_curve() {
+        let cases = [
+            (0.0, 0.0),
+            (0.05, 0.0400333125),
+            (0.1, 0.11110600000000002),
+            (0.2, 0.30163200000000007),
+            (0.5, 0.80625),
+            (1.0, 1.0),
+        ];
+        for (progress, expected) in cases {
+            assert!(
+                (smooth_cursor_progress(progress) - expected).abs() < 1e-12,
+                "{progress}"
+            );
+        }
     }
 
     #[test]
@@ -2652,6 +2780,36 @@ mod tests {
             std::env::remove_var("CHELOTYPE_CONFIG_DIR");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn animated_caret_uses_fractional_pixel_position() {
+        let position = CursorDrawPosition {
+            pane_id: 0,
+            line: 1.25,
+            column: 2.5,
+        };
+
+        assert_eq!(
+            caret_pixel_position(position, 20.0, 10.0, CursorPixelSnap::Integer),
+            (25.0, 25.0)
+        );
+        assert_eq!(
+            caret_pixel_position(position, 20.0, 10.0, CursorPixelSnap::Fractional),
+            (25.0, 25.0)
+        );
+
+        let position = CursorDrawPosition {
+            column: 2.53,
+            ..position
+        };
+        assert_eq!(
+            caret_pixel_position(position, 20.0, 10.0, CursorPixelSnap::Integer),
+            (25.0, 25.0)
+        );
+        let (x, y) = caret_pixel_position(position, 20.0, 10.0, CursorPixelSnap::Fractional);
+        assert!((x - 25.3).abs() < 1e-12, "{x}");
+        assert_eq!(y, 25.0);
     }
 
     #[test]
