@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fish libadwaita-1-dev libgtk-4-dev zsh
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting and release metadata
+        run: |
+          cargo fmt --check
+          scripts/check-release-metadata.sh
+
+      - name: Test
+        run: scripts/with-zig.sh cargo test --locked -- --test-threads=1
+
+      - name: Lint
+        run: scripts/with-zig.sh cargo clippy --all-targets --locked -- -D warnings
