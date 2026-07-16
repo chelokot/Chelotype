@@ -11,8 +11,8 @@ use crate::input::{
 use crate::input_selection::{
     DirectedSelectionRange, active_cursor_point, active_input_line_range,
     cursor_movement_bytes_between_points, directed_selection_for_target,
-    input_buffer_offset_for_position, keyboard_cursor_bytes, keyboard_cursor_target,
-    keyboard_selection_collapse_target, selection_within_active_input,
+    input_buffer_range_for_selection, input_cursor_offset_for_position, keyboard_cursor_bytes,
+    keyboard_cursor_target, keyboard_selection_collapse_target, selection_within_active_input,
 };
 use crate::interaction::{
     InteractionEffect, PointerInteraction, cursor_movement_bytes_between_editable_input_points,
@@ -1639,8 +1639,11 @@ fn build_ui(app: &Application) {
                     .all(|expected| text.contains(expected))
                 {
                     gtk::test_widget_wait_for_draw(tick_canvas.widget());
-                    let _ =
-                        write_snapshot_with_selection(active_content, "gtk_e2e", visible_selection);
+                    let _ = write_snapshot_with_selection(
+                        &active_content,
+                        "gtk_e2e",
+                        visible_selection,
+                    );
                     if let Some(rendered) = &rendered_snapshot {
                         let _ = write_workspace_render_snapshot(rendered, "gtk_e2e_workspace");
                     }
@@ -1664,7 +1667,7 @@ fn build_ui(app: &Application) {
                     *selection_text.borrow_mut() =
                         text_for_viewport_selection(&active_content, visible_selection);
                 }
-                let _ = write_snapshot_with_selection(active_content, "frame", visible_selection);
+                let _ = write_snapshot_with_selection(&active_content, "frame", visible_selection);
                 if selection.get().is_some() {
                     copy_selection_to_primary(tick_canvas.widget(), &selection_text);
                 }
@@ -1693,15 +1696,13 @@ fn build_ui(app: &Application) {
             mouse_mode.set(content.mouse);
             *last_content.borrow_mut() = Some(content);
         }
-        let render_content = if terminal_changed || selection_changed {
-            last_content.borrow().clone()
-        } else {
-            None
-        };
-        if let Some(content) = render_content {
+        let render_content = last_content.borrow();
+        if (terminal_changed || selection_changed)
+            && let Some(content) = render_content.as_ref()
+        {
             let expected_selection_text = selection_text.borrow().clone();
             let visible_selection = visible_or_reanchored_selection(
-                &content,
+                content,
                 &selection,
                 expected_selection_text.as_deref(),
             );
@@ -1709,14 +1710,14 @@ fn build_ui(app: &Application) {
                 && let Some(visible_selection) = visible_selection
             {
                 *selection_text.borrow_mut() =
-                    text_for_viewport_selection(&content, visible_selection);
+                    text_for_viewport_selection(content, visible_selection);
             }
             let allocations_before = crate::allocation_trace::snapshot();
             let render_started = std::time::Instant::now();
             let rendered = if render_snapshot_enabled {
-                Renderer::render_frame_with_selection(&content, visible_selection)
+                Renderer::render_frame_with_selection(content, visible_selection)
             } else {
-                Renderer::render_frame_for_paint(&content, visible_selection)
+                Renderer::render_frame_for_paint(content, visible_selection)
             };
             let mut rendered = rendered;
             apply_preedit_to_render_frame(&mut rendered, preedit_state.as_ref());
@@ -1774,17 +1775,18 @@ fn build_ui(app: &Application) {
                 }
             }
         }
+        let snapshot_content = last_content.borrow();
         if snapshot_enabled
             && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
                 || selection_changed
                 || force)
-            && let Some(content) = last_content.borrow().clone()
+            && let Some(content) = snapshot_content.as_ref()
         {
             *last_snapshot.borrow_mut() = std::time::Instant::now();
             crate::logging::debug_log(&format!("snapshot selection {:?}", selection.get()));
             let expected_selection_text = selection_text.borrow().clone();
             let visible_selection = visible_or_reanchored_selection(
-                &content,
+                content,
                 &selection,
                 expected_selection_text.as_deref(),
             );
@@ -1792,9 +1794,9 @@ fn build_ui(app: &Application) {
                 && let Some(visible_selection) = visible_selection
             {
                 *selection_text.borrow_mut() =
-                    text_for_viewport_selection(&content, visible_selection);
+                    text_for_viewport_selection(content, visible_selection);
             }
-            let rendered = Renderer::render_frame_with_selection(&content, visible_selection);
+            let rendered = Renderer::render_frame_with_selection(content, visible_selection);
             let mut rendered = rendered;
             apply_preedit_to_render_frame(&mut rendered, preedit.borrow().as_ref());
             if render_snapshot_enabled {
@@ -2511,12 +2513,16 @@ struct PasteClipboardContext {
 }
 
 fn paste_clipboard_text(widget: &gtk::DrawingArea, context: PasteClipboardContext) {
+    let target_pane = context.workspace.borrow().active_pane_id();
     widget
         .clipboard()
         .read_text_async(None::<&gtk::gio::Cancellable>, move |result| {
             let Ok(Some(text)) = result else {
                 return;
             };
+            if context.workspace.borrow().active_pane_id() != target_pane {
+                return;
+            }
             mark_pending_input_latency(&context.pending_input_latency);
             let shell_bridge_active = context
                 .content
@@ -2542,14 +2548,15 @@ fn terminal_paste_bytes(bracketed_paste: bool, text: &[u8]) -> Vec<u8> {
     const START: &[u8] = b"\x1b[200~";
     const END: &[u8] = b"\x1b[201~";
 
-    if bracketed_paste && !text.windows(END.len()).any(|window| window == END) {
+    let sanitized = text.iter().copied().filter(|byte| *byte != b'\x1b');
+    if bracketed_paste {
         let mut bytes = Vec::with_capacity(START.len() + text.len() + END.len());
         bytes.extend_from_slice(START);
-        bytes.extend_from_slice(text);
+        bytes.extend(sanitized);
         bytes.extend_from_slice(END);
         bytes
     } else {
-        text.to_vec()
+        sanitized.collect()
     }
 }
 
@@ -3337,34 +3344,24 @@ fn palette_preferences_group(
         .margin_bottom(8)
         .build();
     let sort_all_palettes = std::rc::Rc::new(std::cell::Cell::new(false));
-    for palette in crate::terminal_palette::terminal_palette_display_order(true) {
-        let card = palette_preview_card(
-            palette,
-            selected_palette.clone(),
-            previews.clone(),
-            canvas.clone(),
-            force_snapshot.clone(),
-            pending_style_refresh.clone(),
-        );
-        let flow_child = gtk::FlowBoxChild::builder()
-            .child(&card)
-            .visible(palette.primary)
-            .css_classes(["palette-flow-child"])
-            .build();
-        flow.append(&flow_child);
-        cards.borrow_mut().push(PaletteCard {
-            child: flow_child,
-            palette,
-        });
+    let card_factory = PaletteCardFactory {
+        selected_palette,
+        previews,
+        canvas,
+        force_snapshot,
+        pending_style_refresh,
+    };
+    for palette in crate::terminal_palette::terminal_palette_display_order(false) {
+        card_factory.append(&flow, &cards, palette);
     }
     {
         let sort_all_palettes = sort_all_palettes.clone();
         let cards = cards.clone();
         flow.set_sort_func(move |first, second| {
             let cards = cards.borrow();
-            let first_palette = palette_for_flow_child(&cards, first);
-            let second_palette = palette_for_flow_child(&cards, second);
-            palette_card_order(first_palette, second_palette, sort_all_palettes.get())
+            let first_card = palette_card_for_flow_child(&cards, first);
+            let second_card = palette_card_for_flow_child(&cards, second);
+            palette_card_order(first_card, second_card, sort_all_palettes.get())
         });
     }
     flow.invalidate_sort();
@@ -3375,11 +3372,20 @@ fn palette_preferences_group(
         let sort_all_palettes = sort_all_palettes.clone();
         let search = search.clone();
         let title = title.clone();
+        let card_factory = card_factory.clone();
         toggle.connect_clicked(move |button| {
             let expanded = !show_all.get();
             show_all.set(expanded);
             set_palette_visibility_toggle(button, expanded);
             sort_all_palettes.set(expanded);
+            if expanded && cards.borrow().len() < crate::terminal_palette::PALETTES.len() {
+                for palette in crate::terminal_palette::terminal_palette_display_order(true)
+                    .into_iter()
+                    .filter(|palette| !palette.primary)
+                {
+                    card_factory.append(&flow, &cards, palette);
+                }
+            }
             flow.invalidate_sort();
             title.set_visible(!expanded);
             search.set_visible(expanded);
@@ -3457,27 +3463,70 @@ fn terminal_spacing_row(
 struct PaletteCard {
     child: gtk::FlowBoxChild,
     palette: &'static crate::terminal_palette::TerminalPalette,
+    primary_index: usize,
+    search_name: String,
 }
 
-fn palette_for_flow_child(
-    cards: &[PaletteCard],
+#[derive(Clone)]
+struct PaletteCardFactory {
+    selected_palette: std::rc::Rc<std::cell::RefCell<String>>,
+    previews: std::rc::Rc<std::cell::RefCell<Vec<gtk::DrawingArea>>>,
+    canvas: TerminalCanvas,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl PaletteCardFactory {
+    fn append(
+        &self,
+        flow: &gtk::FlowBox,
+        cards: &std::rc::Rc<std::cell::RefCell<Vec<PaletteCard>>>,
+        palette: &'static crate::terminal_palette::TerminalPalette,
+    ) {
+        let card = palette_preview_card(
+            palette,
+            self.selected_palette.clone(),
+            self.previews.clone(),
+            self.canvas.clone(),
+            self.force_snapshot.clone(),
+            self.pending_style_refresh.clone(),
+        );
+        let child = gtk::FlowBoxChild::builder()
+            .child(&card)
+            .visible(palette.primary)
+            .css_classes(["palette-flow-child"])
+            .build();
+        let primary_index = crate::terminal_palette::PRIMARY_TERMINAL_PALETTE_IDS
+            .iter()
+            .position(|id| *id == palette.id)
+            .unwrap_or(usize::MAX);
+        cards.borrow_mut().push(PaletteCard {
+            child: child.clone(),
+            palette,
+            primary_index,
+            search_name: palette.name.to_lowercase(),
+        });
+        flow.append(&child);
+    }
+}
+
+fn palette_card_for_flow_child<'a>(
+    cards: &'a [PaletteCard],
     child: &gtk::FlowBoxChild,
-) -> &'static crate::terminal_palette::TerminalPalette {
+) -> &'a PaletteCard {
     cards
         .iter()
         .find(|card| card.child == *child)
-        .map(|card| card.palette)
         .expect("palette card")
 }
 
-fn palette_card_order(
-    first: &crate::terminal_palette::TerminalPalette,
-    second: &crate::terminal_palette::TerminalPalette,
-    show_all: bool,
-) -> gtk::Ordering {
-    let first_index = crate::terminal_palette::terminal_palette_display_index(first.id, show_all);
-    let second_index = crate::terminal_palette::terminal_palette_display_index(second.id, show_all);
-    match first_index.cmp(&second_index) {
+fn palette_card_order(first: &PaletteCard, second: &PaletteCard, show_all: bool) -> gtk::Ordering {
+    let order = if show_all {
+        first.search_name.cmp(&second.search_name)
+    } else {
+        first.primary_index.cmp(&second.primary_index)
+    };
+    match order {
         std::cmp::Ordering::Less => gtk::Ordering::Smaller,
         std::cmp::Ordering::Equal => gtk::Ordering::Equal,
         std::cmp::Ordering::Greater => gtk::Ordering::Larger,
@@ -3487,7 +3536,7 @@ fn palette_card_order(
 fn update_palette_card_visibility(cards: &[PaletteCard], show_all: bool, query: &str) {
     let query = query.trim().to_lowercase();
     for card in cards {
-        let matches_query = query.is_empty() || card.palette.name.to_lowercase().contains(&query);
+        let matches_query = query.is_empty() || card.search_name.contains(&query);
         card.child
             .set_visible((show_all || card.palette.primary) && matches_query);
     }
@@ -4221,7 +4270,10 @@ fn animation_preview_target(elapsed_us: u64) -> PreviewCursorTarget {
 
 fn preview_render_frame(lines: &[&str], cursor: PreviewCursorTarget) -> RenderFrame {
     let content = RenderableContentOwned {
-        lines: lines.iter().map(|line| preview_cells(line)).collect(),
+        lines: lines
+            .iter()
+            .map(|line| preview_cells(line).into())
+            .collect(),
         line_metadata: vec![crate::terminal_grid::TerminalLineMetadata::default(); lines.len()],
         cursor_line: cursor.line,
         cursor_col: cursor.column,
@@ -5312,7 +5364,8 @@ fn write_key_with_selection(
         let _ = write_active_input_edit(workspace, content.as_ref(), &data);
         return;
     };
-    let Some(content) = content.borrow().clone() else {
+    let borrowed_content = content.borrow();
+    let Some(content) = borrowed_content.as_ref() else {
         clear_selection(
             selection,
             selection_text,
@@ -5325,7 +5378,7 @@ fn write_key_with_selection(
     selection.set(Some(selection_range));
     let expected_selection_text = selection_text.borrow().clone();
     let Some(viewport_selection) =
-        visible_or_reanchored_selection(&content, selection, expected_selection_text.as_deref())
+        visible_or_reanchored_selection(content, selection, expected_selection_text.as_deref())
     else {
         clear_selection(
             selection,
@@ -5333,20 +5386,34 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, Some(&content), &data);
+        let _ = write_active_input_edit(workspace, Some(content), &data);
         return;
     };
-    let Some(selected) = text_for_viewport_selection(&content, viewport_selection) else {
+    let selection_inside_active_input = selection_within_active_input(content, viewport_selection);
+    if selection_inside_active_input
+        && let Some(replacement) = input_selection_replacement_text(&data)
+        && let Ok(true) =
+            write_active_input_replace_range(workspace, content, viewport_selection, replacement)
+    {
         clear_selection(
             selection,
             selection_text,
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, Some(&content), &data);
+        return;
+    }
+    let Some(selected) = text_for_viewport_selection(content, viewport_selection) else {
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
+        let _ = write_active_input_edit(workspace, Some(content), &data);
         return;
     };
-    if !selection_within_active_input(&content, viewport_selection) {
+    if !selection_inside_active_input {
         clear_selection(
             selection,
             selection_text,
@@ -5354,7 +5421,7 @@ fn write_key_with_selection(
             keyboard_selection,
         );
         if data.as_slice() != [0x7f] && data.as_slice() != b"\x1b[3~" {
-            let _ = write_active_input_edit(workspace, Some(&content), &data);
+            let _ = write_active_input_edit(workspace, Some(content), &data);
         }
         return;
     }
@@ -5366,7 +5433,7 @@ fn write_key_with_selection(
         row: viewport_selection.start.row + content.display_offset,
         column: viewport_selection.start.column,
     };
-    let movement = if let Ok(true) = write_active_input_cursor_target(workspace, &content, target) {
+    let movement = if let Ok(true) = write_active_input_cursor_target(workspace, content, target) {
         Vec::new()
     } else if let Some(bytes) = keyboard_selection
         .get()
@@ -5377,7 +5444,7 @@ fn write_key_with_selection(
         && content.cursor_col == i32::from(target.column)
     {
         Vec::new()
-    } else if let Some(bytes) = cursor_movement_bytes_for_content(&content, target) {
+    } else if let Some(bytes) = cursor_movement_bytes_for_content(content, target) {
         bytes
     } else {
         clear_selection(
@@ -5386,7 +5453,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, Some(&content), &data);
+        let _ = write_active_input_edit(workspace, Some(content), &data);
         return;
     };
 
@@ -5403,7 +5470,48 @@ fn write_key_with_selection(
         selection_dirty,
         keyboard_selection,
     );
-    let _ = write_active_input_edit(workspace, Some(&content), &replacement);
+    let _ = write_active_input_edit(workspace, Some(content), &replacement);
+}
+
+fn input_selection_replacement_text(data: &[u8]) -> Option<&str> {
+    if matches!(data, [0x7f]) || data == b"\x1b[3~" {
+        return Some("");
+    }
+    let (replacement, paste) = if let Some(payload) = bracketed_paste_payload(data) {
+        (payload, true)
+    } else {
+        (data, false)
+    };
+    if replacement.iter().all(|byte| {
+        (*byte >= 0x20 && *byte != 0x7f) || (paste && matches!(*byte, b'\n' | b'\r' | b'\t'))
+    }) {
+        std::str::from_utf8(replacement).ok()
+    } else {
+        None
+    }
+}
+
+fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
+    const START: &[u8] = b"\x1b[200~";
+    const END: &[u8] = b"\x1b[201~";
+    data.strip_prefix(START)?.strip_suffix(END)
+}
+
+fn write_active_input_replace_range(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: &RenderableContentOwned,
+    selection: SelectionRange,
+    replacement: &str,
+) -> std::io::Result<bool> {
+    if !shell_input_bridge_active(content) {
+        return Ok(false);
+    }
+    let Some(range) = input_buffer_range_for_selection(content, selection) else {
+        return Ok(false);
+    };
+    workspace
+        .borrow_mut()
+        .write_active_input_replace_range(range, replacement)
 }
 
 fn write_active_input_edit(
@@ -5431,7 +5539,7 @@ fn write_active_input_cursor_target(
     if !shell_input_bridge_active(content) {
         return Ok(false);
     }
-    let Some(offset) = input_buffer_offset_for_position(content, target) else {
+    let Some(offset) = input_cursor_offset_for_position(content, target) else {
         return Ok(false);
     };
     workspace
@@ -5585,7 +5693,9 @@ fn move_cursor_from_keyboard(
             keyboard_selection,
         );
     }
-    if let Ok(true) = write_active_input_cursor_target(workspace, &content, target) {
+    if !cursor_target_matches_content_cursor(&content, target)
+        && let Ok(true) = write_active_input_cursor_target(workspace, &content, target)
+    {
         return;
     }
     if let Some(bytes) = keyboard_cursor_bytes(&content, current_override, target) {
@@ -5598,6 +5708,13 @@ fn move_cursor_from_keyboard(
                 cursor_move.unit,
             ));
     }
+}
+
+fn cursor_target_matches_content_cursor(
+    content: &RenderableContentOwned,
+    target: MouseGridPosition,
+) -> bool {
+    content.cursor_line == i32::from(target.row) && content.cursor_col == i32::from(target.column)
 }
 
 fn select_keyboard_cursor_range(
@@ -6220,7 +6337,7 @@ fn apply_interaction_effects(
                     continue;
                 }
                 if let Some(content) = content.borrow().as_ref()
-                    && let Some(bytes) = cursor_movement_bytes_for_content(content, position)
+                    && let Some(bytes) = cursor_movement_bytes_for_editable_input(content, position)
                 {
                     let _ = workspace.borrow_mut().write_active(&bytes);
                 }
@@ -6829,13 +6946,17 @@ mod tests {
     }
 
     #[test]
-    fn paste_bytes_leave_end_marker_unwrapped() {
-        assert_eq!(terminal_paste_bytes(true, b"a\x1b[201~b"), b"a\x1b[201~b");
+    fn paste_bytes_neutralize_embedded_control_sequences() {
+        assert_eq!(
+            terminal_paste_bytes(true, b"a\x1b[201~b"),
+            b"\x1b[200~a[201~b\x1b[201~"
+        );
     }
 
     #[test]
     fn paste_bytes_are_plain_without_bracketed_paste_mode() {
         assert_eq!(terminal_paste_bytes(false, b"hello"), b"hello");
+        assert_eq!(terminal_paste_bytes(false, b"a\x1b[31mb"), b"a[31mb");
     }
 
     #[test]
@@ -6845,9 +6966,9 @@ mod tests {
         };
         let content = TerminalContent {
             lines: vec![
-                vec![crate::terminal_grid::TerminalCell::blank(); 4],
-                vec![crate::terminal_grid::TerminalCell::blank(); 4],
-                vec![crate::terminal_grid::TerminalCell::blank(); 4],
+                vec![crate::terminal_grid::TerminalCell::blank(); 4].into(),
+                vec![crate::terminal_grid::TerminalCell::blank(); 4].into(),
+                vec![crate::terminal_grid::TerminalCell::blank(); 4].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -6887,6 +7008,56 @@ mod tests {
                 .expect("wrapped forward input drag follow step");
         assert_eq!(bytes, right_arrows(2));
         assert_eq!(state.cursor, Some(MouseGridPosition { row: 2, column: 1 }));
+    }
+
+    #[test]
+    fn input_selection_cursor_step_supports_multiline_semantic_input_edges() {
+        let content =
+            semantic_multiline_input_with_cursor(&["❯ import {", "  Foo,", "  Bar", "}"], 3, 1);
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 0, column: 2 },
+            cursor: None,
+        };
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 1, column: 4 })
+                .expect("semantic forward input drag step");
+        assert_eq!(bytes, left_arrows(7));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 1, column: 5 }));
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 2, column: 2 })
+                .expect("semantic forward input drag follow step");
+        assert_eq!(bytes, right_arrows(4));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 2, column: 3 }));
+    }
+
+    #[test]
+    fn keyboard_cursor_move_can_fall_back_when_target_matches_cursor() {
+        let content = semantic_multiline_input_with_cursor(&["❯ git status"], 0, 5);
+
+        assert!(cursor_target_matches_content_cursor(
+            &content,
+            MouseGridPosition { row: 0, column: 5 }
+        ));
+        assert!(!cursor_target_matches_content_cursor(
+            &content,
+            MouseGridPosition { row: 0, column: 6 }
+        ));
+    }
+
+    #[test]
+    fn input_selection_replacement_text_maps_delete_and_paste_payloads() {
+        assert_eq!(input_selection_replacement_text(&[0x7f]), Some(""));
+        assert_eq!(input_selection_replacement_text(b"\x1b[3~"), Some(""));
+        assert_eq!(
+            input_selection_replacement_text(b"\x1b[200~hello\nworld\x1b[201~"),
+            Some("hello\nworld")
+        );
+        assert_eq!(input_selection_replacement_text(b"typed"), Some("typed"));
+        assert_eq!(input_selection_replacement_text(b"\r"), None);
+        assert_eq!(input_selection_replacement_text(b"\t"), None);
+        assert_eq!(input_selection_replacement_text(b"\x1b[1;5C"), None);
     }
 
     #[test]
@@ -7013,7 +7184,7 @@ mod tests {
             MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
         };
         TerminalContent {
-            lines: vec![line(text)],
+            lines: vec![line(text).into()],
             line_metadata: vec![TerminalLineMetadata::default()],
             cursor_line: 0,
             cursor_col,
@@ -7042,10 +7213,10 @@ mod tests {
         };
         TerminalContent {
             lines: vec![
-                line("❯ printf block"),
-                line("BLOCK_OUT_1"),
-                line("BLOCK_OUT_2"),
-                line(active_input),
+                line("❯ printf block").into(),
+                line("BLOCK_OUT_1").into(),
+                line("BLOCK_OUT_2").into(),
+                line(active_input).into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -7074,8 +7245,8 @@ mod tests {
         };
         TerminalContent {
             lines: vec![
-                line("~/Documents/Projects/Chelotype on main"),
-                line("❯ ls -la"),
+                line("~/Documents/Projects/Chelotype on main").into(),
+                line("❯ ls -la").into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -7089,6 +7260,33 @@ mod tests {
             ],
             cursor_line: 1,
             cursor_col: 8,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        }
+    }
+
+    fn semantic_multiline_input_with_cursor(
+        lines: &[&str],
+        cursor_line: i32,
+        cursor_col: i32,
+    ) -> RenderableContentOwned {
+        use crate::terminal_grid::{
+            MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
+        };
+        let mut line_metadata = vec![TerminalLineMetadata::default(); lines.len()];
+        if let Some(first) = line_metadata.first_mut() {
+            first.semantic_prompt = TerminalSemanticPrompt::Prompt;
+        }
+        for metadata in line_metadata.iter_mut().skip(1) {
+            metadata.semantic_prompt = TerminalSemanticPrompt::Continuation;
+        }
+        TerminalContent {
+            lines: lines.iter().map(|line| self::line(line).into()).collect(),
+            line_metadata,
+            cursor_line,
+            cursor_col,
             cursor_visible: true,
             display_offset: 0,
             colors: TerminalColors::default(),

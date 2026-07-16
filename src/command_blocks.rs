@@ -119,7 +119,7 @@ mod tests {
         TerminalContent {
             lines: metadata
                 .iter()
-                .map(|_| vec![TerminalCell::blank()])
+                .map(|_| vec![TerminalCell::blank()].into())
                 .collect(),
             line_metadata: metadata
                 .into_iter()
@@ -182,23 +182,25 @@ mod tests {
             TerminalSemanticPrompt::Prompt,
         ]);
         content.lines = vec![
-            vec![TerminalCell::blank()],
+            vec![TerminalCell::blank()].into(),
             "OUT_1"
                 .chars()
                 .map(|ch| TerminalCell {
                     text: ch.to_string().into(),
                     ..TerminalCell::blank()
                 })
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             "OUT_2"
                 .chars()
                 .map(|ch| TerminalCell {
                     text: ch.to_string().into(),
                     ..TerminalCell::blank()
                 })
-                .collect(),
-            vec![TerminalCell::blank()],
-            vec![TerminalCell::blank()],
+                .collect::<Vec<_>>()
+                .into(),
+            vec![TerminalCell::blank()].into(),
+            vec![TerminalCell::blank()].into(),
         ];
         let blocks = command_blocks(&content);
 
@@ -221,23 +223,25 @@ mod tests {
             TerminalSemanticPrompt::Prompt,
         ]);
         content.lines = vec![
-            vec![TerminalCell::blank()],
+            vec![TerminalCell::blank()].into(),
             "PREV"
                 .chars()
                 .map(|ch| TerminalCell {
                     text: ch.to_string().into(),
                     ..TerminalCell::blank()
                 })
-                .collect(),
-            vec![TerminalCell::blank()],
+                .collect::<Vec<_>>()
+                .into(),
+            vec![TerminalCell::blank()].into(),
             "NEXT"
                 .chars()
                 .map(|ch| TerminalCell {
                     text: ch.to_string().into(),
                     ..TerminalCell::blank()
                 })
-                .collect(),
-            vec![TerminalCell::blank()],
+                .collect::<Vec<_>>()
+                .into(),
+            vec![TerminalCell::blank()].into(),
         ];
         content.cursor_line = 2;
 

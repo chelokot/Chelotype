@@ -403,11 +403,25 @@ impl TerminalWorkspace {
     }
 
     pub fn write_active(&mut self, data: &[u8]) -> io::Result<()> {
-        self.active_pane_mut().write(data)
+        let pane = self.active_pane_mut();
+        pane.scroll_to_bottom()?;
+        pane.write(data)
     }
 
     pub fn write_active_input_cursor_target(&mut self, offset: usize) -> io::Result<bool> {
-        self.active_pane_mut().write_input_cursor_target(offset)
+        let pane = self.active_pane_mut();
+        pane.scroll_to_bottom()?;
+        pane.write_input_cursor_target(offset)
+    }
+
+    pub fn write_active_input_replace_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+    ) -> io::Result<bool> {
+        let pane = self.active_pane_mut();
+        pane.scroll_to_bottom()?;
+        pane.write_input_replace_range(range, replacement)
     }
 
     pub fn active_bracketed_paste_mode(&mut self) -> bool {

@@ -10,10 +10,12 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::thread::JoinHandle;
 
 static INPUT_CURSOR_TARGET_COUNTER: AtomicU64 = AtomicU64::new(1);
+const PTY_CHANNEL_CAPACITY: usize = 64;
+const PTY_PROCESS_BUDGET_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScreenSize {
@@ -67,6 +69,9 @@ pub struct TerminalBackend {
     pty_rx: Receiver<Vec<u8>>,
     pty_responses: Rc<RefCell<Vec<Vec<u8>>>>,
     input_cursor_target_file: Option<PathBuf>,
+    input_cursor_bridge_ready: bool,
+    input_replace_operation_counter: u64,
+    terminal_palette_id: &'static str,
     dirty: bool,
 }
 
@@ -96,6 +101,8 @@ impl TerminalBackend {
             cmd.env(crate::shell::INPUT_CURSOR_TARGET_FILE_ENV, path.as_os_str());
             inject_input_cursor_target_file(&mut cmd, path);
         }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         cmd.env("COLUMNS", size.cols.to_string());
         cmd.env("LINES", size.rows.to_string());
         let pty_system = native_pty_system();
@@ -116,7 +123,7 @@ impl TerminalBackend {
             .try_clone_reader()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
 
-        let (pty_tx, pty_rx) = channel();
+        let (pty_tx, pty_rx) = sync_channel(PTY_CHANNEL_CAPACITY);
         let handle = std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -149,6 +156,9 @@ impl TerminalBackend {
                 }
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let terminal_palette = crate::terminal_palette::default_terminal_palette();
+        crate::ghostty_snapshot::apply_terminal_palette(&mut terminal, terminal_palette)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
 
         Ok(Self {
             terminal,
@@ -161,6 +171,9 @@ impl TerminalBackend {
             pty_rx,
             pty_responses,
             input_cursor_target_file,
+            input_cursor_bridge_ready: false,
+            input_replace_operation_counter: 0,
+            terminal_palette_id: terminal_palette.id,
             dirty: true,
         })
     }
@@ -172,12 +185,69 @@ impl TerminalBackend {
     }
 
     pub fn write_input_cursor_target(&mut self, offset: usize) -> std::io::Result<bool> {
+        if !self.input_cursor_bridge_ready()? {
+            return Ok(false);
+        }
         let Some(path) = &self.input_cursor_target_file else {
             return Ok(false);
         };
-        std::fs::write(path, offset.to_string())?;
+        std::fs::write(
+            input_bridge_sidecar_path(path, ".cursor"),
+            offset.to_string(),
+        )?;
         self.write(crate::shell::INPUT_CURSOR_TARGET_SEQUENCE)?;
+        self.snapshotter.invalidate();
+        self.dirty = true;
         Ok(true)
+    }
+
+    pub fn write_input_replace_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+    ) -> std::io::Result<bool> {
+        if !self.input_cursor_bridge_ready()? {
+            return Ok(false);
+        }
+        let Some(path) = &self.input_cursor_target_file else {
+            return Ok(false);
+        };
+        let payload = format!(
+            "{}\t{}\t{}",
+            range.start,
+            range.end,
+            fish_var_encode(replacement)
+        );
+        let operation_path = input_bridge_sidecar_path(
+            path,
+            &format!(".replace-{:020}", self.input_replace_operation_counter),
+        );
+        self.input_replace_operation_counter += 1;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut operation_file = options.open(operation_path)?;
+        operation_file.write_all(payload.as_bytes())?;
+        operation_file.flush()?;
+        self.write(crate::shell::INPUT_REPLACE_RANGE_SEQUENCE)?;
+        self.snapshotter.invalidate();
+        self.dirty = true;
+        Ok(true)
+    }
+
+    pub fn input_cursor_bridge_ready(&mut self) -> std::io::Result<bool> {
+        if self.input_cursor_bridge_ready {
+            return Ok(true);
+        }
+        let Some(path) = &self.input_cursor_target_file else {
+            return Ok(false);
+        };
+        self.input_cursor_bridge_ready = std::fs::read_to_string(path)? == "ready";
+        Ok(self.input_cursor_bridge_ready)
     }
 
     pub fn bracketed_paste_mode(&mut self) -> bool {
@@ -237,9 +307,12 @@ impl TerminalBackend {
     }
 
     pub fn scroll_to_bottom(&mut self) -> std::io::Result<()> {
+        let before = self.display_offset()?;
         self.terminal.scroll_viewport(ScrollViewport::Bottom);
-        self.snapshotter.invalidate();
-        self.dirty = true;
+        if self.display_offset()? != before {
+            self.snapshotter.invalidate();
+            self.dirty = true;
+        }
         Ok(())
     }
 
@@ -261,15 +334,23 @@ impl TerminalBackend {
     }
 
     pub fn snapshot_renderable(&mut self) -> Option<RenderableContentOwned> {
+        self.sync_terminal_palette().ok()?;
         if self.process_pending().ok()? {
             self.dirty = true;
         }
         let snapshot = self.snapshotter.snapshot(&self.terminal).ok()?;
+        crate::perf_trace::record_counter(
+            "ghostty_snapshot_converted_rows",
+            self.snapshotter.last_converted_rows() as u64,
+        );
         self.dirty = false;
         Some(snapshot)
     }
 
     pub fn refresh_dirty(&mut self) -> bool {
+        if self.sync_terminal_palette().is_err() {
+            return self.dirty;
+        }
         if self.process_pending().unwrap_or(false) {
             self.dirty = true;
         }
@@ -277,6 +358,7 @@ impl TerminalBackend {
     }
 
     pub fn snapshot_renderable_if_dirty(&mut self) -> Option<RenderableContentOwned> {
+        self.sync_terminal_palette().ok()?;
         if self.process_pending().ok()? {
             self.dirty = true;
         }
@@ -284,7 +366,12 @@ impl TerminalBackend {
             return None;
         }
         self.dirty = false;
-        self.snapshotter.snapshot(&self.terminal).ok()
+        let snapshot = self.snapshotter.snapshot(&self.terminal).ok()?;
+        crate::perf_trace::record_counter(
+            "ghostty_snapshot_converted_rows",
+            self.snapshotter.last_converted_rows() as u64,
+        );
+        Some(snapshot)
     }
 
     pub fn snapshot_plain_lines(&mut self) -> Vec<String> {
@@ -301,17 +388,67 @@ impl TerminalBackend {
 
     fn process_pending(&mut self) -> std::io::Result<bool> {
         let mut processed = false;
-        while let Ok(data) = self.pty_rx.try_recv() {
+        let mut processed_bytes = 0;
+        while processed_bytes < PTY_PROCESS_BUDGET_BYTES
+            && let Ok(data) = self.pty_rx.try_recv()
+        {
             processed = true;
+            processed_bytes += data.len();
             self.terminal.vt_write(&data);
-            self.snapshotter.invalidate();
             let responses = std::mem::take(&mut *self.pty_responses.borrow_mut());
             for response in responses {
                 self.write(&response)?;
             }
         }
+        crate::perf_trace::record_counter("pty_processed_bytes", processed_bytes as u64);
         Ok(processed)
     }
+
+    fn sync_terminal_palette(&mut self) -> std::io::Result<()> {
+        let palette = crate::terminal_palette::default_terminal_palette();
+        if self.terminal_palette_id == palette.id {
+            return Ok(());
+        }
+        crate::ghostty_snapshot::apply_terminal_palette(&mut self.terminal, palette)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        self.terminal_palette_id = palette.id;
+        self.snapshotter.invalidate();
+        self.dirty = true;
+        Ok(())
+    }
+}
+
+fn fish_var_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() + 1);
+    encoded.push('x');
+    let mut escaping = false;
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            if escaping {
+                escaping = false;
+            }
+            encoded.push(char::from(byte));
+        } else if byte == b'_' {
+            if escaping {
+                escaping = false;
+            }
+            encoded.push_str("__");
+        } else {
+            use std::fmt::Write;
+            if !escaping {
+                encoded.push('_');
+                escaping = true;
+            }
+            write!(encoded, "{byte:02X}_").expect("write to string");
+        }
+    }
+    encoded
+}
+
+fn input_bridge_sidecar_path(base: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut path = base.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
 }
 
 pub fn headless_shell_command() -> CommandBuilder {
@@ -377,6 +514,34 @@ impl Drop for TerminalBackend {
         }
         if let Some(path) = &self.input_cursor_target_file {
             let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(input_bridge_sidecar_path(path, ".cursor"));
+            if let (Some(directory), Some(file_name)) = (path.parent(), path.file_name())
+                && let Ok(entries) = std::fs::read_dir(directory)
+            {
+                let operation_prefix = format!("{}.replace-", file_name.to_string_lossy());
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&operation_prefix)
+                    {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fish_var_encode;
+
+    #[test]
+    fn fish_var_encoding_preserves_empty_unicode_and_control_bytes() {
+        assert_eq!(fish_var_encode(""), "x");
+        assert_eq!(fish_var_encode("_"), "x__");
+        assert_eq!(fish_var_encode("\n\n"), "x_0A_0A_");
+        assert_eq!(fish_var_encode("好😀"), "x_E5_A5_BD_F0_9F_98_80_");
     }
 }

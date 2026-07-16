@@ -6,6 +6,7 @@ pub const INPUT_UNDO_CAPTURE_SEQUENCE: &[u8] = b"\x1b[57344u";
 pub const INPUT_UNDO_SEQUENCE: &[u8] = b"\x1b[57345u";
 pub const INPUT_REDO_SEQUENCE: &[u8] = b"\x1b[57346u";
 pub const INPUT_CURSOR_TARGET_SEQUENCE: &[u8] = b"\x1b[57347u";
+pub const INPUT_REPLACE_RANGE_SEQUENCE: &[u8] = b"\x1b[57348u";
 pub const INPUT_CURSOR_BRIDGE_ENV: &str = "CHELOTYPE_INPUT_CURSOR_BRIDGE";
 pub const INPUT_CURSOR_BRIDGE_FISH: &str = "fish";
 pub const INPUT_CURSOR_TARGET_FILE_ENV: &str = "CHELOTYPE_CURSOR_TARGET_FILE";
@@ -19,11 +20,16 @@ function fish_prompt
 end
 function __chelotype_decode_line
     set -l encoded (string sub -s 2 -- $argv[1] | string collect)
-    test -n "$encoded"; or return 0
-    printf '%s' "$encoded" | string unescape --style=var | string collect --allow-empty
+    test -n "$encoded"; and printf '%s' "$encoded" | string unescape --style=var
+    printf \0
 end
 function __chelotype_encode_line
     printf 'x%s' (string escape --style=var -- $argv[1])
+end
+function __chelotype_encode_current_line
+    set -l line (commandline | string collect --no-trim-newlines)
+    set -l encoded (string escape --style=var -- "$line")
+    printf 'x%s' (string replace -r '_0A_$' '' -- "$encoded")
 end
 function __chelotype_slice --argument-names value start length
     test $length -gt 0; or return
@@ -82,9 +88,9 @@ function __chelotype_push_patch --argument-names stack prefix suffix old_mid new
 end
 function __chelotype_finalize_pending_undo
     set -q __chelotype_pending_line; or return 1
-    set -l old_line (__chelotype_decode_line $__chelotype_pending_line)
+    set -l old_line (__chelotype_decode_line $__chelotype_pending_line | string split0)
     set -l old_cursor $__chelotype_pending_cursor
-    set -l new_line (commandline)
+    set -l new_line (__chelotype_decode_line (__chelotype_encode_current_line) | string split0)
     set -l new_cursor (commandline -C)
     set -e __chelotype_pending_line
     set -e __chelotype_pending_cursor
@@ -102,19 +108,23 @@ function __chelotype_finalize_pending_undo
     return 0
 end
 function __chelotype_apply_patch --argument-names prefix suffix next_mid next_cursor
-    set -l line (commandline)
+    set -l line (__chelotype_decode_line (__chelotype_encode_current_line) | string split0)
     set -l line_len (string length -- "$line")
     set -l before (__chelotype_slice "$line" 1 $prefix)
     set -l after_start (math $line_len - $suffix + 1)
     set -l after (__chelotype_slice "$line" $after_start $suffix)
-    set -l replacement (__chelotype_decode_line $next_mid)
+    set -l replacement (__chelotype_decode_line $next_mid | string split0)
     commandline --replace "$before$replacement$after"
     commandline -C $next_cursor
     commandline -f repaint
 end
 function __chelotype_capture_undo
+    if set -q __chelotype_pending_line
+        __chelotype_clear_redo
+        return
+    end
     __chelotype_finalize_pending_undo
-    set -g __chelotype_pending_line (__chelotype_encode_line (commandline))
+    set -g __chelotype_pending_line (__chelotype_encode_current_line)
     set -g __chelotype_pending_cursor (commandline -C)
     __chelotype_clear_redo
 end
@@ -165,12 +175,62 @@ function __chelotype_discard_pending_undo --on-event fish_preexec
     set -e __chelotype_pending_cursor
 end
 function __chelotype_move_cursor_to_target
-    set -l target_file $CHELOTYPE_CURSOR_TARGET_FILE
+    set -l target_file "$CHELOTYPE_CURSOR_TARGET_FILE.cursor"
     test -n "$target_file"; or return
     test -f "$target_file"; or return
     set -l target (string trim < "$target_file")
     string match -qr '^[0-9]+$' -- $target; or return
+    set -l line (__chelotype_decode_line (__chelotype_encode_current_line) | string split0)
+    set -l line_length (string length -- "$line")
+    if test $target -gt $line_length
+        commandline -f accept-autosuggestion
+        set line (__chelotype_decode_line (__chelotype_encode_current_line) | string split0)
+        set line_length (string length -- "$line")
+    end
+    if test $target -gt $line_length
+        set target $line_length
+    end
     commandline -C $target
+    commandline -f repaint
+end
+function __chelotype_replace_input_range
+    set -l operation_files "$CHELOTYPE_CURSOR_TARGET_FILE".replace-*
+    set -l operation_file $operation_files[1]
+    test -f "$operation_file"; or return
+    set -l payload (cat "$operation_file" | string collect --allow-empty)
+    rm "$operation_file"
+    set -l parts (string split \t -- "$payload")
+    test (count $parts) -ge 3; or return
+    set -l start $parts[1]
+    set -l end $parts[2]
+    set -l replacement (__chelotype_decode_line $parts[3] | string split0)
+    string match -qr '^[0-9]+$' -- $start; or return
+    string match -qr '^[0-9]+$' -- $end; or return
+    set -l line (__chelotype_decode_line (__chelotype_encode_current_line) | string split0)
+    set -l line_len (string length -- "$line")
+    if test $start -gt $line_len
+        set start $line_len
+    end
+    if test $end -gt $line_len
+        set end $line_len
+    end
+    test $start -le $end; or return
+    __chelotype_finalize_pending_undo
+    set -l old_cursor (commandline -C)
+    set -l prefix $start
+    set -l suffix (math $line_len - $end)
+    set -l before (__chelotype_slice "$line" 1 $prefix)
+    set -l old_mid_start (math $start + 1)
+    set -l old_mid_len (math $end - $start)
+    set -l old_mid (__chelotype_slice "$line" $old_mid_start $old_mid_len)
+    set -l after_start (math $end + 1)
+    set -l after (__chelotype_slice "$line" $after_start $suffix)
+    set -l new_cursor (math $start + (string length -- "$replacement"))
+    __chelotype_push_patch undo $prefix $suffix "$old_mid" "$replacement" $old_cursor $new_cursor
+    __chelotype_clear_redo
+    commandline --replace "$before$replacement$after"
+    commandline -C $new_cursor
+    commandline -f repaint
 end
 bind \e\[57344u __chelotype_capture_undo
 bind -M insert \e\[57344u __chelotype_capture_undo
@@ -179,7 +239,12 @@ bind -M insert \e\[57345u __chelotype_undo
 bind \e\[57346u __chelotype_redo
 bind -M insert \e\[57346u __chelotype_redo
 bind \e\[57347u __chelotype_move_cursor_to_target
-bind -M insert \e\[57347u __chelotype_move_cursor_to_target"#;
+bind -M insert \e\[57347u __chelotype_move_cursor_to_target
+bind \e\[57348u __chelotype_replace_input_range
+bind -M insert \e\[57348u __chelotype_replace_input_range
+test -n "$CHELOTYPE_CURSOR_TARGET_FILE"; and test -f "$CHELOTYPE_CURSOR_TARGET_FILE"; and printf ready > "$CHELOTYPE_CURSOR_TARGET_FILE""#;
+
+pub const FISH_CHELOTYPE_INIT_FOR_TESTS: &str = FISH_CHELOTYPE_INIT;
 
 pub fn default_shell_command() -> CommandBuilder {
     default_shell_command_with_size(None)
@@ -344,6 +409,8 @@ mod tests {
         assert!(line.contains("__chelotype_user_fish_prompt"));
         assert!(line.contains("__chelotype_redo"));
         assert!(line.contains("__chelotype_move_cursor_to_target"));
+        assert!(line.contains("__chelotype_replace_input_range"));
+        assert!(line.contains("accept-autosuggestion"));
     }
 
     #[test]
@@ -369,8 +436,10 @@ commandline -C (string length -- $base)
 __chelotype_capture_undo
 commandline --insert $paste
 __chelotype_capture_undo
-set -l old_mid (__chelotype_decode_line $__chelotype_undo_old_mids[1])
-set -l new_mid (__chelotype_decode_line $__chelotype_undo_new_mids[1])
+__chelotype_undo
+__chelotype_redo
+set -l old_mid (__chelotype_decode_line $__chelotype_undo_old_mids[1] | string split0)
+set -l new_mid (__chelotype_decode_line $__chelotype_undo_new_mids[1] | string split0)
 printf '%s %s %s %s %s\n' (count $__chelotype_undo_prefixes) $__chelotype_undo_prefixes[1] $__chelotype_undo_suffixes[1] (string length -- "$old_mid") (string length -- "$new_mid")
 __chelotype_undo
 printf '%s %s\n' (string length -- (commandline)) (commandline -C)
@@ -389,6 +458,101 @@ printf '%s %s\n' (string length -- (commandline)) (commandline -C)
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "1 1024 0 0 64\n1024 1024\n1088 1088\n"
+        );
+    }
+
+    #[test]
+    fn fish_undo_capture_coalesces_repeated_edits_without_finalize_work() {
+        let Some(fish_path) = FISH_CANDIDATES
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+        else {
+            eprintln!("skipping fish undo coalescing test because fish is not installed");
+            return;
+        };
+
+        let output = Command::new(fish_path)
+            .args([
+                "--init-command",
+                FISH_CHELOTYPE_INIT,
+                "-ic",
+                r#"
+commandline --replace ''
+commandline -C 0
+__chelotype_capture_undo
+for index in (seq 1 100)
+    commandline --insert x
+    __chelotype_capture_undo
+end
+printf '%s %s %s\n' (count $__chelotype_undo_prefixes) (set -q __chelotype_pending_line; and echo pending; or echo none) (string length -- (commandline))
+__chelotype_undo
+printf '%s %s %s\n' (count $__chelotype_undo_prefixes) (string length -- (commandline)) (commandline -C)
+"#,
+            ])
+            .output()
+            .expect("run fish undo coalescing check");
+
+        assert!(
+            output.status.success(),
+            "fish undo coalescing check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "0 pending 100\n0 0 0\n"
+        );
+    }
+
+    #[test]
+    fn fish_replace_input_range_is_atomic_and_undoable() {
+        let Some(fish_path) = FISH_CANDIDATES
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+        else {
+            eprintln!("skipping fish replace range test because fish is not installed");
+            return;
+        };
+        let operation_path =
+            std::env::temp_dir().join(format!("chelotype-replace-range-{}", std::process::id()));
+        let output = Command::new(fish_path)
+            .env(INPUT_CURSOR_TARGET_FILE_ENV, &operation_path)
+            .args([
+                "--init-command",
+                FISH_CHELOTYPE_INIT,
+                "-ic",
+                r#"
+commandline --replace abcdefghij
+commandline -C 8
+printf '3\t8\txXYZ_0A_next' > "$CHELOTYPE_CURSOR_TARGET_FILE.replace-00000000000000000000"
+__chelotype_replace_input_range
+set -l current (commandline)
+printf '%s\n%s\n' (string escape --style=var -- "$current") (commandline -C)
+__chelotype_undo
+set current (commandline)
+printf '%s\n%s\n' (string escape --style=var -- "$current") (commandline -C)
+printf '3\t8\tx' > "$CHELOTYPE_CURSOR_TARGET_FILE.replace-00000000000000000001"
+__chelotype_replace_input_range
+set current (commandline)
+printf '%s\n%s\n' (string escape --style=var -- "$current") (commandline -C)
+__chelotype_undo
+printf '3\t8\txXYZ_0A_0A_' > "$CHELOTYPE_CURSOR_TARGET_FILE.replace-00000000000000000002"
+__chelotype_replace_input_range
+set current (commandline)
+printf '%s\n%s\n' (string escape --style=var -- "$current") (commandline -C)
+"#,
+            ])
+            .output()
+            .expect("run fish replace range check");
+        let _ = std::fs::remove_file(&operation_path);
+
+        assert!(
+            output.status.success(),
+            "fish replace range check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "abcXYZ_20_nextij\n11\nabcdefghij\n8\nabcij\n3\nabcXYZ_20_20_ij\n8\n"
         );
     }
 

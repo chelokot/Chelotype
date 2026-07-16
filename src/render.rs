@@ -757,8 +757,8 @@ mod tests {
     fn renderer_exports_structured_history_and_input_lines() {
         let content = RenderableContentOwned {
             lines: vec![
-                vec![cell("o"), cell("l"), cell("d")],
-                vec![cell("n"), cell("e"), cell("w")],
+                vec![cell("o"), cell("l"), cell("d")].into(),
+                vec![cell("n"), cell("e"), cell("w")].into(),
             ],
             line_metadata: vec![TerminalLineMetadata::default(); 2],
             cursor_line: 1,
@@ -783,8 +783,8 @@ mod tests {
     fn paint_frame_skips_snapshot_only_markup_cells_and_command_blocks() {
         let content = RenderableContentOwned {
             lines: vec![
-                vec![cell("$"), cell(" "), cell("c")],
-                vec![cell("o"), cell("k")],
+                vec![cell("$"), cell(" "), cell("c")].into(),
+                vec![cell("o"), cell("k")].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -817,9 +817,9 @@ mod tests {
     fn renderer_marks_soft_wrapped_cursor_line_as_single_input_region() {
         let content = RenderableContentOwned {
             lines: vec![
-                vec![cell("o"), cell("l"), cell("d")],
-                vec![cell("l"), cell("o"), cell("n"), cell("g")],
-                vec![cell("c"), cell("m"), cell("d")],
+                vec![cell("o"), cell("l"), cell("d")].into(),
+                vec![cell("l"), cell("o"), cell("n"), cell("g")].into(),
+                vec![cell("c"), cell("m"), cell("d")].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata::default(),
@@ -851,9 +851,9 @@ mod tests {
     fn renderer_marks_semantic_prompt_continuations_as_input_region() {
         let content = RenderableContentOwned {
             lines: vec![
-                vec![cell("o"), cell("l"), cell("d")],
-                vec![cell(">"), cell(" "), cell("a")],
-                vec![cell("b"), cell("c")],
+                vec![cell("o"), cell("l"), cell("d")].into(),
+                vec![cell(">"), cell(" "), cell("a")].into(),
+                vec![cell("b"), cell("c")].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata::default(),
@@ -884,10 +884,10 @@ mod tests {
     fn renderer_exports_prompt_delimited_command_blocks() {
         let content = RenderableContentOwned {
             lines: vec![
-                vec![cell("p")],
-                vec![cell(">")],
-                vec![cell("o")],
-                vec![cell("p")],
+                vec![cell("p")].into(),
+                vec![cell(">")].into(),
+                vec![cell("o")].into(),
+                vec![cell("p")].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {

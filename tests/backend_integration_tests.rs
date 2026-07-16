@@ -62,26 +62,46 @@ where
     F: Fn(&RenderableContentOwned) -> bool,
 {
     let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last_snapshot = None;
     while Instant::now() < deadline {
-        if let Some(snapshot) = backend.snapshot_renderable()
-            && predicate(&snapshot)
-        {
-            return snapshot;
+        if let Some(snapshot) = backend.snapshot_renderable() {
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+            last_snapshot = Some((
+                snapshot.cursor_line,
+                snapshot.cursor_col,
+                snapshot_text(&snapshot),
+            ));
         }
         sleep(Duration::from_millis(20));
     }
-    panic!("timed out waiting for terminal snapshot");
+    panic!("timed out waiting for terminal snapshot; last={last_snapshot:?}");
 }
 
 fn snapshot_text(snapshot: &RenderableContentOwned) -> String {
     let mut text = String::new();
     for line in &snapshot.lines {
-        for cell in line {
+        for cell in line.iter() {
             text.push_str(&cell.text);
         }
         text.push('\n');
     }
     text
+}
+
+fn wait_for_input_cursor_bridge(backend: &mut TerminalBackend) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if backend
+            .input_cursor_bridge_ready()
+            .expect("input cursor bridge readiness")
+        {
+            return;
+        }
+        sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for input cursor bridge");
 }
 
 fn visible_nonblank_lines(snapshot: &RenderableContentOwned) -> Vec<String> {
@@ -180,6 +200,7 @@ fn backend_fish_cursor_target_bridge_moves_commandline_cursor_directly() {
 
     let mut backend = TerminalBackend::spawn(command).expect("spawn fish");
     let _ = wait_for_snapshot(&mut backend, |snapshot| snapshot.cursor_visible);
+    wait_for_input_cursor_bridge(&mut backend);
     backend.write(b"abcde").expect("write fish input");
     let _ = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot_text(snapshot).contains("abcde")
@@ -210,6 +231,7 @@ fn backend_fish_cursor_target_bridge_replaces_long_wrapped_input() {
         TerminalBackend::spawn_with_size(command, ScreenSize::new(80, 24).expect("valid size"))
             .expect("spawn fish");
     let _ = wait_for_snapshot(&mut backend, |snapshot| snapshot.cursor_visible);
+    wait_for_input_cursor_bridge(&mut backend);
     let input = "a".repeat(1024);
     backend
         .write(input.as_bytes())
@@ -236,6 +258,107 @@ fn backend_fish_cursor_target_bridge_replaces_long_wrapped_input() {
     });
 
     assert!(snapshot_text(&snapshot).contains("PASTE"));
+    let _ = backend.write(b"\x15exit\n");
+}
+
+#[test]
+#[serial]
+fn backend_fish_replace_range_bridge_preserves_empty_and_queued_whitespace_replacements() {
+    let Some(command) = chelotype_fish_command() else {
+        eprintln!("skipping fish replace range bridge test because fish is not installed");
+        return;
+    };
+
+    let mut backend = TerminalBackend::spawn(command).expect("spawn fish");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| snapshot.cursor_visible);
+    wait_for_input_cursor_bridge(&mut backend);
+    backend.write(b"abcdef").expect("write fish input");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_text(snapshot).contains("abcdef")
+    });
+
+    assert!(
+        backend
+            .write_input_replace_range(2..4, "")
+            .expect("delete fish input range")
+    );
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        visible_nonblank_lines(snapshot)
+            .iter()
+            .any(|line| line.ends_with("abef"))
+    });
+    assert!(
+        visible_nonblank_lines(&snapshot)
+            .iter()
+            .any(|line| line.ends_with("abef"))
+    );
+
+    assert!(
+        backend
+            .write_input_replace_range(2..2, "X\n")
+            .expect("insert multiline fish input range")
+    );
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        let lines = visible_nonblank_lines(snapshot);
+        lines.iter().any(|line| line.ends_with("abX"))
+            && lines.iter().any(|line| line.trim_start() == "ef")
+    });
+    let lines = visible_nonblank_lines(&snapshot);
+    assert!(lines.iter().any(|line| line.ends_with("abX")));
+    assert!(lines.iter().any(|line| line.trim_start() == "ef"));
+
+    assert!(
+        backend
+            .write_input_replace_range(0..6, "abcdef")
+            .expect("reset fish input")
+    );
+    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+        visible_nonblank_lines(snapshot)
+            .iter()
+            .any(|line| line.ends_with("abcdef"))
+    });
+    assert!(
+        backend
+            .write_input_replace_range(0..1, "X")
+            .expect("queue first fish replacement")
+    );
+    assert!(
+        backend
+            .write_input_replace_range(1..2, "Y")
+            .expect("queue second fish replacement")
+    );
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        visible_nonblank_lines(snapshot)
+            .iter()
+            .any(|line| line.ends_with("XYcdef"))
+    });
+    assert!(
+        visible_nonblank_lines(&snapshot)
+            .iter()
+            .any(|line| line.ends_with("XYcdef"))
+    );
+
+    backend
+        .write(chelotype::shell::INPUT_UNDO_SEQUENCE)
+        .expect("undo queued replacement");
+    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+        visible_nonblank_lines(snapshot)
+            .iter()
+            .any(|line| line.ends_with("Xbcdef"))
+    });
+    backend
+        .write(chelotype::shell::INPUT_REDO_SEQUENCE)
+        .expect("redo queued replacement");
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        visible_nonblank_lines(snapshot)
+            .iter()
+            .any(|line| line.ends_with("XYcdef"))
+    });
+    assert!(
+        visible_nonblank_lines(&snapshot)
+            .iter()
+            .any(|line| line.ends_with("XYcdef"))
+    );
     let _ = backend.write(b"\x15exit\n");
 }
 

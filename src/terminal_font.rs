@@ -84,6 +84,7 @@ pub fn set_custom_font(font: &str) {
 }
 
 pub fn load_configured_size() {
+    crate::config::reload();
     let Some(value) =
         crate::config::read_value("font_size_tenths").and_then(|value| value.parse::<u32>().ok())
     else {

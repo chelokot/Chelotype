@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 const PALETTE_TRANSITION_DURATION: Duration = Duration::from_millis(300);
 const MAX_TEXT_LAYOUT_CACHE_ENTRIES: usize = 4096;
-const MAX_ROW_SURFACE_CACHE_ENTRIES: usize = 512;
+const MAX_ROW_SURFACE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const TERMINAL_CANVAS_PADDING_PX: f64 = 6.0;
 const TERMINAL_PREVIEW_RADIUS_PX: f64 = 6.0;
 
@@ -145,24 +145,28 @@ impl TerminalCanvas {
                     draw_canvas_render_layer(
                         widget,
                         context,
-                        width,
-                        height,
                         &transition.from,
                         None,
                         &mut paint_resources,
                         paint,
-                        1.0,
+                        CanvasLayer {
+                            width,
+                            height,
+                            alpha: 1.0,
+                        },
                     );
                     draw_canvas_render_layer(
                         widget,
                         context,
-                        width,
-                        height,
                         render,
                         draw_scroll_underlay.borrow().as_ref(),
                         &mut paint_resources,
                         paint,
-                        progress,
+                        CanvasLayer {
+                            width,
+                            height,
+                            alpha: progress,
+                        },
                     );
                     if progress >= 1.0 {
                         draw_palette_transition.borrow_mut().take();
@@ -173,16 +177,20 @@ impl TerminalCanvas {
                     draw_canvas_render_layer(
                         widget,
                         context,
-                        width,
-                        height,
                         render,
                         draw_scroll_underlay.borrow().as_ref(),
                         &mut paint_resources,
                         paint,
-                        1.0,
+                        CanvasLayer {
+                            width,
+                            height,
+                            alpha: 1.0,
+                        },
                     );
                 }
-                paint_resources.stats.record();
+                paint_resources
+                    .stats
+                    .record(paint_resources.row_surface_cache.bytes);
             }
             crate::perf_trace::record_duration("gtk_paint", started.elapsed());
         });
@@ -571,14 +579,17 @@ fn request_palette_animation_frame(widget: &gtk::DrawingArea) {
 fn draw_canvas_render_layer(
     widget: &gtk::DrawingArea,
     context: &cairo::Context,
-    width: i32,
-    height: i32,
     render: &CanvasRenderFrame,
     scroll_underlay: Option<&CanvasRenderFrame>,
     paint_resources: &mut PaintResources<'_>,
     paint: CanvasPaint,
-    alpha: f64,
+    layer: CanvasLayer,
 ) {
+    let CanvasLayer {
+        width,
+        height,
+        alpha,
+    } = layer;
     if alpha <= 0.0 {
         return;
     }
@@ -864,12 +875,11 @@ fn draw_render_frame(
             draw_cursor(
                 context,
                 render,
-                cursor_paint.motion.for_pane(cursor_paint.pane_id),
-                cursor_paint.options,
-                cursor_paint.now,
-                opacity,
-                line_height,
-                cell_width,
+                CursorPaintState {
+                    opacity,
+                    ..cursor_paint
+                },
+                metrics,
             );
         }
     } else if let Some(preedit) = &render.preedit {
@@ -1014,6 +1024,13 @@ struct CanvasPaint {
 }
 
 #[derive(Clone, Copy)]
+struct CanvasLayer {
+    width: i32,
+    height: i32,
+    alpha: f64,
+}
+
+#[derive(Clone, Copy)]
 struct PaintRect {
     width: f64,
     height: f64,
@@ -1032,15 +1049,21 @@ struct PaintStats {
     layout_misses: u64,
     row_surface_hits: u64,
     row_surface_misses: u64,
+    row_surface_evictions: u64,
 }
 
 impl PaintStats {
-    fn record(&self) {
+    fn record(&self, row_surface_cache_bytes: usize) {
         crate::perf_trace::record_counter("gtk_paint_rows", self.rows);
         crate::perf_trace::record_counter("gtk_layout_cache_hits", self.layout_hits);
         crate::perf_trace::record_counter("gtk_layout_cache_misses", self.layout_misses);
         crate::perf_trace::record_counter("gtk_row_surface_hits", self.row_surface_hits);
         crate::perf_trace::record_counter("gtk_row_surface_misses", self.row_surface_misses);
+        crate::perf_trace::record_counter("gtk_row_surface_evictions", self.row_surface_evictions);
+        crate::perf_trace::record_counter(
+            "gtk_row_surface_cache_bytes",
+            row_surface_cache_bytes as u64,
+        );
     }
 }
 
@@ -1090,13 +1113,15 @@ fn layout_for_paint(
 #[derive(Default)]
 struct RowSurfaceCache {
     surfaces: HashMap<RowSurfaceBucketKey, Vec<RowSurfaceEntry>>,
-    order: VecDeque<RowSurfaceKey>,
+    order: VecDeque<RowSurfaceOrderKey>,
+    bytes: usize,
+    next_id: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RowSurfaceKey {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RowSurfaceOrderKey {
     bucket: RowSurfaceBucketKey,
-    line: RowSurfaceLineKey,
+    id: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1108,8 +1133,10 @@ struct RowSurfaceBucketKey {
 }
 
 struct RowSurfaceEntry {
+    id: u64,
     line: RowSurfaceLineKey,
     surface: cairo::ImageSurface,
+    bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1143,47 +1170,58 @@ impl RowSurfaceCache {
             height_px: spec.height_px,
             line_paint_key: line.paint_key,
         };
-        if let Some(entry) = self
+        if let Some((surface, id)) = self
             .surfaces
             .get(&bucket)
             .and_then(|entries| entries.iter().find(|entry| entry.line.matches(line)))
+            .map(|entry| (entry.surface.clone(), entry.id))
         {
+            let key = RowSurfaceOrderKey { bucket, id };
+            if let Some(index) = self.order.iter().position(|cached| cached == &key) {
+                self.order.remove(index);
+            }
+            self.order.push_back(key);
             stats.row_surface_hits += 1;
-            return Some(entry.surface.clone());
+            return Some(surface);
         }
         let surface = self.render_surface(widget, line, spec, text_layout_cache, stats)?;
-        if self.len() >= MAX_ROW_SURFACE_CACHE_ENTRIES
+        let surface_bytes = surface.stride() as usize * surface.height() as usize;
+        while self.bytes.saturating_add(surface_bytes) > MAX_ROW_SURFACE_CACHE_BYTES
             && let Some(evicted) = self.order.pop_front()
         {
             self.remove(&evicted);
+            stats.row_surface_evictions += 1;
+        }
+        if surface_bytes > MAX_ROW_SURFACE_CACHE_BYTES {
+            stats.row_surface_misses += 1;
+            return Some(surface);
         }
         let line_key = RowSurfaceLineKey::from(line);
-        let key = RowSurfaceKey {
-            bucket,
-            line: line_key.clone(),
-        };
+        let id = self.next_id;
+        self.next_id += 1;
+        let key = RowSurfaceOrderKey { bucket, id };
         self.order.push_back(key);
         self.surfaces
             .entry(bucket)
             .or_default()
             .push(RowSurfaceEntry {
+                id,
                 line: line_key,
                 surface: surface.clone(),
+                bytes: surface_bytes,
             });
+        self.bytes += surface_bytes;
         stats.row_surface_misses += 1;
         Some(surface)
     }
 
-    fn len(&self) -> usize {
-        self.order.len()
-    }
-
-    fn remove(&mut self, key: &RowSurfaceKey) {
+    fn remove(&mut self, key: &RowSurfaceOrderKey) {
         let Some(entries) = self.surfaces.get_mut(&key.bucket) else {
             return;
         };
-        if let Some(index) = entries.iter().position(|entry| entry.line == key.line) {
-            entries.remove(index);
+        if let Some(index) = entries.iter().position(|entry| entry.id == key.id) {
+            let entry = entries.remove(index);
+            self.bytes = self.bytes.saturating_sub(entry.bytes);
         }
         if entries.is_empty() {
             self.surfaces.remove(&key.bucket);
@@ -1969,13 +2007,22 @@ fn draw_run_background(
 fn draw_cursor(
     context: &cairo::Context,
     render: &RenderFrame,
-    cursor_motion: Option<CursorMotionState>,
-    cursor_options: CursorOptions,
-    now: Instant,
-    opacity: f64,
-    line_height: f64,
-    cell_width: f64,
+    paint: CursorPaintState,
+    metrics: TerminalFontMetrics,
 ) {
+    let cursor_motion = paint.motion.for_pane(paint.pane_id);
+    let cursor_options = paint.options;
+    let now = paint.now;
+    let opacity = paint.opacity;
+    let line_height = metrics.line_height;
+    let cell_width = metrics.cell_width;
+    let color = parse_hex_color(&render.cursor.color).expect("valid terminal cursor color");
+    let alpha = match (cursor_options.style, cursor_options.shape) {
+        (CursorStyle::Neovide, shape) => neovide_cursor_alpha(shape),
+        (_, CursorShape::Block) => crate::config::DEFAULT_NEOVIDE_BLOCK_OPACITY,
+        (_, CursorShape::Bar) => 1.0,
+    };
+    context.set_source_rgba(color.red, color.green, color.blue, alpha * opacity);
     let target = CursorDrawPosition {
         pane_id: 0,
         line: f64::from(render.cursor.line.max(0)),
@@ -1983,72 +2030,30 @@ fn draw_cursor(
     };
     let path = cursor_motion.and_then(|motion| motion.path(now));
     match cursor_options.style {
-        CursorStyle::Steady => draw_caret_at(
-            context,
-            target,
-            cursor_options.shape,
-            cursor_options.corners,
-            cursor_options.width_ratio,
-            opacity,
-            line_height,
-            cell_width,
-        ),
+        CursorStyle::Steady => draw_caret_at(context, target, cursor_options, metrics),
         CursorStyle::Smooth | CursorStyle::Snappy => draw_caret_at_fractional(
             context,
             path.map(|path| path.current).unwrap_or(target),
-            cursor_options.shape,
-            cursor_options.corners,
-            cursor_options.width_ratio,
-            opacity,
-            line_height,
-            cell_width,
+            cursor_options,
+            metrics,
         ),
         CursorStyle::Neovide => {
             if let Some(motion) = cursor_motion {
                 if motion.active(now) {
                     let points =
                         points_to_pixels(motion.neovide_points_grid(), line_height, cell_width);
-                    draw_neovide_points(context, points, cursor_options.shape, opacity);
+                    draw_neovide_points(context, points);
                 } else {
-                    draw_caret_at(
-                        context,
-                        target,
-                        cursor_options.shape,
-                        cursor_options.corners,
-                        cursor_options.width_ratio,
-                        opacity,
-                        line_height,
-                        cell_width,
-                    );
+                    draw_caret_at(context, target, cursor_options, metrics);
                 }
             } else {
-                draw_caret_at(
-                    context,
-                    target,
-                    cursor_options.shape,
-                    cursor_options.corners,
-                    cursor_options.width_ratio,
-                    opacity,
-                    line_height,
-                    cell_width,
-                );
+                draw_caret_at(context, target, cursor_options, metrics);
             }
         }
     }
 }
 
-fn draw_neovide_points(
-    context: &cairo::Context,
-    points: [CursorPoint; 4],
-    shape: CursorShape,
-    opacity: f64,
-) {
-    context.set_source_rgba(
-        125.0 / 255.0,
-        211.0 / 255.0,
-        252.0 / 255.0,
-        neovide_cursor_alpha(shape) * opacity,
-    );
+fn draw_neovide_points(context: &cairo::Context, points: [CursorPoint; 4]) {
     draw_cursor_polygon(context, points);
 }
 
@@ -2309,22 +2314,14 @@ fn draw_cursor_polygon(context: &cairo::Context, points: [CursorPoint; 4]) {
 fn draw_caret_at(
     context: &cairo::Context,
     position: CursorDrawPosition,
-    shape: CursorShape,
-    corners: CursorCornerStyle,
-    width_ratio: f64,
-    opacity: f64,
-    line_height: f64,
-    cell_width: f64,
+    options: CursorOptions,
+    metrics: TerminalFontMetrics,
 ) {
     draw_caret_rect(
         context,
         position,
-        shape,
-        corners,
-        width_ratio,
-        opacity,
-        line_height,
-        cell_width,
+        options,
+        metrics,
         CursorPixelSnap::Integer,
     );
 }
@@ -2332,22 +2329,14 @@ fn draw_caret_at(
 fn draw_caret_at_fractional(
     context: &cairo::Context,
     position: CursorDrawPosition,
-    shape: CursorShape,
-    corners: CursorCornerStyle,
-    width_ratio: f64,
-    opacity: f64,
-    line_height: f64,
-    cell_width: f64,
+    options: CursorOptions,
+    metrics: TerminalFontMetrics,
 ) {
     draw_caret_rect(
         context,
         position,
-        shape,
-        corners,
-        width_ratio,
-        opacity,
-        line_height,
-        cell_width,
+        options,
+        metrics,
         CursorPixelSnap::Fractional,
     );
 }
@@ -2361,26 +2350,23 @@ enum CursorPixelSnap {
 fn draw_caret_rect(
     context: &cairo::Context,
     position: CursorDrawPosition,
-    shape: CursorShape,
-    corners: CursorCornerStyle,
-    width_ratio: f64,
-    opacity: f64,
-    line_height: f64,
-    cell_width: f64,
+    options: CursorOptions,
+    metrics: TerminalFontMetrics,
     snap: CursorPixelSnap,
 ) {
+    let CursorOptions {
+        shape,
+        corners,
+        width_ratio,
+        ..
+    } = options;
+    let TerminalFontMetrics {
+        line_height,
+        cell_width,
+    } = metrics;
     let (x, y) = caret_pixel_position(position, line_height, cell_width, snap);
     let (width, height) = cursor_size_with_ratio(shape, line_height, cell_width, width_ratio);
-    match shape {
-        CursorShape::Bar => {
-            context.set_source_rgba(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, opacity);
-            draw_caret_shape(context, corners, x, y, width, height);
-        }
-        CursorShape::Block => {
-            context.set_source_rgba(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, 0.72 * opacity);
-            draw_caret_shape(context, corners, x, y, width, height);
-        }
-    }
+    draw_caret_shape(context, corners, x, y, width, height);
     let _ = context.fill();
 }
 
@@ -2619,6 +2605,15 @@ mod tests {
             RowSurfaceLineKey::from(&first),
             RowSurfaceLineKey::from(&shifted)
         );
+    }
+
+    #[test]
+    fn row_surface_cache_budget_holds_multiple_4k_viewports() {
+        let row_bytes = 3840 * 24 * 4;
+
+        assert_eq!(MAX_ROW_SURFACE_CACHE_BYTES / row_bytes, 182);
+        assert!(MAX_ROW_SURFACE_CACHE_BYTES >= row_bytes * 180);
+        assert!(MAX_ROW_SURFACE_CACHE_BYTES < row_bytes * 512);
     }
 
     #[test]

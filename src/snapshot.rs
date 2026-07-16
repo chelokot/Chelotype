@@ -56,12 +56,12 @@ struct MouseJson {
     utf8: bool,
 }
 
-pub fn write_snapshot(snapshot: RenderableContentOwned, label: &str) -> Option<PathBuf> {
+pub fn write_snapshot(snapshot: &RenderableContentOwned, label: &str) -> Option<PathBuf> {
     write_snapshot_with_selection(snapshot, label, None)
 }
 
 pub fn write_snapshot_with_selection(
-    snapshot: RenderableContentOwned,
+    snapshot: &RenderableContentOwned,
     label: &str,
     selection: Option<SelectionRange>,
 ) -> Option<PathBuf> {
@@ -116,7 +116,12 @@ pub fn write_snapshot_with_selection(
         .collect::<Vec<LineJson>>();
     let json = SnapshotJson {
         rows: snapshot.lines.len(),
-        cols: snapshot.lines.iter().map(Vec::len).max().unwrap_or(0),
+        cols: snapshot
+            .lines
+            .iter()
+            .map(|line| line.len())
+            .max()
+            .unwrap_or(0),
         cursor_line: snapshot.cursor_line,
         cursor_col: snapshot.cursor_col,
         cursor_visible: snapshot.cursor_visible,
@@ -217,7 +222,7 @@ fn snapshot_to_plain(snapshot: &SnapshotJson) -> String {
     snapshot.text.clone()
 }
 
-fn snapshot_plain_from_lines(lines: &[Vec<TerminalCell>]) -> String {
+fn snapshot_plain_from_lines<Line: AsRef<[TerminalCell]>>(lines: &[Line]) -> String {
     lines_to_text(lines)
 }
 

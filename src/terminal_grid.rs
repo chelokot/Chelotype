@@ -1,6 +1,8 @@
 use crate::terminal_palette::default_terminal_palette;
 use serde::Serialize;
 use std::borrow::Cow;
+use std::ops::Deref;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalCell {
@@ -32,6 +34,79 @@ impl TerminalCell {
         }
     }
 }
+
+#[derive(Clone, Debug)]
+pub struct TerminalLine {
+    cells: Arc<[TerminalCell]>,
+    character_offsets: Option<Arc<[usize]>>,
+}
+
+impl TerminalLine {
+    pub fn uses_visual_character_offsets(&self) -> bool {
+        self.character_offsets.is_none()
+    }
+
+    pub fn character_offset(&self, column: usize) -> usize {
+        self.character_offsets
+            .as_ref()
+            .map(|offsets| offsets[column.min(self.cells.len())])
+            .unwrap_or_else(|| column.min(self.cells.len()))
+    }
+}
+
+impl From<Vec<TerminalCell>> for TerminalLine {
+    fn from(cells: Vec<TerminalCell>) -> Self {
+        let visual_offsets = cells
+            .iter()
+            .all(|cell| !cell.wide_spacer && cell.text.len() == 1 && cell.text.is_ascii());
+        let character_offsets = if visual_offsets {
+            None
+        } else {
+            let mut offsets = Vec::with_capacity(cells.len() + 1);
+            let mut offset = 0;
+            offsets.push(offset);
+            for cell in &cells {
+                if !cell.wide_spacer {
+                    offset += cell.text.chars().count();
+                }
+                offsets.push(offset);
+            }
+            Some(offsets.into())
+        };
+        Self {
+            cells: cells.into(),
+            character_offsets,
+        }
+    }
+}
+
+impl FromIterator<TerminalCell> for TerminalLine {
+    fn from_iter<Cells: IntoIterator<Item = TerminalCell>>(cells: Cells) -> Self {
+        cells.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
+impl Deref for TerminalLine {
+    type Target = [TerminalCell];
+
+    fn deref(&self) -> &Self::Target {
+        &self.cells
+    }
+}
+
+impl AsRef<[TerminalCell]> for TerminalLine {
+    fn as_ref(&self) -> &[TerminalCell] {
+        self
+    }
+}
+
+impl PartialEq for TerminalLine {
+    fn eq(&self, other: &Self) -> bool {
+        self.cells == other.cells
+    }
+}
+
+impl Eq for TerminalLine {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalColors {
@@ -68,7 +143,7 @@ pub enum TerminalSemanticPrompt {
 
 #[derive(Clone)]
 pub struct TerminalContent {
-    pub lines: Vec<Vec<TerminalCell>>,
+    pub lines: Vec<TerminalLine>,
     pub line_metadata: Vec<TerminalLineMetadata>,
     pub cursor_line: i32,
     pub cursor_col: i32,
