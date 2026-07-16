@@ -197,8 +197,8 @@ function __chelotype_replace_input_range
     set -l operation_files "$CHELOTYPE_CURSOR_TARGET_FILE".replace-*
     set -l operation_file $operation_files[1]
     test -f "$operation_file"; or return
-    set -l payload (cat "$operation_file" | string collect --allow-empty)
-    rm "$operation_file"
+    set -l payload (command cat "$operation_file" | string collect --allow-empty)
+    command rm "$operation_file"
     set -l parts (string split \t -- "$payload")
     test (count $parts) -ge 3; or return
     set -l start $parts[1]
