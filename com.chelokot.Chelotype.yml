@@ -79,4 +79,4 @@ modules:
         strip-components: 1
       - type: git
         url: https://github.com/chelokot/Chelotype.git
-        commit: 7133e2f91730f38a3c60064abb358748459c3d30
+        commit: 6930276f48487e9efc3641bf5b4aeea8543ca48f
