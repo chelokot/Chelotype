@@ -646,18 +646,20 @@ fn wait_for_headless_content(
     expected: &[String],
 ) -> std::io::Result<crate::backend::RenderableContentOwned> {
     let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last_text = String::new();
     while Instant::now() < deadline {
         if let Some(content) = backend.snapshot_renderable() {
             let text = lines_to_text(&content.lines);
             if expected.iter().all(|needle| text.contains(needle)) {
                 return Ok(content);
             }
+            last_text = text;
         }
         sleep(Duration::from_millis(20));
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
-        "headless content did not appear",
+        format!("headless content did not appear; expected={expected:?}; last={last_text:?}"),
     ))
 }
 
@@ -666,6 +668,7 @@ fn wait_for_workspace_content(
     expected: &[String],
 ) -> std::io::Result<Vec<crate::workspace::PaneRenderable>> {
     let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last_text = String::new();
     while Instant::now() < deadline {
         let panes = workspace.snapshot_active_tab_renderables();
         let text = panes
@@ -676,11 +679,14 @@ fn wait_for_workspace_content(
         if expected.iter().all(|needle| text.contains(needle)) {
             return Ok(panes);
         }
+        last_text = text;
         sleep(Duration::from_millis(20));
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
-        "workspace headless content did not appear",
+        format!(
+            "workspace headless content did not appear; expected={expected:?}; last={last_text:?}"
+        ),
     ))
 }
 
