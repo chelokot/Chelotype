@@ -202,9 +202,10 @@ fn backend_fish_cursor_target_bridge_moves_commandline_cursor_directly() {
     let _ = wait_for_snapshot(&mut backend, |snapshot| snapshot.cursor_visible);
     wait_for_input_cursor_bridge(&mut backend);
     backend.write(b"abcde").expect("write fish input");
-    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+    let input_snapshot = wait_for_snapshot(&mut backend, |snapshot| {
         snapshot_text(snapshot).contains("abcde")
     });
+    let target_column = input_snapshot.cursor_col - 3;
     assert!(
         backend
             .write_input_cursor_target(2)
@@ -212,10 +213,10 @@ fn backend_fish_cursor_target_bridge_moves_commandline_cursor_directly() {
         "fish backend should expose cursor target bridge"
     );
     let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
-        snapshot_text(snapshot).contains("abcde") && snapshot.cursor_col == 4
+        snapshot_text(snapshot).contains("abcde") && snapshot.cursor_col == target_column
     });
 
-    assert_eq!(snapshot.cursor_col, 4);
+    assert_eq!(snapshot.cursor_col, target_column);
     let _ = backend.write(b"\x15exit\n");
 }
 
