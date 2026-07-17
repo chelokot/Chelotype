@@ -333,6 +333,20 @@ mod tests {
     use std::ffi::OsStr;
     use std::process::Command;
 
+    fn fish_with_noninteractive_commandline() -> Option<&'static str> {
+        static FISH: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+        *FISH.get_or_init(|| {
+            let fish_path = FISH_CANDIDATES
+                .into_iter()
+                .find(|path| std::path::Path::new(path).is_file())?;
+            let output = Command::new(fish_path)
+                .args(["-ic", "commandline --replace probe; commandline"])
+                .output()
+                .ok()?;
+            (output.status.success() && output.stdout == b"probe\n").then_some(fish_path)
+        })
+    }
+
     #[test]
     fn configured_shell_overrides_product_default() {
         assert_eq!(
@@ -416,11 +430,8 @@ mod tests {
 
     #[test]
     fn fish_undo_stack_stores_compact_insert_patch() {
-        let Some(fish_path) = FISH_CANDIDATES
-            .into_iter()
-            .find(|path| std::path::Path::new(path).is_file())
-        else {
-            eprintln!("skipping fish undo patch test because fish is not installed");
+        let Some(fish_path) = fish_with_noninteractive_commandline() else {
+            eprintln!("skipping fish undo patch test because commandline needs a PTY");
             return;
         };
 
@@ -464,11 +475,8 @@ printf '%s %s\n' (string length -- (commandline)) (commandline -C)
 
     #[test]
     fn fish_undo_capture_coalesces_repeated_edits_without_finalize_work() {
-        let Some(fish_path) = FISH_CANDIDATES
-            .into_iter()
-            .find(|path| std::path::Path::new(path).is_file())
-        else {
-            eprintln!("skipping fish undo coalescing test because fish is not installed");
+        let Some(fish_path) = fish_with_noninteractive_commandline() else {
+            eprintln!("skipping fish undo coalescing test because commandline needs a PTY");
             return;
         };
 
@@ -506,11 +514,8 @@ printf '%s %s %s\n' (count $__chelotype_undo_prefixes) (string length -- (comman
 
     #[test]
     fn fish_replace_input_range_is_atomic_and_undoable() {
-        let Some(fish_path) = FISH_CANDIDATES
-            .into_iter()
-            .find(|path| std::path::Path::new(path).is_file())
-        else {
-            eprintln!("skipping fish replace range test because fish is not installed");
+        let Some(fish_path) = fish_with_noninteractive_commandline() else {
+            eprintln!("skipping fish replace range test because commandline needs a PTY");
             return;
         };
         let operation_path =
@@ -559,11 +564,8 @@ printf '%s\n%s\n' (string escape --style=var -- "$current") (commandline -C)
 
     #[test]
     fn fish_undo_pending_edit_does_not_cross_command_execution() {
-        let Some(fish_path) = FISH_CANDIDATES
-            .into_iter()
-            .find(|path| std::path::Path::new(path).is_file())
-        else {
-            eprintln!("skipping fish undo preexec test because fish is not installed");
+        let Some(fish_path) = fish_with_noninteractive_commandline() else {
+            eprintln!("skipping fish undo preexec test because commandline needs a PTY");
             return;
         };
 
