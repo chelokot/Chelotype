@@ -48,6 +48,17 @@ pub fn run_app() -> glib::ExitCode {
         .build();
     install_app_accelerators(&app);
     app.connect_activate(build_ui);
+    #[cfg(unix)]
+    {
+        let app = app.clone();
+        glib::unix_signal_add_local_once(15, move || {
+            for window in app.windows() {
+                window.close();
+                app.remove_window(&window);
+            }
+            app.quit();
+        });
+    }
     app.run()
 }
 
@@ -56,6 +67,10 @@ fn build_ui(app: &Application) {
     crate::terminal_font::load_configured_size();
     let workspace = TerminalWorkspace::spawn_shell().expect("spawn terminal workspace");
     let workspace_rc = std::rc::Rc::new(std::cell::RefCell::new(workspace));
+    {
+        let workspace = workspace_rc.clone();
+        app.connect_shutdown(move |_| workspace.borrow_mut().shutdown());
+    }
     let force_snapshot = std::rc::Rc::new(std::cell::Cell::new(true));
 
     let tab_view = adw::TabView::new();
@@ -137,9 +152,15 @@ fn build_ui(app: &Application) {
         std::env::var("CHELOTYPE_RENDER_SNAPSHOT").ok().as_deref() == Some("1");
     let last_snapshot = std::rc::Rc::new(std::cell::RefCell::new(std::time::Instant::now()));
     let ui_e2e = UiE2eScenario::from_env();
-    let ui_e2e_deadline = ui_e2e
-        .as_ref()
-        .map(|scenario| std::time::Instant::now() + scenario.timeout);
+    let ui_e2e_timeout = std::rc::Rc::new(std::cell::RefCell::new(None::<glib::SourceId>));
+    if let Some(scenario) = &ui_e2e {
+        let expected = scenario.expected.join(", ");
+        let timeout = glib::timeout_add_local_once(scenario.timeout, move || {
+            eprintln!("gtk e2e expected content did not appear: {expected}");
+            std::process::exit(1);
+        });
+        *ui_e2e_timeout.borrow_mut() = Some(timeout);
+    }
     let cell_metrics = std::rc::Rc::new(std::cell::Cell::new(None::<CellMetrics>));
     let active_pane_origin_col = std::rc::Rc::new(std::cell::Cell::new(0usize));
     let pane_hits = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PaneHit>::new()));
@@ -218,6 +239,7 @@ fn build_ui(app: &Application) {
         let tabs = tab_context.clone();
         window.connect_close_request(move |_| {
             remember_single_tab_launch_target(&tabs);
+            tabs.workspace.borrow_mut().shutdown();
             glib::Propagation::Proceed
         });
     }
@@ -1358,10 +1380,25 @@ fn build_ui(app: &Application) {
 
     if let Some(scenario) = ui_e2e.clone() {
         let workspace = workspace_rc.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
-            let _ = workspace
-                .borrow_mut()
-                .write_active(scenario.input.as_bytes());
+        let content = last_content.clone();
+        let input_not_before = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+            if std::time::Instant::now() < input_not_before {
+                return glib::ControlFlow::Continue;
+            }
+            let shell_visible = content
+                .borrow()
+                .as_ref()
+                .is_some_and(|content| !lines_to_text(&content.lines).trim().is_empty());
+            if !shell_visible {
+                return glib::ControlFlow::Continue;
+            }
+            let mut workspace = workspace.borrow_mut();
+            if !workspace.active_shell_input_ready().unwrap_or(false) {
+                return glib::ControlFlow::Continue;
+            }
+            let _ = workspace.write_active(scenario.input.as_bytes());
+            glib::ControlFlow::Break
         });
     }
     configure_profile_scroll_burst(
@@ -1556,7 +1593,8 @@ fn build_ui(app: &Application) {
                     .collect(),
             });
             let snapshot_due = snapshot_enabled
-                && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+                && (terminal_changed
+                    || last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
                     || selection_changed
                     || force);
             let rendered = if snapshot_due || render_snapshot_enabled {
@@ -1632,29 +1670,23 @@ fn build_ui(app: &Application) {
             if selection_changed {
                 copy_selection_to_primary(tick_canvas.widget(), &selection_text);
             }
-            if let (Some(scenario), Some(text)) = (&ui_e2e, e2e_text.as_deref()) {
-                if scenario
+            if let (Some(scenario), Some(text)) = (&ui_e2e, e2e_text.as_deref())
+                && scenario
                     .expected
                     .iter()
                     .all(|expected| text.contains(expected))
-                {
-                    gtk::test_widget_wait_for_draw(tick_canvas.widget());
-                    let _ = write_snapshot_with_selection(
-                        &active_content,
-                        "gtk_e2e",
-                        visible_selection,
-                    );
-                    if let Some(rendered) = &rendered_snapshot {
-                        let _ = write_workspace_render_snapshot(rendered, "gtk_e2e_workspace");
-                    }
-                    app_for_tick.quit();
-                    record_tick_work(tick_wall_started);
-                    return glib::ControlFlow::Break;
+            {
+                if let Some(timeout) = ui_e2e_timeout.borrow_mut().take() {
+                    timeout.remove();
                 }
-                if ui_e2e_deadline.is_some_and(|deadline| std::time::Instant::now() > deadline) {
-                    eprintln!("gtk e2e expected content did not appear: {text}");
-                    std::process::exit(1);
+                let _ =
+                    write_snapshot_with_selection(&active_content, "gtk_e2e", visible_selection);
+                if let Some(rendered) = &rendered_snapshot {
+                    let _ = write_workspace_render_snapshot(rendered, "gtk_e2e_workspace");
                 }
+                app_for_tick.quit();
+                record_tick_work(tick_wall_started);
+                return glib::ControlFlow::Break;
             }
             if snapshot_due {
                 *last_snapshot.borrow_mut() = std::time::Instant::now();
@@ -1760,7 +1792,9 @@ fn build_ui(app: &Application) {
                     .iter()
                     .all(|expected| text.contains(expected))
                 {
-                    gtk::test_widget_wait_for_draw(tick_canvas.widget());
+                    if let Some(timeout) = ui_e2e_timeout.borrow_mut().take() {
+                        timeout.remove();
+                    }
                     if let Some(rendered) = &e2e_render_snapshot {
                         let _ = write_render_frame_snapshot(rendered, "gtk_e2e_render");
                     }
@@ -1769,15 +1803,12 @@ fn build_ui(app: &Application) {
                     record_tick_work(tick_wall_started);
                     return glib::ControlFlow::Break;
                 }
-                if ui_e2e_deadline.is_some_and(|deadline| std::time::Instant::now() > deadline) {
-                    eprintln!("gtk e2e expected content did not appear: {text}");
-                    std::process::exit(1);
-                }
             }
         }
         let snapshot_content = last_content.borrow();
         if snapshot_enabled
-            && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+            && (terminal_changed
+                || last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
                 || selection_changed
                 || force)
             && let Some(content) = snapshot_content.as_ref()
@@ -2464,7 +2495,7 @@ impl UiE2eScenario {
             .ok()
             .and_then(|value| value.parse().ok())
             .map(std::time::Duration::from_millis)
-            .unwrap_or_else(|| std::time::Duration::from_secs(4));
+            .unwrap_or_else(|| std::time::Duration::from_secs(8));
         Some(Self {
             input,
             expected,
@@ -3064,8 +3095,11 @@ fn write_preferences_geometry_trace(window: &adw::Window, path: &str) {
         ("card", "chelotype-scrolling-instant-card"),
         ("terminal", "chelotype-scrolling-instant-preview"),
         ("label", "chelotype-scrolling-instant-label"),
+        ("cursor_animation", "chelotype-cursor-animation-group"),
         ("animation_speed", "chelotype-animation-speed-row"),
         ("advanced", "chelotype-advanced-animation-settings"),
+        ("cursor_corners", "chelotype-cursor-corners-group"),
+        ("cursor_blink", "chelotype-cursor-blink-group"),
         ("cursor_blinking", "chelotype-cursor-blinking-row"),
     ] {
         let Some(widget) = find_named_widget(root, widget_name) else {
@@ -3108,6 +3142,7 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     let animation_group = adw::PreferencesGroup::builder()
         .title("Cursor animation")
         .build();
+    animation_group.set_widget_name("chelotype-cursor-animation-group");
     let cursor_shape_grid = gtk::Grid::builder()
         .column_spacing(10)
         .margin_top(8)
@@ -3163,6 +3198,7 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     let corner_group = adw::PreferencesGroup::builder()
         .title("Cursor corners")
         .build();
+    corner_group.set_widget_name("chelotype-cursor-corners-group");
     corner_group.add(&corner_grid);
     corner_group.add(&animation_slider_row_with_update(
         AnimationSliderSpec {
@@ -3207,6 +3243,7 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     let blink_group = adw::PreferencesGroup::builder()
         .title("Cursor blinking")
         .build();
+    blink_group.set_widget_name("chelotype-cursor-blink-group");
     let blink_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -5360,6 +5397,7 @@ fn write_key_with_selection(
         *content.borrow_mut() = Some(fresh_content);
     }
     let Some(selection_range) = selection.get() else {
+        keyboard_selection.set(None);
         let content = content.borrow();
         let _ = write_active_input_edit(workspace, content.as_ref(), &data);
         return;
@@ -5633,7 +5671,7 @@ fn move_cursor_from_keyboard(
     let current_override = if cursor_move.selecting {
         directed_focus.or(terminal_cursor)
     } else {
-        None
+        directed_focus
     };
     if !cursor_move.selecting
         && let Some(target) = keyboard_selection_collapse_target(
@@ -5685,7 +5723,7 @@ fn move_cursor_from_keyboard(
             selection_dirty,
             keyboard_selection,
         );
-    } else if selection.get().is_some() {
+    } else if selection.get().is_some() || keyboard_selection.get().is_some() {
         clear_selection(
             selection,
             selection_text,
@@ -5693,7 +5731,7 @@ fn move_cursor_from_keyboard(
             keyboard_selection,
         );
     }
-    if !cursor_target_matches_content_cursor(&content, target)
+    if (directed_focus.is_some() || !cursor_target_matches_content_cursor(&content, target))
         && let Ok(true) = write_active_input_cursor_target(workspace, &content, target)
     {
         return;
@@ -5737,7 +5775,7 @@ fn select_keyboard_cursor_range(
         *selection_text.borrow_mut() =
             visible.and_then(|range| text_for_viewport_selection(content, range));
     } else {
-        keyboard_selection.set(None);
+        keyboard_selection.set(Some(directed));
         selection.set(None);
         *selection_text.borrow_mut() = None;
     }
@@ -5917,11 +5955,13 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
 
 fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: TerminalMetrics) {
     let content = format!(
-        "canvas_x={}\ncanvas_y={}\ncanvas_width={}\ncanvas_height={}\ncell_width={:.6}\nline_height={:.6}\ncols={}\nrows={}",
+        "canvas_x={}\ncanvas_y={}\ncanvas_width={}\ncanvas_height={}\ncell_offset_x={:.6}\ncell_offset_y={:.6}\ncell_width={:.6}\nline_height={:.6}\ncols={}\nrows={}",
         widget.allocation().x(),
         widget.allocation().y(),
         widget.allocated_width(),
         widget.allocated_height(),
+        metrics.cell.offset_x,
+        metrics.cell.offset_y,
         metrics.cell.width,
         metrics.cell.height,
         metrics.size.cols,
@@ -6601,7 +6641,7 @@ fn split_resize_boundary_at(
     if panes.len() < 2 || x < 0.0 || metrics.width <= 0.0 {
         return None;
     }
-    let threshold = (metrics.width * 0.6).max(8.0);
+    let threshold = (metrics.width * 0.5).clamp(4.0, 6.0);
     panes.windows(2).enumerate().find_map(|(index, pair)| {
         let [left, right] = pair else {
             return None;
@@ -7440,12 +7480,12 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            split_resize_boundary_at(metrics(), &[left, right], 403.0),
+            split_resize_boundary_at(metrics(), &[left, right], 405.0),
             Some(0)
         );
         assert_eq!(
             split_resize_boundary_at(metrics(), &[left, right], 407.0),
-            Some(0)
+            None
         );
         assert_eq!(
             split_resize_boundary_at(metrics(), &[left, right], 409.0),

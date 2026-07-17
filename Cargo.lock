@@ -111,6 +111,7 @@ dependencies = [
  "criterion",
  "gtk4",
  "libadwaita",
+ "libc",
  "libghostty-vt",
  "portable-pty",
  "serde",

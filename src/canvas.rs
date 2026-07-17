@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 const PALETTE_TRANSITION_DURATION: Duration = Duration::from_millis(300);
 const MAX_TEXT_LAYOUT_CACHE_ENTRIES: usize = 4096;
+const MAX_INPUT_LAYOUT_PANES: usize = 16;
 const MAX_ROW_SURFACE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const TERMINAL_CANVAS_PADDING_PX: f64 = 6.0;
 const TERMINAL_PREVIEW_RADIUS_PX: f64 = 6.0;
@@ -670,6 +671,7 @@ fn draw_canvas_render(
                 PaintViewport {
                     scroll_visual_offset_px: paint.scroll_visual_offset_px,
                     width: content_width,
+                    input_cache_key: 0,
                 },
             );
             if let Some(CanvasRenderFrame::Single(underlay)) = scroll_underlay {
@@ -683,6 +685,7 @@ fn draw_canvas_render(
                     PaintRect {
                         width: content_width,
                         height: content_height,
+                        input_cache_key: 0,
                     },
                 );
             }
@@ -752,7 +755,11 @@ fn draw_workspace_scroll_underlay(
         metrics,
         paint_resources,
         scroll_visual_offset_px,
-        PaintRect { width, height },
+        PaintRect {
+            width,
+            height,
+            input_cache_key: underlay_pane.pane_id,
+        },
     );
     let _ = context.restore();
 }
@@ -787,6 +794,7 @@ fn draw_scroll_underlay_frame_in_rect(
         PaintViewport {
             scroll_visual_offset_px: underlay.scroll_visual_offset_px,
             width: rect.width,
+            input_cache_key: rect.input_cache_key,
         },
     );
     let _ = context.restore();
@@ -840,6 +848,15 @@ fn draw_render_frame(
         .clip_extents()
         .ok()
         .map(|(_, top, _, bottom)| (top, bottom));
+    paint_resources.text_layout_cache.sync_signature(widget);
+    paint_resources
+        .text_layout_cache
+        .prepare_visible_input_lines(
+            viewport.input_cache_key,
+            &render.lines,
+            vertical_clip,
+            line_height,
+        );
     for line in &render.lines {
         let top = line.row as f64 * line_height;
         if vertical_clip.is_some_and(|(clip_top, clip_bottom)| {
@@ -945,7 +962,13 @@ fn draw_render_line_direct(
             continue;
         }
         let left = run.start_column as f64 * cell_width;
-        let layout = layout_for_paint(widget, text_layout_cache, stats, &run.markup);
+        let layout = layout_for_paint(
+            widget,
+            text_layout_cache,
+            stats,
+            &run.markup,
+            line.region == RenderRegion::Input,
+        );
         let _ = context.save();
         context.rectangle(left, top, run.columns as f64 * cell_width, line_height);
         context.clip();
@@ -988,6 +1011,7 @@ fn draw_workspace_render(
                     0.0
                 },
                 width,
+                input_cache_key: pane.pane_id,
             },
         );
         let _ = context.restore();
@@ -1034,12 +1058,14 @@ struct CanvasLayer {
 struct PaintRect {
     width: f64,
     height: f64,
+    input_cache_key: u64,
 }
 
 #[derive(Clone, Copy)]
 struct PaintViewport {
     scroll_visual_offset_px: f64,
     width: f64,
+    input_cache_key: u64,
 }
 
 #[derive(Default)]
@@ -1047,6 +1073,7 @@ struct PaintStats {
     rows: u64,
     layout_hits: u64,
     layout_misses: u64,
+    history_layout_misses: u64,
     row_surface_hits: u64,
     row_surface_misses: u64,
     row_surface_evictions: u64,
@@ -1057,6 +1084,10 @@ impl PaintStats {
         crate::perf_trace::record_counter("gtk_paint_rows", self.rows);
         crate::perf_trace::record_counter("gtk_layout_cache_hits", self.layout_hits);
         crate::perf_trace::record_counter("gtk_layout_cache_misses", self.layout_misses);
+        crate::perf_trace::record_counter(
+            "gtk_history_layout_cache_misses",
+            self.history_layout_misses,
+        );
         crate::perf_trace::record_counter("gtk_row_surface_hits", self.row_surface_hits);
         crate::perf_trace::record_counter("gtk_row_surface_misses", self.row_surface_misses);
         crate::perf_trace::record_counter("gtk_row_surface_evictions", self.row_surface_evictions);
@@ -1097,14 +1128,18 @@ fn layout_for_paint(
     text_layout_cache: &mut TextLayoutCache,
     stats: &mut PaintStats,
     markup: &str,
+    input: bool,
 ) -> pango::Layout {
-    match text_layout_cache.layout_for(widget, markup) {
+    match text_layout_cache.layout_for(widget, markup, input) {
         CachedLayout::Hit(layout) => {
             stats.layout_hits += 1;
             layout
         }
         CachedLayout::Miss(layout) => {
             stats.layout_misses += 1;
+            if !input {
+                stats.history_layout_misses += 1;
+            }
             layout
         }
     }
@@ -1156,6 +1191,9 @@ impl RowSurfaceCache {
         text_layout_cache: &mut TextLayoutCache,
         stats: &mut PaintStats,
     ) -> Option<cairo::ImageSurface> {
+        if line.region == RenderRegion::Input {
+            return None;
+        }
         let spec = RowSurfaceSpec {
             width_px: frame_width.ceil() as i32,
             height_px: metrics.line_height.ceil() as i32,
@@ -1294,6 +1332,19 @@ struct TextLayoutCache {
     font_size_pt: f64,
     letter_spacing: i32,
     layouts: HashMap<String, pango::Layout>,
+    input_layouts: HashMap<u64, InputTextLayoutCache>,
+    input_cache_generation: u64,
+    active_input_cache_key: u64,
+}
+
+#[derive(Default)]
+struct InputTextLayoutCache {
+    input_paint_keys: Vec<u64>,
+    input_layouts: HashMap<String, pango::Layout>,
+    previous_input_paint_keys: Vec<u64>,
+    previous_input_layouts: HashMap<String, pango::Layout>,
+    use_previous_input_layouts: bool,
+    last_used_generation: u64,
 }
 
 enum CachedLayout {
@@ -1307,24 +1358,92 @@ impl TextLayoutCache {
             self.font_size_pt = font_size_pt;
             self.signature = None;
             self.layouts.clear();
+            self.input_layouts.clear();
+            self.input_cache_generation = 0;
         }
     }
 
-    fn layout_for(&mut self, widget: &gtk::DrawingArea, markup: &str) -> CachedLayout {
+    fn prepare_visible_input_lines(
+        &mut self,
+        input_cache_key: u64,
+        lines: &[crate::render::RenderLine],
+        vertical_clip: Option<(f64, f64)>,
+        line_height: f64,
+    ) {
+        let paint_keys = lines
+            .iter()
+            .filter(|line| {
+                line.region == RenderRegion::Input
+                    && !vertical_clip.is_some_and(|(clip_top, clip_bottom)| {
+                        !row_intersects_clip(
+                            line.row as f64 * line_height,
+                            line_height,
+                            clip_top,
+                            clip_bottom,
+                        )
+                    })
+            })
+            .map(|line| line.paint_key)
+            .collect::<Vec<_>>();
+        if paint_keys.is_empty() {
+            return;
+        }
+        self.active_input_cache_key = input_cache_key;
+        self.input_cache_generation = self.input_cache_generation.wrapping_add(1);
+        if !self.input_layouts.contains_key(&input_cache_key)
+            && self.input_layouts.len() >= MAX_INPUT_LAYOUT_PANES
+            && let Some(evicted) = self
+                .input_layouts
+                .iter()
+                .min_by_key(|(_, cache)| cache.last_used_generation)
+                .map(|(key, _)| *key)
+        {
+            self.input_layouts.remove(&evicted);
+        }
+        let cache = self.input_layouts.entry(input_cache_key).or_default();
+        cache.last_used_generation = self.input_cache_generation;
+        if cache.input_paint_keys == paint_keys {
+            cache.use_previous_input_layouts = false;
+        } else if cache.previous_input_paint_keys == paint_keys {
+            cache.use_previous_input_layouts = true;
+        } else {
+            cache.previous_input_paint_keys = std::mem::take(&mut cache.input_paint_keys);
+            cache.previous_input_layouts = std::mem::take(&mut cache.input_layouts);
+            cache.input_paint_keys = paint_keys;
+            cache.use_previous_input_layouts = false;
+        }
+    }
+
+    fn layout_for(&mut self, widget: &gtk::DrawingArea, markup: &str, input: bool) -> CachedLayout {
         self.sync_signature(widget);
-        if let Some(layout) = self.layouts.get(markup) {
+        let font_size_pt = self.font_size_pt;
+        let letter_spacing = self.letter_spacing;
+        let layouts = if input {
+            let cache = self
+                .input_layouts
+                .get_mut(&self.active_input_cache_key)
+                .expect("visible input layout cache");
+            if cache.use_previous_input_layouts {
+                &mut cache.previous_input_layouts
+            } else {
+                &mut cache.input_layouts
+            }
+        } else {
+            &mut self.layouts
+        };
+        if let Some(layout) = layouts.get(markup) {
             return CachedLayout::Hit(layout.clone());
         }
-        if self.layouts.len() >= MAX_TEXT_LAYOUT_CACHE_ENTRIES {
-            self.layouts.clear();
+        if layouts.len() >= MAX_TEXT_LAYOUT_CACHE_ENTRIES {
+            layouts.clear();
         }
         let layout = crate::terminal_font::layout_for_size_with_letter_spacing(
             widget,
             markup,
-            self.font_size_pt,
-            self.letter_spacing,
+            font_size_pt,
+            letter_spacing,
         );
-        self.layouts.insert(markup.to_string(), layout.clone());
+        layouts.insert(markup.to_string(), layout.clone());
         CachedLayout::Miss(layout)
     }
 
@@ -1335,6 +1454,8 @@ impl TextLayoutCache {
             self.letter_spacing =
                 crate::terminal_font::letter_spacing_for_widget_size(widget, self.font_size_pt);
             self.layouts.clear();
+            self.input_layouts.clear();
+            self.input_cache_generation = 0;
         }
     }
 }
@@ -2614,6 +2735,31 @@ mod tests {
         assert_eq!(MAX_ROW_SURFACE_CACHE_BYTES / row_bytes, 182);
         assert!(MAX_ROW_SURFACE_CACHE_BYTES >= row_bytes * 180);
         assert!(MAX_ROW_SURFACE_CACHE_BYTES < row_bytes * 512);
+    }
+
+    #[test]
+    fn input_layout_generations_are_isolated_per_pane() {
+        let input_line = |text: &str| {
+            RenderLine::new(
+                0,
+                RenderRegion::Input,
+                text.to_string(),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let mut cache = TextLayoutCache::default();
+        for (pane_id, text) in [(1, "first"), (2, "second"), (3, "third")] {
+            cache.prepare_visible_input_lines(pane_id, &[input_line(text)], None, 20.0);
+        }
+
+        assert_eq!(cache.input_layouts.len(), 3);
+        let second_keys = cache.input_layouts[&2].input_paint_keys.clone();
+        let third_keys = cache.input_layouts[&3].input_paint_keys.clone();
+        cache.prepare_visible_input_lines(1, &[input_line("changed")], None, 20.0);
+        assert_eq!(cache.input_layouts[&2].input_paint_keys, second_keys);
+        assert_eq!(cache.input_layouts[&3].input_paint_keys, third_keys);
     }
 
     #[test]

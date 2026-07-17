@@ -175,10 +175,11 @@ function __chelotype_discard_pending_undo --on-event fish_preexec
     set -e __chelotype_pending_cursor
 end
 function __chelotype_move_cursor_to_target
-    set -l target_file "$CHELOTYPE_CURSOR_TARGET_FILE.cursor"
-    test -n "$target_file"; or return
-    test -f "$target_file"; or return
-    set -l target (string trim < "$target_file")
+    set -l operation_files "$CHELOTYPE_CURSOR_TARGET_FILE".cursor-*
+    set -l operation_file $operation_files[1]
+    test -f "$operation_file"; or return
+    set -l target (string trim < "$operation_file")
+    command rm "$operation_file"
     string match -qr '^[0-9]+$' -- $target; or return
     set -l line (__chelotype_decode_line (__chelotype_encode_current_line) | string split0)
     set -l line_length (string length -- "$line")

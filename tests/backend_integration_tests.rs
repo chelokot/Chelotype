@@ -442,6 +442,30 @@ fn backend_dirty_snapshot_only_emits_after_state_changes() {
 
 #[test]
 #[serial]
+fn backend_shutdown_stops_a_backpressured_pty_reader() {
+    let mut command = CommandBuilder::new("/bin/sh");
+    command.args(["-lc", "trap '' HUP; yes CHELOTYPE_SHUTDOWN"]);
+    let mut backend = TerminalBackend::spawn(command).expect("spawn output command");
+    sleep(Duration::from_millis(100));
+
+    let started = Instant::now();
+    backend.shutdown();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "shutdown should not wait for a full PTY channel"
+    );
+    assert_eq!(
+        backend
+            .write(b"after shutdown")
+            .expect_err("closed writer")
+            .kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+#[serial]
 fn backend_tracks_sgr_mouse_reporting_mode() {
     let mut backend = TerminalBackend::spawn(color_output_command()).expect("spawn command");
     assert!(
