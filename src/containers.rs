@@ -488,6 +488,7 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
     #[serial_test::serial]
     fn toolbox_launch_runs_through_host_when_flatpaked() {
         crate::host::set_flatpak_test_override(Some(true));
+        crate::host::set_environment_value_test_override(Some(("USER", "chelotype-test")));
         unsafe {
             std::env::set_var("CHELOTYPE_SHELL", "/bin/sh");
         }
@@ -507,11 +508,12 @@ e861f5c4e141  fedora-toolbox-sha-b719027  7 months ago  running  image
         assert_eq!(argv[2], "/bin/sh");
         assert_eq!(argv[3], "-lc");
         assert!(argv[4].contains("podman start 'fedora-toolbox-latest'"));
-        assert!(argv[4].contains("--user="));
+        assert!(argv[4].contains("--user='chelotype-test'"));
 
         unsafe {
             std::env::remove_var("CHELOTYPE_SHELL");
         }
+        crate::host::set_environment_value_test_override(None);
         crate::host::set_flatpak_test_override(None);
     }
 

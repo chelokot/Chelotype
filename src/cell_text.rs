@@ -15,10 +15,10 @@ pub fn cells_to_text(cells: &[TerminalCell]) -> String {
     out
 }
 
-pub fn lines_to_text(lines: &[Vec<TerminalCell>]) -> String {
+pub fn lines_to_text<Line: AsRef<[TerminalCell]>>(lines: &[Line]) -> String {
     let mut out = String::new();
     for (idx, line) in lines.iter().enumerate() {
-        out.push_str(&cells_to_text(line));
+        out.push_str(&cells_to_text(line.as_ref()));
         if idx + 1 != lines.len() {
             out.push('\n');
         }

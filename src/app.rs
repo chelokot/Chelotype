@@ -1,5 +1,5 @@
 use crate::backend::{MouseMode, RenderableContentOwned, ScreenSize};
-use crate::canvas::TerminalCanvas;
+use crate::canvas::{CursorOptionsOverride, TerminalCanvas};
 use crate::cell_text::lines_to_text;
 use crate::command_blocks::{
     command_block_output_range, command_block_output_range_near_cursor, command_blocks,
@@ -11,8 +11,8 @@ use crate::input::{
 use crate::input_selection::{
     DirectedSelectionRange, active_cursor_point, active_input_line_range,
     cursor_movement_bytes_between_points, directed_selection_for_target,
-    input_buffer_offset_for_position, keyboard_cursor_bytes, keyboard_cursor_target,
-    keyboard_selection_collapse_target, selection_within_active_input,
+    input_buffer_range_for_selection, input_cursor_offset_for_position, keyboard_cursor_bytes,
+    keyboard_cursor_target, keyboard_selection_collapse_target, selection_within_active_input,
 };
 use crate::interaction::{
     InteractionEffect, PointerInteraction, cursor_movement_bytes_between_editable_input_points,
@@ -48,6 +48,17 @@ pub fn run_app() -> glib::ExitCode {
         .build();
     install_app_accelerators(&app);
     app.connect_activate(build_ui);
+    #[cfg(unix)]
+    {
+        let app = app.clone();
+        glib::unix_signal_add_local_once(15, move || {
+            for window in app.windows() {
+                window.close();
+                app.remove_window(&window);
+            }
+            app.quit();
+        });
+    }
     app.run()
 }
 
@@ -56,6 +67,10 @@ fn build_ui(app: &Application) {
     crate::terminal_font::load_configured_size();
     let workspace = TerminalWorkspace::spawn_shell().expect("spawn terminal workspace");
     let workspace_rc = std::rc::Rc::new(std::cell::RefCell::new(workspace));
+    {
+        let workspace = workspace_rc.clone();
+        app.connect_shutdown(move |_| workspace.borrow_mut().shutdown());
+    }
     let force_snapshot = std::rc::Rc::new(std::cell::Cell::new(true));
 
     let tab_view = adw::TabView::new();
@@ -137,9 +152,15 @@ fn build_ui(app: &Application) {
         std::env::var("CHELOTYPE_RENDER_SNAPSHOT").ok().as_deref() == Some("1");
     let last_snapshot = std::rc::Rc::new(std::cell::RefCell::new(std::time::Instant::now()));
     let ui_e2e = UiE2eScenario::from_env();
-    let ui_e2e_deadline = ui_e2e
-        .as_ref()
-        .map(|scenario| std::time::Instant::now() + scenario.timeout);
+    let ui_e2e_timeout = std::rc::Rc::new(std::cell::RefCell::new(None::<glib::SourceId>));
+    if let Some(scenario) = &ui_e2e {
+        let expected = scenario.expected.join(", ");
+        let timeout = glib::timeout_add_local_once(scenario.timeout, move || {
+            eprintln!("gtk e2e expected content did not appear: {expected}");
+            std::process::exit(1);
+        });
+        *ui_e2e_timeout.borrow_mut() = Some(timeout);
+    }
     let cell_metrics = std::rc::Rc::new(std::cell::Cell::new(None::<CellMetrics>));
     let active_pane_origin_col = std::rc::Rc::new(std::cell::Cell::new(0usize));
     let pane_hits = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PaneHit>::new()));
@@ -218,6 +239,7 @@ fn build_ui(app: &Application) {
         let tabs = tab_context.clone();
         window.connect_close_request(move |_| {
             remember_single_tab_launch_target(&tabs);
+            tabs.workspace.borrow_mut().shutdown();
             glib::Propagation::Proceed
         });
     }
@@ -1358,10 +1380,25 @@ fn build_ui(app: &Application) {
 
     if let Some(scenario) = ui_e2e.clone() {
         let workspace = workspace_rc.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
-            let _ = workspace
-                .borrow_mut()
-                .write_active(scenario.input.as_bytes());
+        let content = last_content.clone();
+        let input_not_before = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+            if std::time::Instant::now() < input_not_before {
+                return glib::ControlFlow::Continue;
+            }
+            let shell_visible = content
+                .borrow()
+                .as_ref()
+                .is_some_and(|content| !lines_to_text(&content.lines).trim().is_empty());
+            if !shell_visible {
+                return glib::ControlFlow::Continue;
+            }
+            let mut workspace = workspace.borrow_mut();
+            if !workspace.active_shell_input_ready().unwrap_or(false) {
+                return glib::ControlFlow::Continue;
+            }
+            let _ = workspace.write_active(scenario.input.as_bytes());
+            glib::ControlFlow::Break
         });
     }
     configure_profile_scroll_burst(
@@ -1556,7 +1593,8 @@ fn build_ui(app: &Application) {
                     .collect(),
             });
             let snapshot_due = snapshot_enabled
-                && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+                && (terminal_changed
+                    || last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
                     || selection_changed
                     || force);
             let rendered = if snapshot_due || render_snapshot_enabled {
@@ -1632,26 +1670,23 @@ fn build_ui(app: &Application) {
             if selection_changed {
                 copy_selection_to_primary(tick_canvas.widget(), &selection_text);
             }
-            if let (Some(scenario), Some(text)) = (&ui_e2e, e2e_text.as_deref()) {
-                if scenario
+            if let (Some(scenario), Some(text)) = (&ui_e2e, e2e_text.as_deref())
+                && scenario
                     .expected
                     .iter()
                     .all(|expected| text.contains(expected))
-                {
-                    gtk::test_widget_wait_for_draw(tick_canvas.widget());
-                    let _ =
-                        write_snapshot_with_selection(active_content, "gtk_e2e", visible_selection);
-                    if let Some(rendered) = &rendered_snapshot {
-                        let _ = write_workspace_render_snapshot(rendered, "gtk_e2e_workspace");
-                    }
-                    app_for_tick.quit();
-                    record_tick_work(tick_wall_started);
-                    return glib::ControlFlow::Break;
+            {
+                if let Some(timeout) = ui_e2e_timeout.borrow_mut().take() {
+                    timeout.remove();
                 }
-                if ui_e2e_deadline.is_some_and(|deadline| std::time::Instant::now() > deadline) {
-                    eprintln!("gtk e2e expected content did not appear: {text}");
-                    std::process::exit(1);
+                let _ =
+                    write_snapshot_with_selection(&active_content, "gtk_e2e", visible_selection);
+                if let Some(rendered) = &rendered_snapshot {
+                    let _ = write_workspace_render_snapshot(rendered, "gtk_e2e_workspace");
                 }
+                app_for_tick.quit();
+                record_tick_work(tick_wall_started);
+                return glib::ControlFlow::Break;
             }
             if snapshot_due {
                 *last_snapshot.borrow_mut() = std::time::Instant::now();
@@ -1664,7 +1699,7 @@ fn build_ui(app: &Application) {
                     *selection_text.borrow_mut() =
                         text_for_viewport_selection(&active_content, visible_selection);
                 }
-                let _ = write_snapshot_with_selection(active_content, "frame", visible_selection);
+                let _ = write_snapshot_with_selection(&active_content, "frame", visible_selection);
                 if selection.get().is_some() {
                     copy_selection_to_primary(tick_canvas.widget(), &selection_text);
                 }
@@ -1693,15 +1728,13 @@ fn build_ui(app: &Application) {
             mouse_mode.set(content.mouse);
             *last_content.borrow_mut() = Some(content);
         }
-        let render_content = if terminal_changed || selection_changed {
-            last_content.borrow().clone()
-        } else {
-            None
-        };
-        if let Some(content) = render_content {
+        let render_content = last_content.borrow();
+        if (terminal_changed || selection_changed)
+            && let Some(content) = render_content.as_ref()
+        {
             let expected_selection_text = selection_text.borrow().clone();
             let visible_selection = visible_or_reanchored_selection(
-                &content,
+                content,
                 &selection,
                 expected_selection_text.as_deref(),
             );
@@ -1709,14 +1742,14 @@ fn build_ui(app: &Application) {
                 && let Some(visible_selection) = visible_selection
             {
                 *selection_text.borrow_mut() =
-                    text_for_viewport_selection(&content, visible_selection);
+                    text_for_viewport_selection(content, visible_selection);
             }
             let allocations_before = crate::allocation_trace::snapshot();
             let render_started = std::time::Instant::now();
             let rendered = if render_snapshot_enabled {
-                Renderer::render_frame_with_selection(&content, visible_selection)
+                Renderer::render_frame_with_selection(content, visible_selection)
             } else {
-                Renderer::render_frame_for_paint(&content, visible_selection)
+                Renderer::render_frame_for_paint(content, visible_selection)
             };
             let mut rendered = rendered;
             apply_preedit_to_render_frame(&mut rendered, preedit_state.as_ref());
@@ -1759,7 +1792,9 @@ fn build_ui(app: &Application) {
                     .iter()
                     .all(|expected| text.contains(expected))
                 {
-                    gtk::test_widget_wait_for_draw(tick_canvas.widget());
+                    if let Some(timeout) = ui_e2e_timeout.borrow_mut().take() {
+                        timeout.remove();
+                    }
                     if let Some(rendered) = &e2e_render_snapshot {
                         let _ = write_render_frame_snapshot(rendered, "gtk_e2e_render");
                     }
@@ -1768,23 +1803,21 @@ fn build_ui(app: &Application) {
                     record_tick_work(tick_wall_started);
                     return glib::ControlFlow::Break;
                 }
-                if ui_e2e_deadline.is_some_and(|deadline| std::time::Instant::now() > deadline) {
-                    eprintln!("gtk e2e expected content did not appear: {text}");
-                    std::process::exit(1);
-                }
             }
         }
+        let snapshot_content = last_content.borrow();
         if snapshot_enabled
-            && (last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
+            && (terminal_changed
+                || last_snapshot.borrow().elapsed() >= std::time::Duration::from_secs(1)
                 || selection_changed
                 || force)
-            && let Some(content) = last_content.borrow().clone()
+            && let Some(content) = snapshot_content.as_ref()
         {
             *last_snapshot.borrow_mut() = std::time::Instant::now();
             crate::logging::debug_log(&format!("snapshot selection {:?}", selection.get()));
             let expected_selection_text = selection_text.borrow().clone();
             let visible_selection = visible_or_reanchored_selection(
-                &content,
+                content,
                 &selection,
                 expected_selection_text.as_deref(),
             );
@@ -1792,9 +1825,9 @@ fn build_ui(app: &Application) {
                 && let Some(visible_selection) = visible_selection
             {
                 *selection_text.borrow_mut() =
-                    text_for_viewport_selection(&content, visible_selection);
+                    text_for_viewport_selection(content, visible_selection);
             }
-            let rendered = Renderer::render_frame_with_selection(&content, visible_selection);
+            let rendered = Renderer::render_frame_with_selection(content, visible_selection);
             let mut rendered = rendered;
             apply_preedit_to_render_frame(&mut rendered, preedit.borrow().as_ref());
             if render_snapshot_enabled {
@@ -2462,7 +2495,7 @@ impl UiE2eScenario {
             .ok()
             .and_then(|value| value.parse().ok())
             .map(std::time::Duration::from_millis)
-            .unwrap_or_else(|| std::time::Duration::from_secs(4));
+            .unwrap_or_else(|| std::time::Duration::from_secs(8));
         Some(Self {
             input,
             expected,
@@ -2511,12 +2544,16 @@ struct PasteClipboardContext {
 }
 
 fn paste_clipboard_text(widget: &gtk::DrawingArea, context: PasteClipboardContext) {
+    let target_pane = context.workspace.borrow().active_pane_id();
     widget
         .clipboard()
         .read_text_async(None::<&gtk::gio::Cancellable>, move |result| {
             let Ok(Some(text)) = result else {
                 return;
             };
+            if context.workspace.borrow().active_pane_id() != target_pane {
+                return;
+            }
             mark_pending_input_latency(&context.pending_input_latency);
             let shell_bridge_active = context
                 .content
@@ -2542,14 +2579,15 @@ fn terminal_paste_bytes(bracketed_paste: bool, text: &[u8]) -> Vec<u8> {
     const START: &[u8] = b"\x1b[200~";
     const END: &[u8] = b"\x1b[201~";
 
-    if bracketed_paste && !text.windows(END.len()).any(|window| window == END) {
+    let sanitized = text.iter().copied().filter(|byte| *byte != b'\x1b');
+    if bracketed_paste {
         let mut bytes = Vec::with_capacity(START.len() + text.len() + END.len());
         bytes.extend_from_slice(START);
-        bytes.extend_from_slice(text);
+        bytes.extend(sanitized);
         bytes.extend_from_slice(END);
         bytes
     } else {
-        text.to_vec()
+        sanitized.collect()
     }
 }
 
@@ -3057,8 +3095,11 @@ fn write_preferences_geometry_trace(window: &adw::Window, path: &str) {
         ("card", "chelotype-scrolling-instant-card"),
         ("terminal", "chelotype-scrolling-instant-preview"),
         ("label", "chelotype-scrolling-instant-label"),
+        ("cursor_animation", "chelotype-cursor-animation-group"),
         ("animation_speed", "chelotype-animation-speed-row"),
         ("advanced", "chelotype-advanced-animation-settings"),
+        ("cursor_corners", "chelotype-cursor-corners-group"),
+        ("cursor_blink", "chelotype-cursor-blink-group"),
         ("cursor_blinking", "chelotype-cursor-blinking-row"),
     ] {
         let Some(widget) = find_named_widget(root, widget_name) else {
@@ -3098,9 +3139,10 @@ fn find_named_widget(root: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
 
 fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder().title("General").build();
-    let group = adw::PreferencesGroup::builder()
+    let animation_group = adw::PreferencesGroup::builder()
         .title("Cursor animation")
         .build();
+    animation_group.set_widget_name("chelotype-cursor-animation-group");
     let cursor_shape_grid = gtk::Grid::builder()
         .column_spacing(10)
         .margin_top(8)
@@ -3113,6 +3155,11 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         .margin_bottom(8)
         .build();
     let animation_settings_group = AnimationSettingsGroup::new();
+    let blink_animation_grid = gtk::Grid::builder()
+        .column_spacing(10)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
     populate_cursor_shape_grid(
         &cursor_shape_grid,
         canvas.clone(),
@@ -3126,7 +3173,7 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
     shape_group.add(&cursor_shape_grid);
     page.add(&shape_group);
 
-    group.add(&cursor_animation_grid);
+    animation_group.add(&cursor_animation_grid);
     populate_cursor_animation_grid(
         &cursor_animation_grid,
         crate::config::cursor_shape(),
@@ -3139,7 +3186,65 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         crate::config::cursor_shape(),
         canvas.clone(),
     );
-    let cursor_options = gtk::Box::builder()
+    animation_group.add(&animation_settings_group.container);
+    page.add(&animation_group);
+
+    let corner_grid = gtk::Grid::builder()
+        .column_spacing(10)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
+    populate_cursor_corner_grid(&corner_grid, canvas.clone());
+    let corner_group = adw::PreferencesGroup::builder()
+        .title("Cursor corners")
+        .build();
+    corner_group.set_widget_name("chelotype-cursor-corners-group");
+    corner_group.add(&corner_grid);
+    corner_group.add(&animation_slider_row_with_update(
+        AnimationSliderSpec {
+            title: "Cursor width",
+            key: "cursor_width_ratio",
+            value: crate::config::cursor_width_ratio(),
+            min: 0.05,
+            max: 1.0,
+            step: 0.005,
+            digits: 3,
+            unit: "",
+            default: crate::config::DEFAULT_CURSOR_WIDTH_RATIO,
+        },
+        canvas.clone(),
+        {
+            let cursor_shape_grid = cursor_shape_grid.clone();
+            let cursor_animation_grid = cursor_animation_grid.clone();
+            let animation_settings_group = animation_settings_group.clone();
+            let corner_grid = corner_grid.clone();
+            let blink_animation_grid = blink_animation_grid.clone();
+            let canvas = canvas.clone();
+            move || {
+                populate_cursor_shape_grid(
+                    &cursor_shape_grid,
+                    canvas.clone(),
+                    cursor_animation_grid.clone(),
+                    animation_settings_group.clone(),
+                );
+                populate_cursor_animation_grid(
+                    &cursor_animation_grid,
+                    crate::config::cursor_shape(),
+                    canvas.clone(),
+                    animation_settings_group.clone(),
+                );
+                populate_cursor_corner_grid(&corner_grid, canvas.clone());
+                populate_cursor_blink_animation_grid(&blink_animation_grid, canvas.clone());
+            }
+        },
+    ));
+    page.add(&corner_group);
+
+    let blink_group = adw::PreferencesGroup::builder()
+        .title("Cursor blinking")
+        .build();
+    blink_group.set_widget_name("chelotype-cursor-blink-group");
+    let blink_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
@@ -3147,11 +3252,37 @@ fn cursor_preferences_page(canvas: &TerminalCanvas) -> adw::PreferencesPage {
         .selection_mode(gtk::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
-    cursor_blinking_list.append(&cursor_blinking_row(canvas.clone()));
-    cursor_options.append(&animation_settings_group.container);
-    cursor_options.append(&cursor_blinking_list);
-    group.add(&cursor_options);
-    page.add(&group);
+    let blink_interval_container = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .build();
+    let blink_controls_visible = cursor_blink_controls_visible(crate::config::cursor_blinking());
+    blink_animation_grid.set_visible(blink_controls_visible);
+    blink_interval_container.set_visible(blink_controls_visible);
+    blink_interval_container.append(&animation_slider_row(
+        AnimationSliderSpec {
+            title: "Blink interval",
+            key: "cursor_blink_interval_ms",
+            value: f64::from(crate::config::cursor_blink_interval_ms()),
+            min: 150.0,
+            max: 1500.0,
+            step: 10.0,
+            digits: 0,
+            unit: "ms",
+            default: f64::from(crate::config::DEFAULT_CURSOR_BLINK_INTERVAL_MS),
+        },
+        canvas.clone(),
+    ));
+    cursor_blinking_list.append(&cursor_blinking_row(
+        canvas.clone(),
+        blink_animation_grid.clone(),
+        blink_interval_container.clone(),
+    ));
+    populate_cursor_blink_animation_grid(&blink_animation_grid, canvas.clone());
+    blink_box.append(&cursor_blinking_list);
+    blink_box.append(&blink_animation_grid);
+    blink_box.append(&blink_interval_container);
+    blink_group.add(&blink_box);
+    page.add(&blink_group);
     page
 }
 
@@ -3250,34 +3381,24 @@ fn palette_preferences_group(
         .margin_bottom(8)
         .build();
     let sort_all_palettes = std::rc::Rc::new(std::cell::Cell::new(false));
-    for palette in crate::terminal_palette::terminal_palette_display_order(true) {
-        let card = palette_preview_card(
-            palette,
-            selected_palette.clone(),
-            previews.clone(),
-            canvas.clone(),
-            force_snapshot.clone(),
-            pending_style_refresh.clone(),
-        );
-        let flow_child = gtk::FlowBoxChild::builder()
-            .child(&card)
-            .visible(palette.primary)
-            .css_classes(["palette-flow-child"])
-            .build();
-        flow.append(&flow_child);
-        cards.borrow_mut().push(PaletteCard {
-            child: flow_child,
-            palette,
-        });
+    let card_factory = PaletteCardFactory {
+        selected_palette,
+        previews,
+        canvas,
+        force_snapshot,
+        pending_style_refresh,
+    };
+    for palette in crate::terminal_palette::terminal_palette_display_order(false) {
+        card_factory.append(&flow, &cards, palette);
     }
     {
         let sort_all_palettes = sort_all_palettes.clone();
         let cards = cards.clone();
         flow.set_sort_func(move |first, second| {
             let cards = cards.borrow();
-            let first_palette = palette_for_flow_child(&cards, first);
-            let second_palette = palette_for_flow_child(&cards, second);
-            palette_card_order(first_palette, second_palette, sort_all_palettes.get())
+            let first_card = palette_card_for_flow_child(&cards, first);
+            let second_card = palette_card_for_flow_child(&cards, second);
+            palette_card_order(first_card, second_card, sort_all_palettes.get())
         });
     }
     flow.invalidate_sort();
@@ -3288,11 +3409,20 @@ fn palette_preferences_group(
         let sort_all_palettes = sort_all_palettes.clone();
         let search = search.clone();
         let title = title.clone();
+        let card_factory = card_factory.clone();
         toggle.connect_clicked(move |button| {
             let expanded = !show_all.get();
             show_all.set(expanded);
             set_palette_visibility_toggle(button, expanded);
             sort_all_palettes.set(expanded);
+            if expanded && cards.borrow().len() < crate::terminal_palette::PALETTES.len() {
+                for palette in crate::terminal_palette::terminal_palette_display_order(true)
+                    .into_iter()
+                    .filter(|palette| !palette.primary)
+                {
+                    card_factory.append(&flow, &cards, palette);
+                }
+            }
             flow.invalidate_sort();
             title.set_visible(!expanded);
             search.set_visible(expanded);
@@ -3370,27 +3500,70 @@ fn terminal_spacing_row(
 struct PaletteCard {
     child: gtk::FlowBoxChild,
     palette: &'static crate::terminal_palette::TerminalPalette,
+    primary_index: usize,
+    search_name: String,
 }
 
-fn palette_for_flow_child(
-    cards: &[PaletteCard],
+#[derive(Clone)]
+struct PaletteCardFactory {
+    selected_palette: std::rc::Rc<std::cell::RefCell<String>>,
+    previews: std::rc::Rc<std::cell::RefCell<Vec<gtk::DrawingArea>>>,
+    canvas: TerminalCanvas,
+    force_snapshot: std::rc::Rc<std::cell::Cell<bool>>,
+    pending_style_refresh: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl PaletteCardFactory {
+    fn append(
+        &self,
+        flow: &gtk::FlowBox,
+        cards: &std::rc::Rc<std::cell::RefCell<Vec<PaletteCard>>>,
+        palette: &'static crate::terminal_palette::TerminalPalette,
+    ) {
+        let card = palette_preview_card(
+            palette,
+            self.selected_palette.clone(),
+            self.previews.clone(),
+            self.canvas.clone(),
+            self.force_snapshot.clone(),
+            self.pending_style_refresh.clone(),
+        );
+        let child = gtk::FlowBoxChild::builder()
+            .child(&card)
+            .visible(palette.primary)
+            .css_classes(["palette-flow-child"])
+            .build();
+        let primary_index = crate::terminal_palette::PRIMARY_TERMINAL_PALETTE_IDS
+            .iter()
+            .position(|id| *id == palette.id)
+            .unwrap_or(usize::MAX);
+        cards.borrow_mut().push(PaletteCard {
+            child: child.clone(),
+            palette,
+            primary_index,
+            search_name: palette.name.to_lowercase(),
+        });
+        flow.append(&child);
+    }
+}
+
+fn palette_card_for_flow_child<'a>(
+    cards: &'a [PaletteCard],
     child: &gtk::FlowBoxChild,
-) -> &'static crate::terminal_palette::TerminalPalette {
+) -> &'a PaletteCard {
     cards
         .iter()
         .find(|card| card.child == *child)
-        .map(|card| card.palette)
         .expect("palette card")
 }
 
-fn palette_card_order(
-    first: &crate::terminal_palette::TerminalPalette,
-    second: &crate::terminal_palette::TerminalPalette,
-    show_all: bool,
-) -> gtk::Ordering {
-    let first_index = crate::terminal_palette::terminal_palette_display_index(first.id, show_all);
-    let second_index = crate::terminal_palette::terminal_palette_display_index(second.id, show_all);
-    match first_index.cmp(&second_index) {
+fn palette_card_order(first: &PaletteCard, second: &PaletteCard, show_all: bool) -> gtk::Ordering {
+    let order = if show_all {
+        first.search_name.cmp(&second.search_name)
+    } else {
+        first.primary_index.cmp(&second.primary_index)
+    };
+    match order {
         std::cmp::Ordering::Less => gtk::Ordering::Smaller,
         std::cmp::Ordering::Equal => gtk::Ordering::Equal,
         std::cmp::Ordering::Greater => gtk::Ordering::Larger,
@@ -3400,7 +3573,7 @@ fn palette_card_order(
 fn update_palette_card_visibility(cards: &[PaletteCard], show_all: bool, query: &str) {
     let query = query.trim().to_lowercase();
     for card in cards {
-        let matches_query = query.is_empty() || card.palette.name.to_lowercase().contains(&query);
+        let matches_query = query.is_empty() || card.search_name.contains(&query);
         card.child
             .set_visible((show_all || card.palette.primary) && matches_query);
     }
@@ -3722,7 +3895,11 @@ fn show_custom_font_dialog(
     dialog.present();
 }
 
-fn cursor_blinking_row(canvas: TerminalCanvas) -> adw::ComboRow {
+fn cursor_blinking_row(
+    canvas: TerminalCanvas,
+    blink_animation_grid: gtk::Grid,
+    blink_interval_container: gtk::Box,
+) -> adw::ComboRow {
     let labels = crate::config::CursorBlinking::ALL.map(crate::config::CursorBlinking::label);
     let model = gtk::StringList::new(&labels);
     let row = adw::ComboRow::builder()
@@ -3734,9 +3911,16 @@ fn cursor_blinking_row(canvas: TerminalCanvas) -> adw::ComboRow {
     row.connect_selected_notify(move |row| {
         let mode = crate::config::CursorBlinking::from_selected_index(row.selected());
         crate::config::write_value("cursor_blinking", mode.config_value());
+        let controls_visible = cursor_blink_controls_visible(mode);
+        blink_animation_grid.set_visible(controls_visible);
+        blink_interval_container.set_visible(controls_visible);
         canvas.refresh_cursor_options();
     });
     row
+}
+
+fn cursor_blink_controls_visible(mode: crate::config::CursorBlinking) -> bool {
+    mode != crate::config::CursorBlinking::Disabled
 }
 
 fn set_pointer_cursor(widget: &impl IsA<gtk::Widget>) {
@@ -3789,6 +3973,37 @@ fn populate_cursor_shape_grid(
     }
 }
 
+fn populate_cursor_corner_grid(grid: &gtk::Grid, canvas: TerminalCanvas) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+    let mut first_button = None::<gtk::ToggleButton>;
+    for (index, corners) in crate::config::CursorCornerStyle::ALL
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let button = cursor_corner_tile(corners);
+        if let Some(first_button) = &first_button {
+            button.set_group(Some(first_button));
+        } else {
+            first_button = Some(button.clone());
+        }
+        button.set_active(corners == crate::config::cursor_corner_style());
+        {
+            let canvas = canvas.clone();
+            button.connect_toggled(move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                crate::config::write_value("cursor_corner_style", corners.config_value());
+                canvas.refresh_cursor_options();
+            });
+        }
+        grid.attach(&button, index as i32, 0, 1, 1);
+    }
+}
+
 fn populate_cursor_animation_grid(
     grid: &gtk::Grid,
     shape: crate::config::CursorShape,
@@ -3831,17 +4046,137 @@ fn populate_cursor_animation_grid(
     }
 }
 
+fn populate_cursor_blink_animation_grid(grid: &gtk::Grid, canvas: TerminalCanvas) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+    let mut first_button = None::<gtk::ToggleButton>;
+    for (index, animation) in crate::config::CursorBlinkAnimation::ALL
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let button = cursor_blink_animation_tile(animation);
+        if let Some(first_button) = &first_button {
+            button.set_group(Some(first_button));
+        } else {
+            first_button = Some(button.clone());
+        }
+        button.set_active(animation == crate::config::cursor_blink_animation());
+        {
+            let canvas = canvas.clone();
+            button.connect_toggled(move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                crate::config::write_value("cursor_blink_animation", animation.config_value());
+                canvas.refresh_cursor_options();
+            });
+        }
+        grid.attach(&button, index as i32, 0, 1, 1);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CursorPreviewSettings {
+    options: CursorOptionsOverride,
+    blink_animation: Option<crate::config::CursorBlinkAnimation>,
+    blinking_enabled: Option<bool>,
+}
+
+impl CursorPreviewSettings {
+    fn from_config_with_overrides() -> Self {
+        Self {
+            options: CursorOptionsOverride::default(),
+            blink_animation: None,
+            blinking_enabled: None,
+        }
+    }
+
+    fn with_style(mut self, style: crate::config::CursorStyle) -> Self {
+        self.options.style = Some(style);
+        self
+    }
+
+    fn with_shape(mut self, shape: crate::config::CursorShape) -> Self {
+        self.options.shape = Some(shape);
+        self
+    }
+
+    fn with_corners(mut self, corners: crate::config::CursorCornerStyle) -> Self {
+        self.options.corners = Some(corners);
+        self
+    }
+
+    fn with_blink_animation(
+        mut self,
+        blink_animation: crate::config::CursorBlinkAnimation,
+    ) -> Self {
+        self.blink_animation = Some(blink_animation);
+        self.blinking_enabled = Some(true);
+        self
+    }
+
+    fn card_corners(self) -> crate::config::CursorCornerStyle {
+        self.options
+            .corners
+            .unwrap_or_else(crate::config::cursor_corner_style)
+    }
+}
+
 fn cursor_shape_tile(shape: crate::config::CursorShape) -> gtk::ToggleButton {
-    preference_preview_tile(shape.label(), &cursor_shape_preview(shape))
+    let settings = CursorPreviewSettings::from_config_with_overrides().with_shape(shape);
+    preference_cursor_preview_tile(
+        shape.label(),
+        settings.card_corners(),
+        &cursor_shape_preview(settings),
+    )
+}
+
+fn cursor_corner_tile(corners: crate::config::CursorCornerStyle) -> gtk::ToggleButton {
+    let settings = CursorPreviewSettings::from_config_with_overrides().with_corners(corners);
+    preference_cursor_preview_tile(
+        corners.label(),
+        settings.card_corners(),
+        &cursor_corner_preview(settings),
+    )
+}
+
+fn cursor_blink_animation_tile(
+    animation: crate::config::CursorBlinkAnimation,
+) -> gtk::ToggleButton {
+    let settings =
+        CursorPreviewSettings::from_config_with_overrides().with_blink_animation(animation);
+    preference_cursor_preview_tile(
+        animation.label(),
+        settings.card_corners(),
+        &cursor_blink_animation_preview(settings),
+    )
 }
 
 fn preference_preview_tile(label: &str, preview: &impl IsA<gtk::Widget>) -> gtk::ToggleButton {
+    preference_cursor_preview_tile(label, crate::config::CursorCornerStyle::Rounded, preview)
+}
+
+fn preference_cursor_preview_tile(
+    label: &str,
+    corners: crate::config::CursorCornerStyle,
+    preview: &impl IsA<gtk::Widget>,
+) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::builder()
         .css_classes(["preview-card-button"])
         .hexpand(true)
         .halign(gtk::Align::Fill)
         .vexpand(false)
         .build();
+    match corners {
+        crate::config::CursorCornerStyle::Square => {
+            button.add_css_class("cursor-corners-square");
+        }
+        crate::config::CursorCornerStyle::Rounded => {
+            button.add_css_class("cursor-corners-rounded");
+        }
+    }
     set_pointer_cursor(&button);
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -3870,14 +4205,14 @@ fn cursor_animation_tile(
     shape: crate::config::CursorShape,
     style: crate::config::CursorStyle,
 ) -> gtk::ToggleButton {
-    preference_preview_tile(style.label(), &cursor_animation_preview(shape, style))
+    let settings = CursorPreviewSettings::from_config_with_overrides()
+        .with_shape(shape)
+        .with_style(style);
+    preference_preview_tile(style.label(), &cursor_animation_preview(settings))
 }
 
-fn cursor_animation_preview(
-    shape: crate::config::CursorShape,
-    style: crate::config::CursorStyle,
-) -> gtk::DrawingArea {
-    let preview = terminal_preview_canvas(290, 169, style, shape, 6.5);
+fn cursor_animation_preview(settings: CursorPreviewSettings) -> gtk::DrawingArea {
+    let preview = terminal_preview_canvas(290, 169, settings, 6.5);
     preview.set_render(preview_render_frame(
         ANIMATION_PREVIEW_LINES,
         animation_preview_target(0),
@@ -3924,8 +4259,7 @@ const ANIMATION_PREVIEW_TARGETS: [PreviewCursorTarget; 5] = [
 fn terminal_preview_canvas(
     width: i32,
     height: i32,
-    style: crate::config::CursorStyle,
-    shape: crate::config::CursorShape,
+    settings: CursorPreviewSettings,
     font_size_pt: f64,
 ) -> TerminalCanvas {
     let preview = TerminalCanvas::new();
@@ -3938,7 +4272,9 @@ fn terminal_preview_canvas(
     preview.widget().set_cursor_from_name(None);
     preview.widget().set_overflow(gtk::Overflow::Hidden);
     preview.add_preview_corners();
-    preview.set_cursor_options_override(Some((style, shape)));
+    preview.set_cursor_options_override(Some(settings.options));
+    preview.set_cursor_blink_animation_override(settings.blink_animation);
+    preview.set_cursor_blinking_enabled_override(settings.blinking_enabled);
     preview.set_font_size_override(Some(font_size_pt));
     preview
 }
@@ -3971,7 +4307,10 @@ fn animation_preview_target(elapsed_us: u64) -> PreviewCursorTarget {
 
 fn preview_render_frame(lines: &[&str], cursor: PreviewCursorTarget) -> RenderFrame {
     let content = RenderableContentOwned {
-        lines: lines.iter().map(|line| preview_cells(line)).collect(),
+        lines: lines
+            .iter()
+            .map(|line| preview_cells(line).into())
+            .collect(),
         line_metadata: vec![crate::terminal_grid::TerminalLineMetadata::default(); lines.len()],
         cursor_line: cursor.line,
         cursor_col: cursor.column,
@@ -4507,13 +4846,28 @@ const PREVIEW_SCROLL_LINES: &[PreviewScrollLine] = &[
     PreviewScrollLine::Output("ready"),
 ];
 
-fn cursor_shape_preview(shape: crate::config::CursorShape) -> gtk::DrawingArea {
-    let preview = terminal_preview_canvas(290, 46, crate::config::CursorStyle::Steady, shape, 10.0);
+fn cursor_shape_preview(settings: CursorPreviewSettings) -> gtk::DrawingArea {
+    cursor_single_line_preview("let cursor = shape", settings)
+}
+
+fn cursor_corner_preview(settings: CursorPreviewSettings) -> gtk::DrawingArea {
+    cursor_single_line_preview("let cursor = corners", settings)
+}
+
+fn cursor_blink_animation_preview(settings: CursorPreviewSettings) -> gtk::DrawingArea {
+    cursor_single_line_preview("let cursor = blink", settings)
+}
+
+fn cursor_single_line_preview(
+    line: &'static str,
+    settings: CursorPreviewSettings,
+) -> gtk::DrawingArea {
+    let preview = terminal_preview_canvas(290, 46, settings, 10.0);
     preview.set_render(preview_render_frame(
-        &["let cursor = shape"],
+        &[line],
         PreviewCursorTarget {
             line: 0,
-            column: 11,
+            column: display_columns(line) as i32,
         },
     ));
     add_terminal_preview_tick(preview.clone(), None);
@@ -4681,6 +5035,14 @@ struct AnimationSliderSpec {
 }
 
 fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gtk::Box {
+    animation_slider_row_with_update(spec, canvas, || {})
+}
+
+fn animation_slider_row_with_update(
+    spec: AnimationSliderSpec,
+    canvas: TerminalCanvas,
+    update: impl Fn() + Clone + 'static,
+) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(5)
@@ -4741,6 +5103,7 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
     {
         let reset = reset.clone();
         let value_label = value_label.clone();
+        let update = update.clone();
         scale.connect_value_changed(move |scale| {
             let value = scale.value();
             let formatted = if spec.digits == 0 {
@@ -4752,6 +5115,7 @@ fn animation_slider_row(spec: AnimationSliderSpec, canvas: TerminalCanvas) -> gt
             set_slider_value_label(&value_label, value, spec.digits, spec.unit);
             reset.set_visible(!slider_value_is_default(value, spec.default, spec.step));
             canvas.widget().queue_draw();
+            update();
         });
     }
     header.append(&label);
@@ -5033,11 +5397,13 @@ fn write_key_with_selection(
         *content.borrow_mut() = Some(fresh_content);
     }
     let Some(selection_range) = selection.get() else {
+        keyboard_selection.set(None);
         let content = content.borrow();
         let _ = write_active_input_edit(workspace, content.as_ref(), &data);
         return;
     };
-    let Some(content) = content.borrow().clone() else {
+    let borrowed_content = content.borrow();
+    let Some(content) = borrowed_content.as_ref() else {
         clear_selection(
             selection,
             selection_text,
@@ -5050,7 +5416,7 @@ fn write_key_with_selection(
     selection.set(Some(selection_range));
     let expected_selection_text = selection_text.borrow().clone();
     let Some(viewport_selection) =
-        visible_or_reanchored_selection(&content, selection, expected_selection_text.as_deref())
+        visible_or_reanchored_selection(content, selection, expected_selection_text.as_deref())
     else {
         clear_selection(
             selection,
@@ -5058,20 +5424,34 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, Some(&content), &data);
+        let _ = write_active_input_edit(workspace, Some(content), &data);
         return;
     };
-    let Some(selected) = text_for_viewport_selection(&content, viewport_selection) else {
+    let selection_inside_active_input = selection_within_active_input(content, viewport_selection);
+    if selection_inside_active_input
+        && let Some(replacement) = input_selection_replacement_text(&data)
+        && let Ok(true) =
+            write_active_input_replace_range(workspace, content, viewport_selection, replacement)
+    {
         clear_selection(
             selection,
             selection_text,
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, Some(&content), &data);
+        return;
+    }
+    let Some(selected) = text_for_viewport_selection(content, viewport_selection) else {
+        clear_selection(
+            selection,
+            selection_text,
+            selection_dirty,
+            keyboard_selection,
+        );
+        let _ = write_active_input_edit(workspace, Some(content), &data);
         return;
     };
-    if !selection_within_active_input(&content, viewport_selection) {
+    if !selection_inside_active_input {
         clear_selection(
             selection,
             selection_text,
@@ -5079,7 +5459,7 @@ fn write_key_with_selection(
             keyboard_selection,
         );
         if data.as_slice() != [0x7f] && data.as_slice() != b"\x1b[3~" {
-            let _ = write_active_input_edit(workspace, Some(&content), &data);
+            let _ = write_active_input_edit(workspace, Some(content), &data);
         }
         return;
     }
@@ -5091,7 +5471,7 @@ fn write_key_with_selection(
         row: viewport_selection.start.row + content.display_offset,
         column: viewport_selection.start.column,
     };
-    let movement = if let Ok(true) = write_active_input_cursor_target(workspace, &content, target) {
+    let movement = if let Ok(true) = write_active_input_cursor_target(workspace, content, target) {
         Vec::new()
     } else if let Some(bytes) = keyboard_selection
         .get()
@@ -5102,7 +5482,7 @@ fn write_key_with_selection(
         && content.cursor_col == i32::from(target.column)
     {
         Vec::new()
-    } else if let Some(bytes) = cursor_movement_bytes_for_content(&content, target) {
+    } else if let Some(bytes) = cursor_movement_bytes_for_content(content, target) {
         bytes
     } else {
         clear_selection(
@@ -5111,7 +5491,7 @@ fn write_key_with_selection(
             selection_dirty,
             keyboard_selection,
         );
-        let _ = write_active_input_edit(workspace, Some(&content), &data);
+        let _ = write_active_input_edit(workspace, Some(content), &data);
         return;
     };
 
@@ -5128,7 +5508,48 @@ fn write_key_with_selection(
         selection_dirty,
         keyboard_selection,
     );
-    let _ = write_active_input_edit(workspace, Some(&content), &replacement);
+    let _ = write_active_input_edit(workspace, Some(content), &replacement);
+}
+
+fn input_selection_replacement_text(data: &[u8]) -> Option<&str> {
+    if matches!(data, [0x7f]) || data == b"\x1b[3~" {
+        return Some("");
+    }
+    let (replacement, paste) = if let Some(payload) = bracketed_paste_payload(data) {
+        (payload, true)
+    } else {
+        (data, false)
+    };
+    if replacement.iter().all(|byte| {
+        (*byte >= 0x20 && *byte != 0x7f) || (paste && matches!(*byte, b'\n' | b'\r' | b'\t'))
+    }) {
+        std::str::from_utf8(replacement).ok()
+    } else {
+        None
+    }
+}
+
+fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
+    const START: &[u8] = b"\x1b[200~";
+    const END: &[u8] = b"\x1b[201~";
+    data.strip_prefix(START)?.strip_suffix(END)
+}
+
+fn write_active_input_replace_range(
+    workspace: &std::rc::Rc<std::cell::RefCell<TerminalWorkspace>>,
+    content: &RenderableContentOwned,
+    selection: SelectionRange,
+    replacement: &str,
+) -> std::io::Result<bool> {
+    if !shell_input_bridge_active(content) {
+        return Ok(false);
+    }
+    let Some(range) = input_buffer_range_for_selection(content, selection) else {
+        return Ok(false);
+    };
+    workspace
+        .borrow_mut()
+        .write_active_input_replace_range(range, replacement)
 }
 
 fn write_active_input_edit(
@@ -5156,7 +5577,7 @@ fn write_active_input_cursor_target(
     if !shell_input_bridge_active(content) {
         return Ok(false);
     }
-    let Some(offset) = input_buffer_offset_for_position(content, target) else {
+    let Some(offset) = input_cursor_offset_for_position(content, target) else {
         return Ok(false);
     };
     workspace
@@ -5250,7 +5671,7 @@ fn move_cursor_from_keyboard(
     let current_override = if cursor_move.selecting {
         directed_focus.or(terminal_cursor)
     } else {
-        None
+        directed_focus
     };
     if !cursor_move.selecting
         && let Some(target) = keyboard_selection_collapse_target(
@@ -5302,7 +5723,7 @@ fn move_cursor_from_keyboard(
             selection_dirty,
             keyboard_selection,
         );
-    } else if selection.get().is_some() {
+    } else if selection.get().is_some() || keyboard_selection.get().is_some() {
         clear_selection(
             selection,
             selection_text,
@@ -5310,7 +5731,9 @@ fn move_cursor_from_keyboard(
             keyboard_selection,
         );
     }
-    if let Ok(true) = write_active_input_cursor_target(workspace, &content, target) {
+    if (directed_focus.is_some() || !cursor_target_matches_content_cursor(&content, target))
+        && let Ok(true) = write_active_input_cursor_target(workspace, &content, target)
+    {
         return;
     }
     if let Some(bytes) = keyboard_cursor_bytes(&content, current_override, target) {
@@ -5323,6 +5746,13 @@ fn move_cursor_from_keyboard(
                 cursor_move.unit,
             ));
     }
+}
+
+fn cursor_target_matches_content_cursor(
+    content: &RenderableContentOwned,
+    target: MouseGridPosition,
+) -> bool {
+    content.cursor_line == i32::from(target.row) && content.cursor_col == i32::from(target.column)
 }
 
 fn select_keyboard_cursor_range(
@@ -5345,7 +5775,7 @@ fn select_keyboard_cursor_range(
         *selection_text.borrow_mut() =
             visible.and_then(|range| text_for_viewport_selection(content, range));
     } else {
-        keyboard_selection.set(None);
+        keyboard_selection.set(Some(directed));
         selection.set(None);
         *selection_text.borrow_mut() = None;
     }
@@ -5502,6 +5932,18 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
             min-height: 0;
             padding: 0;
         }
+        button.preview-card-button.cursor-corners-square {
+            border-radius: 0;
+        }
+        button.preview-card-button.cursor-corners-square > * {
+            border-radius: 0;
+        }
+        button.preview-card-button.cursor-corners-rounded {
+            border-radius: 0.5rem;
+        }
+        button.preview-card-button.cursor-corners-rounded > * {
+            border-radius: 0.5rem;
+        }
         flowboxchild.palette-flow-child {
             padding: 0;
             margin: 0;
@@ -5513,11 +5955,13 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
 
 fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: TerminalMetrics) {
     let content = format!(
-        "canvas_x={}\ncanvas_y={}\ncanvas_width={}\ncanvas_height={}\ncell_width={:.6}\nline_height={:.6}\ncols={}\nrows={}",
+        "canvas_x={}\ncanvas_y={}\ncanvas_width={}\ncanvas_height={}\ncell_offset_x={:.6}\ncell_offset_y={:.6}\ncell_width={:.6}\nline_height={:.6}\ncols={}\nrows={}",
         widget.allocation().x(),
         widget.allocation().y(),
         widget.allocated_width(),
         widget.allocated_height(),
+        metrics.cell.offset_x,
+        metrics.cell.offset_y,
         metrics.cell.width,
         metrics.cell.height,
         metrics.size.cols,
@@ -5933,7 +6377,7 @@ fn apply_interaction_effects(
                     continue;
                 }
                 if let Some(content) = content.borrow().as_ref()
-                    && let Some(bytes) = cursor_movement_bytes_for_content(content, position)
+                    && let Some(bytes) = cursor_movement_bytes_for_editable_input(content, position)
                 {
                     let _ = workspace.borrow_mut().write_active(&bytes);
                 }
@@ -6197,7 +6641,7 @@ fn split_resize_boundary_at(
     if panes.len() < 2 || x < 0.0 || metrics.width <= 0.0 {
         return None;
     }
-    let threshold = (metrics.width * 0.6).max(8.0);
+    let threshold = (metrics.width * 0.5).clamp(4.0, 6.0);
     panes.windows(2).enumerate().find_map(|(index, pair)| {
         let [left, right] = pair else {
             return None;
@@ -6542,13 +6986,17 @@ mod tests {
     }
 
     #[test]
-    fn paste_bytes_leave_end_marker_unwrapped() {
-        assert_eq!(terminal_paste_bytes(true, b"a\x1b[201~b"), b"a\x1b[201~b");
+    fn paste_bytes_neutralize_embedded_control_sequences() {
+        assert_eq!(
+            terminal_paste_bytes(true, b"a\x1b[201~b"),
+            b"\x1b[200~a[201~b\x1b[201~"
+        );
     }
 
     #[test]
     fn paste_bytes_are_plain_without_bracketed_paste_mode() {
         assert_eq!(terminal_paste_bytes(false, b"hello"), b"hello");
+        assert_eq!(terminal_paste_bytes(false, b"a\x1b[31mb"), b"a[31mb");
     }
 
     #[test]
@@ -6558,9 +7006,9 @@ mod tests {
         };
         let content = TerminalContent {
             lines: vec![
-                vec![crate::terminal_grid::TerminalCell::blank(); 4],
-                vec![crate::terminal_grid::TerminalCell::blank(); 4],
-                vec![crate::terminal_grid::TerminalCell::blank(); 4],
+                vec![crate::terminal_grid::TerminalCell::blank(); 4].into(),
+                vec![crate::terminal_grid::TerminalCell::blank(); 4].into(),
+                vec![crate::terminal_grid::TerminalCell::blank(); 4].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -6600,6 +7048,56 @@ mod tests {
                 .expect("wrapped forward input drag follow step");
         assert_eq!(bytes, right_arrows(2));
         assert_eq!(state.cursor, Some(MouseGridPosition { row: 2, column: 1 }));
+    }
+
+    #[test]
+    fn input_selection_cursor_step_supports_multiline_semantic_input_edges() {
+        let content =
+            semantic_multiline_input_with_cursor(&["❯ import {", "  Foo,", "  Bar", "}"], 3, 1);
+        let initial = InputSelectionDrag {
+            anchor: MouseGridPosition { row: 0, column: 2 },
+            cursor: None,
+        };
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, initial, MouseGridPosition { row: 1, column: 4 })
+                .expect("semantic forward input drag step");
+        assert_eq!(bytes, left_arrows(7));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 1, column: 5 }));
+
+        let (state, bytes) =
+            input_selection_cursor_step(&content, state, MouseGridPosition { row: 2, column: 2 })
+                .expect("semantic forward input drag follow step");
+        assert_eq!(bytes, right_arrows(4));
+        assert_eq!(state.cursor, Some(MouseGridPosition { row: 2, column: 3 }));
+    }
+
+    #[test]
+    fn keyboard_cursor_move_can_fall_back_when_target_matches_cursor() {
+        let content = semantic_multiline_input_with_cursor(&["❯ git status"], 0, 5);
+
+        assert!(cursor_target_matches_content_cursor(
+            &content,
+            MouseGridPosition { row: 0, column: 5 }
+        ));
+        assert!(!cursor_target_matches_content_cursor(
+            &content,
+            MouseGridPosition { row: 0, column: 6 }
+        ));
+    }
+
+    #[test]
+    fn input_selection_replacement_text_maps_delete_and_paste_payloads() {
+        assert_eq!(input_selection_replacement_text(&[0x7f]), Some(""));
+        assert_eq!(input_selection_replacement_text(b"\x1b[3~"), Some(""));
+        assert_eq!(
+            input_selection_replacement_text(b"\x1b[200~hello\nworld\x1b[201~"),
+            Some("hello\nworld")
+        );
+        assert_eq!(input_selection_replacement_text(b"typed"), Some("typed"));
+        assert_eq!(input_selection_replacement_text(b"\r"), None);
+        assert_eq!(input_selection_replacement_text(b"\t"), None);
+        assert_eq!(input_selection_replacement_text(b"\x1b[1;5C"), None);
     }
 
     #[test]
@@ -6726,7 +7224,7 @@ mod tests {
             MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
         };
         TerminalContent {
-            lines: vec![line(text)],
+            lines: vec![line(text).into()],
             line_metadata: vec![TerminalLineMetadata::default()],
             cursor_line: 0,
             cursor_col,
@@ -6755,10 +7253,10 @@ mod tests {
         };
         TerminalContent {
             lines: vec![
-                line("❯ printf block"),
-                line("BLOCK_OUT_1"),
-                line("BLOCK_OUT_2"),
-                line(active_input),
+                line("❯ printf block").into(),
+                line("BLOCK_OUT_1").into(),
+                line("BLOCK_OUT_2").into(),
+                line(active_input).into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -6787,8 +7285,8 @@ mod tests {
         };
         TerminalContent {
             lines: vec![
-                line("~/Documents/Projects/Chelotype on main"),
-                line("❯ ls -la"),
+                line("~/Documents/Projects/Chelotype on main").into(),
+                line("❯ ls -la").into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -6802,6 +7300,33 @@ mod tests {
             ],
             cursor_line: 1,
             cursor_col: 8,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        }
+    }
+
+    fn semantic_multiline_input_with_cursor(
+        lines: &[&str],
+        cursor_line: i32,
+        cursor_col: i32,
+    ) -> RenderableContentOwned {
+        use crate::terminal_grid::{
+            MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata,
+        };
+        let mut line_metadata = vec![TerminalLineMetadata::default(); lines.len()];
+        if let Some(first) = line_metadata.first_mut() {
+            first.semantic_prompt = TerminalSemanticPrompt::Prompt;
+        }
+        for metadata in line_metadata.iter_mut().skip(1) {
+            metadata.semantic_prompt = TerminalSemanticPrompt::Continuation;
+        }
+        TerminalContent {
+            lines: lines.iter().map(|line| self::line(line).into()).collect(),
+            line_metadata,
+            cursor_line,
+            cursor_col,
             cursor_visible: true,
             display_offset: 0,
             colors: TerminalColors::default(),
@@ -6955,12 +7480,12 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            split_resize_boundary_at(metrics(), &[left, right], 403.0),
+            split_resize_boundary_at(metrics(), &[left, right], 405.0),
             Some(0)
         );
         assert_eq!(
             split_resize_boundary_at(metrics(), &[left, right], 407.0),
-            Some(0)
+            None
         );
         assert_eq!(
             split_resize_boundary_at(metrics(), &[left, right], 409.0),

@@ -121,6 +121,14 @@ impl TerminalWorkspace {
         })
     }
 
+    pub fn shutdown(&mut self) {
+        for tab in &mut self.tabs {
+            for pane in &mut tab.panes {
+                pane.backend.shutdown();
+            }
+        }
+    }
+
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
     }
@@ -179,13 +187,14 @@ impl TerminalWorkspace {
         self.next_tab_id += 1;
         let pane_id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
+        let backend = spawn_backend(command, size)?;
         self.tabs.push(TerminalTab {
             id,
             title: title.into(),
             launch_target,
             panes: vec![TerminalPane {
                 id: pane_id,
-                backend: spawn_backend(command, size)?,
+                backend,
                 width_weight: DEFAULT_PANE_WEIGHT,
             }],
             active_pane: pane_id,
@@ -204,10 +213,11 @@ impl TerminalWorkspace {
     ) -> io::Result<PaneId> {
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
+        let backend = spawn_backend(command, size)?;
         let tab = self.active_tab_mut();
         tab.panes.push(TerminalPane {
             id,
-            backend: spawn_backend(command, size)?,
+            backend,
             width_weight: DEFAULT_PANE_WEIGHT,
         });
         tab.active_pane = id;
@@ -239,9 +249,10 @@ impl TerminalWorkspace {
         self.next_pane_id += 1;
         let target = self.tabs[index].launch_target.clone();
         let command = target.command_with_size(Some(size));
+        let backend = spawn_backend(command, Some(size))?;
         self.tabs[index].panes = vec![TerminalPane {
             id: pane_id,
-            backend: TerminalBackend::spawn_with_size(command, size)?,
+            backend,
             width_weight: DEFAULT_PANE_WEIGHT,
         }];
         self.tabs[index].active_pane = pane_id;
@@ -403,11 +414,29 @@ impl TerminalWorkspace {
     }
 
     pub fn write_active(&mut self, data: &[u8]) -> io::Result<()> {
-        self.active_pane_mut().write(data)
+        let pane = self.active_pane_mut();
+        pane.scroll_to_bottom()?;
+        pane.write(data)
+    }
+
+    pub fn active_shell_input_ready(&mut self) -> io::Result<bool> {
+        self.active_pane_mut().shell_input_ready()
     }
 
     pub fn write_active_input_cursor_target(&mut self, offset: usize) -> io::Result<bool> {
-        self.active_pane_mut().write_input_cursor_target(offset)
+        let pane = self.active_pane_mut();
+        pane.scroll_to_bottom()?;
+        pane.write_input_cursor_target(offset)
+    }
+
+    pub fn write_active_input_replace_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+    ) -> io::Result<bool> {
+        let pane = self.active_pane_mut();
+        pane.scroll_to_bottom()?;
+        pane.write_input_replace_range(range, replacement)
     }
 
     pub fn active_bracketed_paste_mode(&mut self) -> bool {
@@ -574,10 +603,7 @@ impl TerminalWorkspace {
 }
 
 fn spawn_backend(command: CommandBuilder, size: Option<ScreenSize>) -> io::Result<TerminalBackend> {
-    match size {
-        Some(size) => TerminalBackend::spawn_with_size(command, size),
-        None => TerminalBackend::spawn(command),
-    }
+    TerminalBackend::spawn_with_size(command, size.unwrap_or_default())
 }
 
 fn pane_columns_for_panes(panes: &[TerminalPane], total_cols: usize) -> Vec<u16> {

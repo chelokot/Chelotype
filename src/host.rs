@@ -8,6 +8,7 @@ const HOST_ROOT: &str = "/var/run/host";
 #[cfg(test)]
 thread_local! {
     static FLATPAK_TEST_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static ENVIRONMENT_VALUE_TEST_OVERRIDE: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 
 pub fn command_builder(program: &str) -> CommandBuilder {
@@ -39,6 +40,16 @@ pub fn command(program: &str) -> Command {
 }
 
 pub fn environment_value(key: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(value) = ENVIRONMENT_VALUE_TEST_OVERRIDE.with(|override_value| {
+        override_value
+            .borrow()
+            .as_ref()
+            .filter(|(override_key, _)| override_key == key)
+            .map(|(_, value)| value.clone())
+    }) {
+        return Some(value);
+    }
     if is_flatpak() {
         let output = Command::new("flatpak-spawn")
             .args(["--host", "printenv", key])
@@ -76,6 +87,14 @@ pub fn is_flatpak() -> bool {
 #[cfg(test)]
 pub(crate) fn set_flatpak_test_override(value: Option<bool>) {
     FLATPAK_TEST_OVERRIDE.with(|override_value| override_value.set(value));
+}
+
+#[cfg(test)]
+pub(crate) fn set_environment_value_test_override(value: Option<(&str, &str)>) {
+    ENVIRONMENT_VALUE_TEST_OVERRIDE.with(|override_value| {
+        *override_value.borrow_mut() =
+            value.map(|(key, value)| (key.to_string(), value.to_string()));
+    });
 }
 
 fn trimmed_value(value: String) -> Option<String> {

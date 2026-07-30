@@ -46,6 +46,9 @@ jobs:
         env:
           FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
         run: |
+          scripts/check-release-metadata.sh
+          sed -i "s/^        commit: [0-9a-f]\{40\}$/        commit: ${GITHUB_SHA}/" com.chelokot.Chelotype.yml
+          grep -F "        commit: ${GITHUB_SHA}" com.chelokot.Chelotype.yml
           mkdir -p public/flatpak
           flatpak-builder \
             --user \

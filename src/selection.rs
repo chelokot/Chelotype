@@ -62,12 +62,12 @@ impl SelectionRange {
     }
 }
 
-pub fn selected_text(lines: &[Vec<TerminalCell>], range: SelectionRange) -> String {
+pub fn selected_text<Line: AsRef<[TerminalCell]>>(lines: &[Line], range: SelectionRange) -> String {
     selected_text_with_metadata(lines, &[], range)
 }
 
-pub fn selected_text_with_metadata(
-    lines: &[Vec<TerminalCell>],
+pub fn selected_text_with_metadata<Line: AsRef<[TerminalCell]>>(
+    lines: &[Line],
     metadata: &[TerminalLineMetadata],
     range: SelectionRange,
 ) -> String {
@@ -79,6 +79,7 @@ pub fn selected_text_with_metadata(
         let Some(line) = lines.get(row) else {
             break;
         };
+        let line = line.as_ref();
         let start_column = if row == range.start.row {
             range.start.column
         } else {
@@ -103,8 +104,11 @@ pub fn selected_text_with_metadata(
     out
 }
 
-pub fn line_range(lines: &[Vec<TerminalCell>], row: usize) -> Option<SelectionRange> {
-    let line = lines.get(row)?;
+pub fn line_range<Line: AsRef<[TerminalCell]>>(
+    lines: &[Line],
+    row: usize,
+) -> Option<SelectionRange> {
+    let line = lines.get(row)?.as_ref();
     let end = significant_len(line);
     (end > 0).then_some(SelectionRange::new(
         GridPoint { row, column: 0 },
@@ -112,12 +116,12 @@ pub fn line_range(lines: &[Vec<TerminalCell>], row: usize) -> Option<SelectionRa
     ))
 }
 
-pub fn word_range_at(
-    lines: &[Vec<TerminalCell>],
+pub fn word_range_at<Line: AsRef<[TerminalCell]>>(
+    lines: &[Line],
     row: usize,
     column: usize,
 ) -> Option<SelectionRange> {
-    let line = lines.get(row)?;
+    let line = lines.get(row)?.as_ref();
     let end = significant_len(line);
     if column >= end || !is_word_cell(line.get(column)?) {
         return None;
@@ -139,7 +143,10 @@ pub fn word_range_at(
     ))
 }
 
-pub fn find_text_range(lines: &[Vec<TerminalCell>], text: &str) -> Option<SelectionRange> {
+pub fn find_text_range<Line: AsRef<[TerminalCell]>>(
+    lines: &[Line],
+    text: &str,
+) -> Option<SelectionRange> {
     if text.is_empty() {
         return None;
     }
@@ -149,7 +156,9 @@ pub fn find_text_range(lines: &[Vec<TerminalCell>], text: &str) -> Option<Select
     lines
         .iter()
         .enumerate()
-        .find_map(|(row, line)| find_text_in_line(line, text).map(|(start, end)| (row, start, end)))
+        .find_map(|(row, line)| {
+            find_text_in_line(line.as_ref(), text).map(|(start, end)| (row, start, end))
+        })
         .map(|(row, start, end)| {
             SelectionRange::new(
                 GridPoint { row, column: start },
@@ -244,7 +253,10 @@ fn has_hard_line_break(metadata: &[TerminalLineMetadata], row: usize) -> bool {
             .is_some_and(|line| line.wrap_continuation))
 }
 
-fn find_multiline_text_range(lines: &[Vec<TerminalCell>], needle: &str) -> Option<SelectionRange> {
+fn find_multiline_text_range<Line: AsRef<[TerminalCell]>>(
+    lines: &[Line],
+    needle: &str,
+) -> Option<SelectionRange> {
     let parts = needle.split('\n').collect::<Vec<_>>();
     if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
         return None;
@@ -254,7 +266,8 @@ fn find_multiline_text_range(lines: &[Vec<TerminalCell>], needle: &str) -> Optio
         return None;
     }
     for start_row in 0..=lines.len() - parts.len() {
-        let first_line = line_text(&lines[start_row]);
+        let first_cells = lines[start_row].as_ref();
+        let first_line = line_text(first_cells);
         let Some(start_byte) = first_line.find(parts[0]) else {
             continue;
         };
@@ -262,13 +275,13 @@ fn find_multiline_text_range(lines: &[Vec<TerminalCell>], needle: &str) -> Optio
             continue;
         }
         let Some((start_column, _)) =
-            byte_range_to_columns(&lines[start_row], start_byte, first_line.len())
+            byte_range_to_columns(first_cells, start_byte, first_line.len())
         else {
             continue;
         };
         let mut matches = true;
         for middle_index in 1..last_index {
-            if line_text(&lines[start_row + middle_index]) != parts[middle_index] {
+            if line_text(lines[start_row + middle_index].as_ref()) != parts[middle_index] {
                 matches = false;
                 break;
             }
@@ -276,12 +289,12 @@ fn find_multiline_text_range(lines: &[Vec<TerminalCell>], needle: &str) -> Optio
         if !matches {
             continue;
         }
-        let last_line = line_text(&lines[start_row + last_index]);
+        let last_cells = lines[start_row + last_index].as_ref();
+        let last_line = line_text(last_cells);
         if !last_line.starts_with(parts[last_index]) {
             continue;
         }
-        let Some((_, end_column)) =
-            byte_range_to_columns(&lines[start_row + last_index], 0, parts[last_index].len())
+        let Some((_, end_column)) = byte_range_to_columns(last_cells, 0, parts[last_index].len())
         else {
             continue;
         };

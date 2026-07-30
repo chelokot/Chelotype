@@ -1,3 +1,4 @@
+use crate::input_selection::{active_input_end_column, input_start_column};
 use crate::mouse::{
     MouseButton, MouseGridPosition, sgr_drag_bytes, sgr_press_bytes, sgr_release_bytes,
 };
@@ -186,13 +187,17 @@ pub fn cursor_movement_bytes_for_editable_input(
     let cursor_column = usize::try_from(content.cursor_col).ok()?;
     let target_row = usize::from(target.row);
     let target_column = usize::from(target.column);
-    let input_rows = active_wrapped_rows(content, cursor_row)?;
+    let input_rows = active_input_rows(content, cursor_row)?;
     if !input_rows.contains(&target_row) {
         return None;
     }
     let cursor_absolute =
         absolute_input_column(content, input_rows.clone(), cursor_row, cursor_column)?;
+    let bounds = editable_input_bounds(content, input_rows.clone(), cursor_row)?;
     let target_absolute = absolute_input_column(content, input_rows, target_row, target_column)?;
+    if !bounds.contains(&cursor_absolute) || !bounds.contains(&target_absolute) {
+        return None;
+    }
     let delta = target_absolute as i32 - cursor_absolute as i32;
     arrow_bytes_for_delta(delta)
 }
@@ -203,7 +208,7 @@ pub fn cursor_movement_bytes_between_editable_input_points(
     target: MouseGridPosition,
 ) -> Option<Vec<u8>> {
     let cursor_row = usize::try_from(content.cursor_line).ok()?;
-    let input_rows = active_wrapped_rows(content, cursor_row)?;
+    let input_rows = active_input_rows(content, cursor_row)?;
     let source_absolute = absolute_input_column(
         content,
         input_rows.clone(),
@@ -212,10 +217,14 @@ pub fn cursor_movement_bytes_between_editable_input_points(
     )?;
     let target_absolute = absolute_input_column(
         content,
-        input_rows,
+        input_rows.clone(),
         usize::from(target.row),
         usize::from(target.column),
     )?;
+    let bounds = editable_input_bounds(content, input_rows, cursor_row)?;
+    if !bounds.contains(&source_absolute) || !bounds.contains(&target_absolute) {
+        return None;
+    }
     let delta = target_absolute as i32 - source_absolute as i32;
     arrow_bytes_for_delta(delta)
 }
@@ -246,16 +255,19 @@ pub fn input_position_in_editable_input(
     let Some(cursor_row) = usize::try_from(content.cursor_line).ok() else {
         return false;
     };
-    let Some(input_rows) = active_wrapped_rows(content, cursor_row) else {
+    let Some(input_rows) = active_input_rows(content, cursor_row) else {
         return false;
     };
-    absolute_input_column(
+    let Some(absolute) = absolute_input_column(
         content,
-        input_rows,
+        input_rows.clone(),
         usize::from(position.row),
         usize::from(position.column),
-    )
-    .is_some()
+    ) else {
+        return false;
+    };
+    editable_input_bounds(content, input_rows, cursor_row)
+        .is_some_and(|bounds| bounds.contains(&absolute))
 }
 
 fn active_input_rows(
@@ -316,9 +328,30 @@ fn active_semantic_prompt_rows(
     {
         return None;
     }
-    let editable_start =
-        semantic_prompt_editable_start(content, start, cursor_row).unwrap_or(start);
-    Some(editable_start..=cursor_row)
+    let mut end = cursor_row;
+    while end + 1 < content.lines.len() {
+        let current = content.line_metadata.get(end).copied().unwrap_or_default();
+        let next = content
+            .line_metadata
+            .get(end + 1)
+            .copied()
+            .unwrap_or_default();
+        if next.semantic_prompt == TerminalSemanticPrompt::Continuation
+            && matches!(
+                current.semantic_prompt,
+                TerminalSemanticPrompt::Prompt | TerminalSemanticPrompt::Continuation
+            )
+        {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    let editable_start = semantic_prompt_editable_start(content, start, end).unwrap_or(start);
+    if cursor_row < editable_start {
+        return None;
+    }
+    Some(editable_start..=end)
 }
 
 fn semantic_prompt_editable_start(
@@ -402,6 +435,42 @@ fn active_wrapped_rows(
     Some(start..=end)
 }
 
+fn editable_input_bounds(
+    content: &TerminalContent,
+    rows: std::ops::RangeInclusive<usize>,
+    cursor_row: usize,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let start_row = *rows.start();
+    let end_row = *rows.end();
+    let semantic_prompt = content
+        .line_metadata
+        .get(start_row)
+        .copied()
+        .unwrap_or_default()
+        .semantic_prompt
+        == TerminalSemanticPrompt::Prompt;
+    let start_column = if semantic_prompt {
+        input_start_column(content.lines.get(start_row)?)
+    } else {
+        0
+    };
+    let start = absolute_input_column(content, rows.clone(), start_row, start_column)?;
+    let end_column = if semantic_prompt {
+        if end_row == cursor_row {
+            active_input_end_column(
+                content.lines.get(end_row)?,
+                usize::try_from(content.cursor_col).ok(),
+            )
+        } else {
+            active_input_end_column(content.lines.get(end_row)?, None)
+        }
+    } else {
+        content.lines.get(end_row)?.len()
+    };
+    let end = absolute_input_column(content, rows, end_row, end_column)?;
+    (end >= start).then_some(start..=end)
+}
+
 fn absolute_input_column(
     content: &TerminalContent,
     rows: std::ops::RangeInclusive<usize>,
@@ -459,6 +528,38 @@ mod tests {
                 ..TerminalCell::blank()
             })
             .collect()
+    }
+
+    fn left_arrows(count: usize) -> Option<Vec<u8>> {
+        Some(b"\x1b[D".repeat(count))
+    }
+
+    fn right_arrows(count: usize) -> Option<Vec<u8>> {
+        Some(b"\x1b[C".repeat(count))
+    }
+
+    fn semantic_content_with_cursor(
+        lines: &[&str],
+        cursor_row: i32,
+        cursor_col: i32,
+    ) -> TerminalContent {
+        let mut line_metadata = vec![TerminalLineMetadata::default(); lines.len()];
+        if let Some(first) = line_metadata.first_mut() {
+            first.semantic_prompt = TerminalSemanticPrompt::Prompt;
+        }
+        for metadata in line_metadata.iter_mut().skip(1) {
+            metadata.semantic_prompt = TerminalSemanticPrompt::Continuation;
+        }
+        TerminalContent {
+            lines: lines.iter().map(|line| self::line(line).into()).collect(),
+            line_metadata,
+            cursor_line: cursor_row,
+            cursor_col,
+            cursor_visible: true,
+            display_offset: 0,
+            colors: TerminalColors::default(),
+            mouse: MouseMode::default(),
+        }
     }
 
     #[test]
@@ -586,9 +687,9 @@ mod tests {
     fn cursor_movement_uses_soft_wrapped_input_rows() {
         let content = TerminalContent {
             lines: vec![
-                vec![TerminalCell::blank(); 4],
-                vec![TerminalCell::blank(); 4],
-                vec![TerminalCell::blank(); 4],
+                vec![TerminalCell::blank(); 4].into(),
+                vec![TerminalCell::blank(); 4].into(),
+                vec![TerminalCell::blank(); 4].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -627,9 +728,9 @@ mod tests {
     fn cursor_movement_between_input_points_uses_input_absolute_columns() {
         let content = TerminalContent {
             lines: vec![
-                vec![TerminalCell::blank(); 4],
-                vec![TerminalCell::blank(); 4],
-                vec![TerminalCell::blank(); 4],
+                vec![TerminalCell::blank(); 4].into(),
+                vec![TerminalCell::blank(); 4].into(),
+                vec![TerminalCell::blank(); 4].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {
@@ -674,10 +775,10 @@ mod tests {
     fn cursor_movement_uses_semantic_prompt_continuation_rows() {
         let content = TerminalContent {
             lines: vec![
-                vec![TerminalCell::blank(); 3],
-                vec![TerminalCell::blank(); 4],
-                vec![TerminalCell::blank(); 5],
-                vec![TerminalCell::blank(); 2],
+                vec![TerminalCell::blank(); 3].into(),
+                vec![TerminalCell::blank(); 4].into(),
+                vec![TerminalCell::blank(); 5].into(),
+                vec![TerminalCell::blank(); 2].into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata::default(),
@@ -711,11 +812,75 @@ mod tests {
     }
 
     #[test]
+    fn cursor_movement_uses_full_semantic_multiline_input_from_each_cursor_row() {
+        let lines = ["❯ import {", "  Foo,", "  Bar", "}"];
+        for (cursor_row, cursor_col, expected) in [
+            (0, 2, right_arrows(16)),
+            (1, 6, right_arrows(2)),
+            (2, 5, left_arrows(3)),
+            (3, 1, left_arrows(4)),
+        ] {
+            let content = semantic_content_with_cursor(&lines, cursor_row, cursor_col);
+
+            assert_eq!(
+                cursor_movement_bytes_for_content(&content, pos(2, 2)),
+                expected,
+                "cursor row {cursor_row}"
+            );
+        }
+    }
+
+    #[test]
+    fn editable_cursor_movement_clicks_semantic_multiline_input_from_each_cursor_row() {
+        let lines = ["❯ import {", "  Foo,", "  Bar", "}"];
+        for (cursor_row, cursor_col, expected) in [
+            (0, 2, right_arrows(16)),
+            (1, 6, right_arrows(2)),
+            (2, 5, left_arrows(3)),
+            (3, 1, left_arrows(4)),
+        ] {
+            let content = semantic_content_with_cursor(&lines, cursor_row, cursor_col);
+
+            assert_eq!(
+                cursor_movement_bytes_for_editable_input(&content, pos(2, 2)),
+                expected,
+                "cursor row {cursor_row}"
+            );
+            assert_eq!(
+                cursor_movement_bytes_for_editable_input(&content, pos(0, 0)),
+                None,
+                "cursor row {cursor_row}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_position_accepts_full_semantic_multiline_input_for_mouse_selection() {
+        let lines = ["❯ import {", "  Foo,", "  Bar", "}"];
+        for (cursor_row, cursor_col) in [(0, 10), (1, 6), (2, 5), (3, 1)] {
+            let content = semantic_content_with_cursor(&lines, cursor_row, cursor_col);
+
+            assert!(
+                input_position_in_editable_input(&content, pos(2, 2)),
+                "cursor row {cursor_row}"
+            );
+            assert!(
+                input_position_in_editable_input(&content, pos(0, 3)),
+                "cursor row {cursor_row}"
+            );
+            assert!(
+                !input_position_in_editable_input(&content, pos(0, 0)),
+                "cursor row {cursor_row}"
+            );
+        }
+    }
+
+    #[test]
     fn cursor_movement_skips_decorative_semantic_prompt_header() {
         let content = TerminalContent {
             lines: vec![
-                line("~/Documents/Projects/Chelotype on main"),
-                line("❯ abc"),
+                line("~/Documents/Projects/Chelotype on main").into(),
+                line("❯ abc").into(),
             ],
             line_metadata: vec![
                 TerminalLineMetadata {

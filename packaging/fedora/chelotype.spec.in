@@ -1,5 +1,5 @@
 Name:           chelotype
-Version:        0.1.5
+Version:        0.1.15
 Release:        1%{?dist}
 Summary:        Opinionated GTK terminal
 
@@ -46,6 +46,9 @@ appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/com.chelo
 %{_datadir}/icons/hicolor/symbolic/apps/com.chelokot.Chelotype-symbolic.svg
 
 %changelog
+* Thu Jul 16 2026 Chelotype contributors <noreply@example.invalid> - 0.1.15-1
+- Synchronize package metadata with the latest application release
+
 * Thu May 21 2026 Chelotype contributors <noreply@example.invalid> - 0.1.5-1
 - Fix host shell terminal width propagation for Flatpak launches
 

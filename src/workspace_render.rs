@@ -167,7 +167,12 @@ fn pane_layout(
     PaneLayout {
         origin_col,
         origin_row: 0,
-        cols: content.lines.iter().map(Vec::len).max().unwrap_or(0),
+        cols: content
+            .lines
+            .iter()
+            .map(|line| line.len())
+            .max()
+            .unwrap_or(0),
         rows: content.lines.len(),
     }
 }

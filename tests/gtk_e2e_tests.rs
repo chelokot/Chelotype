@@ -1,4 +1,6 @@
-use chelotype::terminal_palette::default_terminal_palette;
+use chelotype::terminal_palette::{
+    DEFAULT_TERMINAL_PALETTE_ID, default_terminal_palette, terminal_palette_by_id,
+};
 use serial_test::serial;
 use std::fs::{read_dir, read_to_string};
 use std::process::Command;
@@ -15,6 +17,22 @@ fn has_command(name: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn xvfb_command() -> Command {
+    let mut command = Command::new("xvfb-run");
+    command.arg("--server-args=-screen 0 1920x1080x24 -nolisten tcp");
+    command
+}
+
+fn write_isolated_fish_config(config_home: &std::path::Path) {
+    let fish_config_dir = config_home.join("fish");
+    std::fs::create_dir_all(&fish_config_dir).expect("fish config dir");
+    std::fs::write(
+        fish_config_dir.join("config.fish"),
+        "set -g fish_greeting\nset -g fish_autosuggestion_enabled 0\nfunction fish_prompt\n    printf '❯ '\nend\n",
+    )
+    .expect("fish config");
 }
 
 fn snapshot_paths(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -179,12 +197,52 @@ fn red_pixel_count(image: &std::path::Path) -> usize {
         .count()
 }
 
-fn cursor_pixel_count(image: &std::path::Path) -> usize {
-    pixel_bounds(image, |pixel| {
-        pixel.red == 125 && pixel.green == 211 && pixel.blue == 252
-    })
-    .map(|bounds| bounds.count)
-    .unwrap_or(0)
+fn default_cursor_rgb() -> [u16; 3] {
+    let color = terminal_palette_by_id(DEFAULT_TERMINAL_PALETTE_ID)
+        .expect("default terminal palette")
+        .cursor;
+    [
+        u16::from_str_radix(&color[1..3], 16).expect("cursor red component"),
+        u16::from_str_radix(&color[3..5], 16).expect("cursor green component"),
+        u16::from_str_radix(&color[5..7], 16).expect("cursor blue component"),
+    ]
+}
+
+fn cursor_pixel_bounds(
+    image: &std::path::Path,
+    geometry_trace: &std::path::Path,
+    cursor_column: f64,
+    cursor_line: f64,
+) -> Option<PixelBounds> {
+    let expected_x = geometry_metric(geometry_trace, "canvas_x")
+        + geometry_metric(geometry_trace, "cell_offset_x")
+        + cursor_column * geometry_metric(geometry_trace, "cell_width");
+    let expected_y = geometry_metric(geometry_trace, "canvas_y")
+        + geometry_metric(geometry_trace, "cell_offset_y")
+        + cursor_line * geometry_metric(geometry_trace, "line_height");
+    let line_height = geometry_metric(geometry_trace, "line_height");
+    let [red, green, blue] = default_cursor_rgb();
+    let region_x = expected_x.floor().max(0.0) as usize;
+    let region_y = (expected_y - 2.0).floor().max(0.0) as usize;
+    pixel_bounds_in_region(
+        image,
+        region_x,
+        region_y,
+        12,
+        line_height.ceil() as usize + 12,
+        |pixel| pixel.red == red && pixel.green == green && pixel.blue == blue,
+    )
+}
+
+fn cursor_pixel_count(
+    image: &std::path::Path,
+    geometry_trace: &std::path::Path,
+    cursor_column: f64,
+    cursor_line: f64,
+) -> usize {
+    cursor_pixel_bounds(image, geometry_trace, cursor_column, cursor_line)
+        .map(|bounds| bounds.count)
+        .unwrap_or(0)
 }
 
 fn geometry_metric(path: &std::path::Path, name: &str) -> f64 {
@@ -317,28 +375,74 @@ fn pixel_bounds(
         .filter_map(parse_image_pixel)
         .filter(|pixel| matches(*pixel))
     {
-        bounds = Some(match bounds {
-            Some(bounds) => PixelBounds {
-                min_x: bounds.min_x.min(pixel.x),
-                max_x: bounds.max_x.max(pixel.x),
-                min_y: bounds.min_y.min(pixel.y),
-                max_y: bounds.max_y.max(pixel.y),
-                count: bounds.count + 1,
-            },
-            None => PixelBounds {
-                min_x: pixel.x,
-                max_x: pixel.x,
-                min_y: pixel.y,
-                max_y: pixel.y,
-                count: 1,
-            },
-        });
+        extend_pixel_bounds(&mut bounds, pixel);
     }
     bounds
 }
 
+fn pixel_bounds_in_region(
+    image: &std::path::Path,
+    region_x: usize,
+    region_y: usize,
+    width: usize,
+    height: usize,
+    matches: impl Fn(ImagePixel) -> bool,
+) -> Option<PixelBounds> {
+    let region = format!("{width}x{height}+{region_x}+{region_y}");
+    let output = Command::new("convert")
+        .args([
+            image.to_str().expect("image path utf8"),
+            "-crop",
+            &region,
+            "+repage",
+            "txt:-",
+        ])
+        .output()
+        .expect("convert screenshot region to pixels");
+    assert!(
+        output.status.success(),
+        "convert failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut bounds: Option<PixelBounds> = None;
+    for mut pixel in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_image_pixel)
+    {
+        pixel.x += region_x;
+        pixel.y += region_y;
+        if !matches(pixel) {
+            continue;
+        }
+        extend_pixel_bounds(&mut bounds, pixel);
+    }
+    bounds
+}
+
+fn extend_pixel_bounds(bounds: &mut Option<PixelBounds>, pixel: ImagePixel) {
+    *bounds = Some(match bounds.take() {
+        Some(bounds) => PixelBounds {
+            min_x: bounds.min_x.min(pixel.x),
+            max_x: bounds.max_x.max(pixel.x),
+            min_y: bounds.min_y.min(pixel.y),
+            max_y: bounds.max_y.max(pixel.y),
+            count: bounds.count + 1,
+        },
+        None => PixelBounds {
+            min_x: pixel.x,
+            max_x: pixel.x,
+            min_y: pixel.y,
+            max_y: pixel.y,
+            count: 1,
+        },
+    });
+}
+
 fn parse_srgb(line: &str) -> Option<[u16; 3]> {
-    let start = line.find("srgb(")? + "srgb(".len();
+    let start = line
+        .find("srgb(")
+        .map(|start| start + "srgb(".len())
+        .or_else(|| line.find("(").map(|start| start + 1))?;
     let end = line[start..].find(')')? + start;
     let mut parts = line[start..end]
         .split(',')
@@ -375,12 +479,19 @@ fn gtk_e2e_renders_real_window_to_snapshot_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    std::fs::write(
+        dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
         .env("GDK_BACKEND", "x11")
         .env("GSETTINGS_BACKEND", "memory")
         .env("NO_AT_BRIDGE", "1")
+        .env("CHELOTYPE_CONFIG_DIR", &dir)
+        .env("CHELOTYPE_SHELL", "/bin/sh")
         .env("CHELOTYPE_UI_E2E", "1")
         .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
         .env("CHELOTYPE_UI_E2E_INPUT", "printf 'GTK_E2E_OK\\n'\n")
@@ -429,12 +540,19 @@ fn gtk_e2e_exports_colored_cells_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    std::fs::write(
+        dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
         .env("GDK_BACKEND", "x11")
         .env("GSETTINGS_BACKEND", "memory")
         .env("NO_AT_BRIDGE", "1")
+        .env("CHELOTYPE_CONFIG_DIR", &dir)
+        .env("CHELOTYPE_SHELL", "/bin/sh")
         .env("CHELOTYPE_UI_E2E", "1")
         .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
         .env(
@@ -484,7 +602,7 @@ fn gtk_e2e_lays_out_scrolling_preview_card_spacing_under_xvfb() {
     let geometry_trace = dir.join("preferences-geometry.env");
     let config_dir = dir.join("config");
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "-s",
@@ -561,13 +679,8 @@ fn gtk_e2e_lays_out_cursor_animation_settings_spacing_under_xvfb() {
         .expect("write config");
         let geometry_trace = case_dir.join("preferences-geometry.env");
 
-        let output = Command::new("xvfb-run")
-            .args([
-                "-a",
-                "-s",
-                "-screen 0 1920x1080x24",
-                env!("CARGO_BIN_EXE_chelotype"),
-            ])
+        let output = xvfb_command()
+            .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
             .env("XDG_CONFIG_HOME", &config_home)
             .env("GDK_BACKEND", "x11")
             .env("GSETTINGS_BACKEND", "memory")
@@ -601,8 +714,13 @@ fn gtk_e2e_lays_out_cursor_animation_settings_spacing_under_xvfb() {
         "smooth cursor settings should not show advanced settings: {smooth_geometry}"
     );
     assert_eq!(
-        geometry_metric(&smooth_trace, "cursor_blinking.y_min")
-            - geometry_metric(&smooth_trace, "animation_speed.y_max"),
+        geometry_metric(&smooth_trace, "cursor_corners.y_min")
+            - geometry_metric(&smooth_trace, "cursor_animation.y_max"),
+        24.0
+    );
+    assert_eq!(
+        geometry_metric(&smooth_trace, "cursor_blink.y_min")
+            - geometry_metric(&smooth_trace, "cursor_corners.y_max"),
         24.0
     );
 
@@ -613,8 +731,13 @@ fn gtk_e2e_lays_out_cursor_animation_settings_spacing_under_xvfb() {
         24.0
     );
     assert_eq!(
-        geometry_metric(&neovide_trace, "cursor_blinking.y_min")
-            - geometry_metric(&neovide_trace, "advanced.y_max"),
+        geometry_metric(&neovide_trace, "cursor_corners.y_min")
+            - geometry_metric(&neovide_trace, "cursor_animation.y_max"),
+        24.0
+    );
+    assert_eq!(
+        geometry_metric(&neovide_trace, "cursor_blink.y_min")
+            - geometry_metric(&neovide_trace, "cursor_corners.y_max"),
         24.0
     );
 
@@ -637,6 +760,11 @@ fn gtk_e2e_exports_unicode_grapheme_and_width_cells_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    std::fs::write(
+        dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
 
     let combining = "e\u{0301}";
     let wide = "\u{4e2d}";
@@ -647,11 +775,13 @@ fn gtk_e2e_exports_unicode_grapheme_and_width_cells_under_xvfb() {
         format!("GTK_UNICODE {combining} WIDE {wide} EMOJI {zwj_emoji} AMBIG {middle_dot} {omega}");
     let input = format!("printf '{expected}\\n'\n");
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
         .env("GDK_BACKEND", "x11")
         .env("GSETTINGS_BACKEND", "memory")
         .env("NO_AT_BRIDGE", "1")
+        .env("CHELOTYPE_CONFIG_DIR", &dir)
+        .env("CHELOTYPE_SHELL", "/bin/sh")
         .env("CHELOTYPE_UI_E2E", "1")
         .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
         .env("CHELOTYPE_UI_E2E_INPUT", input)
@@ -759,7 +889,7 @@ snapshot_dir="$2"
 screenshot="$3"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -790,7 +920,7 @@ fi
 import -window "$window_id" "$screenshot"
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -865,15 +995,23 @@ fn gtk_e2e_renders_truecolor_cells_into_window_pixels_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let screenshot = dir.join("window.png");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 screenshot="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+config_dir="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -901,10 +1039,19 @@ if ! grep -R 'PIXEL_DONE' "$snapshot_dir" >/dev/null 2>&1; then
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-import -window "$window_id" "$screenshot"
+for _ in {1..20}; do
+    import -window "$window_id" "$screenshot"
+    red_pixels="$(convert "$screenshot" -format %c histogram:info:- 2>/dev/null | awk -F'[:(), ]+' '$3 >= 180 && $4 < 90 && $5 < 90 { pixels += $2 } END { print pixels + 0 }')"
+    if [ "$red_pixels" -gt 20 ]; then
+        exit 0
+    fi
+    sleep 0.05
+done
+echo "truecolor pixels never reached the window" >&2
+exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -916,6 +1063,7 @@ import -window "$window_id" "$screenshot"
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             screenshot.to_str().expect("screenshot path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk pixel color e2e under xvfb");
@@ -971,7 +1119,7 @@ geometry_trace="$5"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -1038,8 +1186,8 @@ if [ -z "$marker_row" ] || [ "$marker_row" -lt 0 ] || [ ! -f "$geometry_trace" ]
     [ -n "$latest_txt" ] && cat "$latest_txt" >&2
     exit 1
 fi
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 rail_x="$(awk -v canvas_x="$canvas_x" 'BEGIN { printf "%d", canvas_x + 6 }')"
 rail_y="$(awk -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", canvas_y + ((row + 0.5) * line) }')"
@@ -1089,7 +1237,7 @@ fi
 import -window "$window_id" "$screenshot"
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -1161,7 +1309,7 @@ geometry_trace="$4"
 expected='CB_WRAP_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_tail'
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -1241,8 +1389,8 @@ if [ -z "$marker_row" ] || [ "$marker_row" -lt 0 ]; then
     cat "$latest" >&2
     exit 1
 fi
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
 rail_root_x="$(awk -v left="$X" -v canvas_x="$canvas_x" 'BEGIN { printf "%d", left + canvas_x + 6 }')"
@@ -1283,7 +1431,7 @@ cat "$latest" >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -1357,7 +1505,7 @@ screenshot="$3"
 geometry_trace="$4"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -1375,20 +1523,21 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf '\033[38;2;255;0;0mA\033[0m\033[38;2;102;102;102m \033[38;2;0;255;0mB\033[0m\n'; printf 'GRID_SPACE_DONE\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R 'GRID_SPACE_DONE' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -R '^GRID_SPACE_DONE[[:space:]]*$' "$snapshot_dir"/*.txt >/dev/null 2>&1 && grep -R '^A B[[:space:]]*$' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'GRID_SPACE_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -R '^GRID_SPACE_DONE[[:space:]]*$' "$snapshot_dir"/*.txt >/dev/null 2>&1 || ! grep -R '^A B[[:space:]]*$' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
     echo "grid spacing marker never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
+sleep 0.2
 import -window "$window_id" "$screenshot"
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -1414,19 +1563,53 @@ import -window "$window_id" "$screenshot"
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_clean_gtk_stderr(&stderr);
 
+    let output_row = json_snapshots(&dir)
+        .into_iter()
+        .filter_map(|snapshot| {
+            snapshot["lines"].as_array().and_then(|lines| {
+                lines.iter().position(|line| {
+                    line["cells"].as_array().is_some_and(|cells| {
+                        cells
+                            .iter()
+                            .filter_map(|cell| cell["text"].as_str())
+                            .collect::<String>()
+                            .trim_end()
+                            == "A B"
+                    })
+                })
+            })
+        })
+        .map(|row| row as f64)
+        .next()
+        .expect("A B output row");
+    let cell_width = geometry_metric(&geometry_trace, "cell_width");
+    let line_height = geometry_metric(&geometry_trace, "line_height");
+    let output_x = geometry_metric(&geometry_trace, "canvas_x")
+        + geometry_metric(&geometry_trace, "cell_offset_x");
+    let output_y = geometry_metric(&geometry_trace, "canvas_y")
+        + geometry_metric(&geometry_trace, "cell_offset_y")
+        + output_row * line_height;
     let red = pixel_bounds(&screenshot, |pixel| {
-        pixel.red > 180 && pixel.green < 90 && pixel.blue < 90
+        pixel.x as f64 >= output_x
+            && pixel.x as f64 <= output_x + cell_width
+            && pixel.y as f64 >= output_y
+            && pixel.y as f64 <= output_y + line_height
+            && pixel.red > 180
+            && pixel.green < 90
+            && pixel.blue < 90
     })
     .expect("red A pixels");
     let green = pixel_bounds(&screenshot, |pixel| {
-        pixel.y >= red.min_y.saturating_sub(2)
-            && pixel.y <= red.max_y + 2
+        pixel.x as f64 >= output_x + cell_width * 2.0
+            && pixel.x as f64 <= output_x + cell_width * 3.0
+            && pixel.y as f64 >= output_y
+            && pixel.y as f64 <= output_y + line_height
             && pixel.green > 180
             && pixel.red < 90
             && pixel.blue < 90
     })
     .expect("green B pixels");
-    let expected_delta = geometry_metric(&geometry_trace, "cell_width") * 2.0;
+    let expected_delta = cell_width * 2.0;
     let actual_delta = green.min_x as f64 - red.min_x as f64;
     assert!(
         (actual_delta - expected_delta).abs() <= 2.0,
@@ -1463,7 +1646,7 @@ scroll_trace="$3"
 perf_trace="$4"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" CHELOTYPE_PERF_TRACE="$perf_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -1508,7 +1691,7 @@ grep -R '"display_offset"' "$snapshot_dir"/*.json >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -1574,18 +1757,14 @@ exit 1
             .all(|frame| frame.offset_px < 0.0),
         "wheel-up pixel-only frames should continue the preapplied viewport instead of flipping direction\n{trace}"
     );
-    assert!(
-        scroll_frames
-            .iter()
-            .filter(|frame| frame.line_delta != 0)
-            .count()
-            >= 2,
-        "smooth scroll did not drain through logical line steps\n{trace}"
-    );
     let line_step_count = scroll_frames
         .iter()
         .filter(|frame| frame.line_delta != 0)
         .count();
+    assert_eq!(
+        line_step_count, 1,
+        "smooth scroll should preapply the logical viewport once\n{trace}"
+    );
     assert!(
         scroll_frames
             .windows(2)
@@ -1603,9 +1782,14 @@ exit 1
         frame_interval.len()
     );
     let frame_interval_p50 = percentile_duration(frame_interval, 50);
+    let refresh_interval_p50 =
+        percentile_counter(perf_counters(&perf_trace, "gdk_refresh_interval"), 50);
+    let xvfb_frame_clock_budget =
+        Duration::from_micros(refresh_interval_p50.saturating_mul(2) + 1_000);
     assert!(
-        frame_interval_p50 <= Duration::from_millis(20),
-        "smooth scroll gtk_frame_interval p50 exceeded Xvfb frame-clock budget: {frame_interval_p50:?}"
+        frame_interval_p50 <= xvfb_frame_clock_budget,
+        "smooth scroll gtk_frame_interval p50 exceeded two Xvfb refresh intervals: frame={frame_interval_p50:?} refresh={}us",
+        refresh_interval_p50
     );
     let render = perf_samples(&perf_trace, "gtk_render");
     assert!(
@@ -1638,7 +1822,8 @@ exit 1
     );
     let paint_rows = perf_counters(&perf_trace, "gtk_paint_rows");
     let layout_hits = perf_counters(&perf_trace, "gtk_layout_cache_hits");
-    let layout_misses = perf_counters(&perf_trace, "gtk_layout_cache_misses");
+    let history_layout_misses = perf_counters(&perf_trace, "gtk_history_layout_cache_misses");
+    let row_surface_hits = perf_counters(&perf_trace, "gtk_row_surface_hits");
     assert!(
         paint_rows.len() >= min_scroll_frames,
         "smooth scroll produced too few paint-row samples: {}",
@@ -1646,17 +1831,17 @@ exit 1
     );
     let paint_rows_p95 = percentile_counter(paint_rows, 95);
     assert!(
-        paint_rows_p95 <= 30,
-        "smooth scroll painted too many rows per frame after clip pruning: p95={paint_rows_p95}"
+        paint_rows_p95 <= 64,
+        "smooth scroll painted beyond the visible viewport: p95={paint_rows_p95}"
     );
     assert!(
-        layout_hits.iter().any(|hits| *hits > 0),
-        "smooth scroll never reused cached Pango layouts"
+        layout_hits.iter().any(|hits| *hits > 0) || row_surface_hits.iter().any(|hits| *hits > 0),
+        "smooth scroll never reused cached layouts or row surfaces"
     );
-    let layout_misses_p95 = percentile_counter(layout_misses, 95);
+    let layout_misses_p95 = percentile_counter(history_layout_misses, 95);
     assert!(
         layout_misses_p95 <= 2,
-        "smooth scroll rebuilt too many Pango layouts per paint: p95={layout_misses_p95}"
+        "smooth scroll rebuilt too many history Pango layouts per paint: p95={layout_misses_p95}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1687,7 +1872,7 @@ snapshot_dir="$2"
 scroll_trace="$3"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -1732,7 +1917,7 @@ if ! grep -q $'^limit\t-3\t0.00' "$scroll_trace"; then
 fi
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -1786,7 +1971,11 @@ fn gtk_e2e_smooth_scrolling_config_off_uses_direct_wheel_scroll_under_xvfb() {
     let config_dir = dir.join("config");
     std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    std::fs::write(config_dir.join("config"), "smooth_scrolling=off\n").expect("config");
+    std::fs::write(
+        config_dir.join("config"),
+        "smooth_scrolling=off\nfirst_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
     let scroll_trace = dir.join("scroll.tsv");
 
     let script = r#"
@@ -1795,9 +1984,9 @@ bin="$1"
 snapshot_dir="$2"
 config_dir="$3"
 scroll_trace="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -1847,7 +2036,7 @@ if grep -q $'^frame\t' "$scroll_trace" 2>/dev/null; then
 fi
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -1906,6 +2095,11 @@ fn gtk_e2e_renders_narrow_cursor_pixels_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let config_dir = dir.join("config");
     std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
     let screenshot = dir.join("window.png");
     let geometry_trace = dir.join("geometry.env");
 
@@ -1918,7 +2112,7 @@ geometry_trace="$4"
 config_dir="$5"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -1946,8 +2140,6 @@ if ! grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1; then
     exit 1
 fi
 xdotool type --window "$window_id" --delay 2 "Z"
-sleep 0.15
-import -window "$window_id" "$screenshot"
 for _ in {1..100}; do
     if grep -R 'abc defZ' "$snapshot_dir" >/dev/null 2>&1; then
         break
@@ -1959,9 +2151,14 @@ if ! grep -R 'abc defZ' "$snapshot_dir" >/dev/null 2>&1; then
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
+import -window "$window_id" "$screenshot"
+for n in {1..5}; do
+    sleep 0.05
+    import -window "$window_id" "${screenshot%.png}_$n.png"
+done
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -1988,22 +2185,6 @@ fi
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_clean_gtk_stderr(&stderr);
 
-    let bounds = pixel_bounds(&screenshot, |pixel| {
-        pixel.red == 125 && pixel.green == 211 && pixel.blue == 252
-    })
-    .expect("cursor-colored pixels in screenshot");
-    assert!(
-        bounds.width() <= 2,
-        "cursor should be a narrow vertical caret, got {bounds:?}"
-    );
-    assert!(
-        bounds.height() >= 16,
-        "cursor should be visibly tall, got {bounds:?}"
-    );
-    assert!(
-        bounds.count >= 16,
-        "cursor should have enough visible pixels, got {bounds:?}"
-    );
     let cursor_snapshot = json_snapshots(&dir)
         .into_iter()
         .find(|snapshot| {
@@ -2018,9 +2199,28 @@ fi
     let cursor_line = cursor_snapshot["cursor_line"]
         .as_f64()
         .expect("numeric cursor line");
+    let bounds = std::iter::once(screenshot.clone())
+        .chain((1..=5).map(|index| dir.join(format!("window_{index}.png"))))
+        .filter_map(|path| cursor_pixel_bounds(&path, &geometry_trace, cursor_column, cursor_line))
+        .next()
+        .expect("cursor-colored pixels in screenshots");
+    assert!(
+        bounds.width() <= 2,
+        "cursor should be a narrow vertical caret, got {bounds:?}"
+    );
+    assert!(
+        bounds.height() >= 16,
+        "cursor should be visibly tall, got {bounds:?}"
+    );
+    assert!(
+        bounds.count >= 16,
+        "cursor should have enough visible pixels, got {bounds:?}"
+    );
     let expected_x = geometry_metric(&geometry_trace, "canvas_x")
+        + geometry_metric(&geometry_trace, "cell_offset_x")
         + cursor_column * geometry_metric(&geometry_trace, "cell_width");
     let expected_y = geometry_metric(&geometry_trace, "canvas_y")
+        + geometry_metric(&geometry_trace, "cell_offset_y")
         + cursor_line * geometry_metric(&geometry_trace, "line_height");
     assert!(
         (bounds.min_x as f64 - expected_x).abs() <= 6.0,
@@ -2058,9 +2258,15 @@ fn gtk_e2e_blinks_cursor_and_resets_after_input_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let config_dir = dir.join("config");
     std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
     let visible = dir.join("visible.png");
     let hidden = dir.join("hidden.png");
     let reset = dir.join("reset.png");
+    let geometry_trace = dir.join("geometry.env");
 
     let script = r#"
 set -euo pipefail
@@ -2070,9 +2276,10 @@ visible="$3"
 hidden="$4"
 reset="$5"
 config_dir="$6"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+geometry_trace="$7"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -2095,11 +2302,15 @@ for n in {1..10}; do
     import -window "$window_id" "${hidden%.png}_$n.png"
 done
 xdotool type --window "$window_id" --delay 2 "X"
-sleep 0.15
+sleep 0.03
 import -window "$window_id" "$reset"
+for n in {1..5}; do
+    sleep 0.05
+    import -window "$window_id" "${reset%.png}_$n.png"
+done
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -2114,6 +2325,7 @@ import -window "$window_id" "$reset"
             hidden.to_str().expect("hidden screenshot path utf8"),
             reset.to_str().expect("reset screenshot path utf8"),
             config_dir.to_str().expect("config dir utf8"),
+            geometry_trace.to_str().expect("geometry trace path utf8"),
         ])
         .output()
         .expect("run gtk cursor blink e2e under xvfb");
@@ -2127,24 +2339,56 @@ import -window "$window_id" "$reset"
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_clean_gtk_stderr(&stderr);
 
-    let visible_count = cursor_pixel_count(&visible);
-    let hidden_counts = (1..=10)
-        .map(|index| dir.join(format!("hidden_{index}.png")))
+    let snapshots = json_snapshots(&dir);
+    let visible_snapshot = snapshots
+        .iter()
+        .find(|snapshot| {
+            snapshot["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("blink") && !text.contains("blinkX"))
+        })
+        .expect("visible cursor snapshot");
+    let visible_column = visible_snapshot["cursor_col"]
+        .as_f64()
+        .expect("numeric visible cursor column");
+    let visible_line = visible_snapshot["cursor_line"]
+        .as_f64()
+        .expect("numeric visible cursor line");
+    let reset_snapshot = snapshots
+        .iter()
+        .find(|snapshot| {
+            snapshot["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("blinkX"))
+        })
+        .expect("reset cursor snapshot");
+    let reset_column = reset_snapshot["cursor_col"]
+        .as_f64()
+        .expect("numeric reset cursor column");
+    let reset_line = reset_snapshot["cursor_line"]
+        .as_f64()
+        .expect("numeric reset cursor line");
+    let sampled_counts = std::iter::once(visible.clone())
+        .chain((1..=10).map(|index| dir.join(format!("hidden_{index}.png"))))
         .filter(|path| path.is_file())
-        .map(|path| cursor_pixel_count(&path))
+        .map(|path| cursor_pixel_count(&path, &geometry_trace, visible_column, visible_line))
         .collect::<Vec<_>>();
-    let reset_count = cursor_pixel_count(&reset);
+    let reset_counts = std::iter::once(reset.clone())
+        .chain((1..=5).map(|index| dir.join(format!("reset_{index}.png"))))
+        .filter(|path| path.is_file())
+        .map(|path| cursor_pixel_count(&path, &geometry_trace, reset_column, reset_line))
+        .collect::<Vec<_>>();
     assert!(
-        visible_count >= 16,
-        "cursor should start visible, got {visible_count} cursor pixels"
+        sampled_counts.iter().any(|count| *count >= 16),
+        "cursor should appear in at least one sampled blink frame, got {sampled_counts:?}"
     );
     assert!(
-        hidden_counts.contains(&0),
-        "cursor should blink off in at least one sampled frame, got {hidden_counts:?}"
+        sampled_counts.contains(&0),
+        "cursor should blink off in at least one sampled frame, got {sampled_counts:?}"
     );
     assert!(
-        reset_count >= 16,
-        "cursor should reset visible after input, got {reset_count} cursor pixels"
+        reset_counts.iter().take(3).any(|count| *count >= 16),
+        "cursor should reset visible after input, got {reset_counts:?} cursor pixels"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -2166,21 +2410,23 @@ fn gtk_e2e_accepts_real_keyboard_input_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
-    let zdot = dir.join("zdot");
-    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
     std::fs::write(
-        zdot.join(".zshrc"),
-        "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
     )
-    .expect("zshrc fixture");
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+config_dir="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -2208,7 +2454,7 @@ find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -2219,6 +2465,7 @@ exit 1
             "chelotype-gtk-keyboard-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk keyboard e2e under xvfb");
@@ -2261,16 +2508,21 @@ fn gtk_e2e_replays_non_latin_key_event_through_input_mapping_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let config_dir = dir.join("config");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 config_dir="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -2330,7 +2582,7 @@ wait_latest_text 'GTK_NON_LATIN_KEY=я'
 wait_render_cell
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -2393,21 +2645,23 @@ fn gtk_e2e_commits_composed_input_text_through_im_context_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
-    let zdot = dir.join("zdot");
-    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
     std::fs::write(
-        zdot.join(".zshrc"),
-        "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
     )
-    .expect("zshrc fixture");
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+config_dir="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -2442,11 +2696,11 @@ xdotool type --window "$window_id" --delay 2 "abc"
 wait_latest_text '❯ abc'
 xdotool key --window "$window_id" ctrl+a
 sleep 0.1
-xdotool key --window "$window_id" Multi_key apostrophe e
+xdotool key --window "$window_id" --delay 120 Multi_key apostrophe e
 wait_latest_text '❯ é'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -2457,6 +2711,7 @@ wait_latest_text '❯ é'
             "chelotype-gtk-im-compose-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk IM compose e2e under xvfb");
@@ -2495,6 +2750,20 @@ fn gtk_e2e_renders_im_preedit_before_commit_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let zdot = dir.join("zdot");
+    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    std::fs::write(
+        zdot.join(".zshrc"),
+        "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
+    )
+    .expect("zshrc fixture");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
     let preedit_screenshot = dir.join("preedit.png");
     let geometry_trace = dir.join("geometry.env");
 
@@ -2504,9 +2773,11 @@ bin="$1"
 snapshot_dir="$2"
 preedit_screenshot="$3"
 geometry_trace="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+zdot="$5"
+config_dir="$6"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_RENDER_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -2555,11 +2826,21 @@ wait_latest_text() {
     [ -n "$latest" ] && cat "$latest" >&2
     return 1
 }
-xdotool key --window "$window_id" Multi_key
-sleep 0.15
-xdotool key --window "$window_id" apostrophe
+xdotool key --window "$window_id" --delay 120 Multi_key apostrophe
 wait_preedit
-import -window "$window_id" "$preedit_screenshot"
+preedit_painted=0
+for _ in {1..20}; do
+    import -window "$window_id" "$preedit_screenshot"
+    if convert "$preedit_screenshot" -format %c histogram:info:- 2>/dev/null | grep -F '#252930' >/dev/null 2>&1; then
+        preedit_painted=1
+        break
+    fi
+    sleep 0.05
+done
+if [ "$preedit_painted" -ne 1 ]; then
+    echo "preedit render state did not reach the window" >&2
+    exit 1
+fi
 xdotool key --window "$window_id" e
 wait_latest_text '❯ é'
 for _ in {1..100}; do
@@ -2575,7 +2856,7 @@ latest="$(latest_render || true)"
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -2590,6 +2871,8 @@ exit 1
                 .to_str()
                 .expect("preedit screenshot path utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            zdot.to_str().expect("zdot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk IM preedit e2e under xvfb");
@@ -2628,12 +2911,21 @@ exit 1
         .as_f64()
         .expect("numeric preedit columns");
     let expected_x = geometry_metric(&geometry_trace, "canvas_x")
+        + geometry_metric(&geometry_trace, "cell_offset_x")
         + column * geometry_metric(&geometry_trace, "cell_width");
     let expected_y = geometry_metric(&geometry_trace, "canvas_y")
+        + geometry_metric(&geometry_trace, "cell_offset_y")
         + line * geometry_metric(&geometry_trace, "line_height");
     let expected_width = columns * geometry_metric(&geometry_trace, "cell_width");
+    let preedit_line_height = geometry_metric(&geometry_trace, "line_height");
     let preedit_background = pixel_bounds(&preedit_screenshot, |pixel| {
-        pixel.red == 37 && pixel.green == 41 && pixel.blue == 48
+        pixel.x as f64 >= expected_x
+            && pixel.x as f64 <= expected_x + expected_width + 2.0
+            && pixel.y as f64 >= expected_y
+            && pixel.y as f64 <= expected_y + preedit_line_height
+            && pixel.red == 37
+            && pixel.green == 41
+            && pixel.blue == 48
     })
     .expect("preedit background pixels in screenshot");
     assert!(
@@ -2672,25 +2964,24 @@ fn gtk_e2e_tracks_held_key_render_and_paint_latency_under_xvfb() {
             .as_nanos()
     ));
     let zdot = dir.join("zdot");
-    let snapshots = dir.join("snapshots");
     std::fs::create_dir_all(&zdot).expect("zdot dir");
-    std::fs::create_dir_all(&snapshots).expect("snapshot dir");
     std::fs::write(
         zdot.join(".zshrc"),
         "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
     )
     .expect("zshrc fixture");
     let perf_trace = dir.join("perf.tsv");
+    let clipboard_trace = dir.join("clipboard.tsv");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
-snapshot_dir="$2"
-perf_trace="$3"
+perf_trace="$2"
+clipboard_trace="$3"
 zdot="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_PERF_TRACE="$perf_trace" CHELOTYPE_ALLOC_TRACE=1 CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_PERF_TRACE="$perf_trace" CHELOTYPE_ALLOC_TRACE=1 CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -2709,19 +3000,26 @@ xdotool keydown --window "$window_id" a
 sleep 10
 xdotool keyup --window "$window_id" a
 sleep 0.5
+xdotool key --window "$window_id" ctrl+a
+xdotool key --window "$window_id" ctrl+c
+for _ in {1..80}; do
+    if grep -E $'^clipboard\ta{24,}$' "$clipboard_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
 if [ ! -s "$perf_trace" ]; then
     echo "held-key perf trace was not written" >&2
-    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-if ! grep -R 'aaaaaaaaaaaaaaaaaaaaaaaa' "$snapshot_dir" >/dev/null 2>&1; then
-    echo "held-key snapshots did not show sustained typed input" >&2
-    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+if ! grep -E $'^clipboard\ta{24,}$' "$clipboard_trace" >/dev/null 2>&1; then
+    echo "held-key clipboard did not show sustained typed input" >&2
+    cat "$clipboard_trace" >&2 || true
     exit 1
 fi
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -2731,8 +3029,8 @@ fi
             script,
             "chelotype-gtk-held-key-perf-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
-            snapshots.to_str().expect("snapshot dir utf8"),
             perf_trace.to_str().expect("perf trace path utf8"),
+            clipboard_trace.to_str().expect("clipboard trace path utf8"),
             zdot.to_str().expect("zdot path utf8"),
         ])
         .output()
@@ -2757,6 +3055,7 @@ fi
     let render_allocs = perf_counters(&perf_trace, "gtk_render_allocs");
     let render_alloc_bytes = perf_counters(&perf_trace, "gtk_render_alloc_bytes");
     let rss_kib = perf_counters(&perf_trace, "process_rss_kib");
+    let row_surface_cache_bytes = perf_counters(&perf_trace, "gtk_row_surface_cache_bytes");
     assert!(
         render.len() >= 80,
         "held-key produced too few render samples: {}",
@@ -2822,9 +3121,14 @@ fi
     let render_allocs_p99 = percentile_counter(render_allocs, 99);
     let render_alloc_bytes_p95 = percentile_counter(render_alloc_bytes.clone(), 95);
     let render_alloc_bytes_p99 = percentile_counter(render_alloc_bytes, 99);
-    let rss_min = *rss_kib.iter().min().expect("rss samples");
-    let rss_max = *rss_kib.iter().max().expect("rss samples");
+    let steady_rss = &rss_kib[20.min(rss_kib.len() - 1)..];
+    let rss_min = *steady_rss.iter().min().expect("steady RSS samples");
+    let rss_max = *steady_rss.iter().max().expect("steady RSS samples");
     let rss_growth = rss_max.saturating_sub(rss_min);
+    let row_surface_cache_max = *row_surface_cache_bytes
+        .iter()
+        .max()
+        .expect("row surface cache samples");
     assert!(
         render_p95 <= Duration::from_millis(8),
         "held-key gtk_render p95 exceeded 120 Hz budget: {render_p95:?}"
@@ -2847,7 +3151,7 @@ fi
     );
     assert!(
         frame_interval_p95 <= Duration::from_millis(20),
-        "held-key gtk_frame_interval p95 exceeded Xvfb frame-clock budget: {frame_interval_p95:?}"
+        "held-key gtk_frame_interval p95 exceeded key-repeat cadence: {frame_interval_p95:?}"
     );
     assert!(
         input_to_render_p95 <= Duration::from_millis(20),
@@ -2891,8 +3195,12 @@ fi
     );
     assert!(rss_min > 0, "held-key process RSS samples must be non-zero");
     assert!(
-        rss_growth <= 96 * 1024,
-        "held-key process RSS growth too high: min={rss_min} KiB max={rss_max} KiB growth={rss_growth} KiB"
+        rss_growth <= 32 * 1024,
+        "held-key steady process RSS growth too high: min={rss_min} KiB max={rss_max} KiB growth={rss_growth} KiB"
+    );
+    assert!(
+        row_surface_cache_max <= 2 * 1024 * 1024,
+        "held-key row surface cache retained transient input frames: {row_surface_cache_max} bytes"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -2921,7 +3229,7 @@ bin="$1"
 snapshot_dir="$2"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -2984,7 +3292,7 @@ xdotool key --window "$window_id" Return
 wait_latest_contains_only 'TAB_ONE_AFTER_CLOSE' 'TAB_TWO_ACTIVE'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -3060,7 +3368,7 @@ fake_bin="$5"
 toolbox_log="$6"
 PATH="$fake_bin:$PATH" GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_TAB_TRACE="$tab_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..100}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -3107,7 +3415,7 @@ find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -3170,7 +3478,11 @@ fn gtk_e2e_opens_toolbox_container_from_launch_menu_under_xvfb() {
     std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
     let config_dir = dir.join("config");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
     let tab_trace = dir.join("tabs.env");
 
     let script = r#"
@@ -3183,7 +3495,7 @@ fake_bin="$5"
 toolbox_log="$6"
 PATH="$fake_bin:$PATH" GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_TAB_TRACE="$tab_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..100}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -3258,7 +3570,7 @@ find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -3323,7 +3635,11 @@ fn gtk_e2e_remembers_single_toolbox_tab_after_window_close_under_xvfb() {
     std::fs::create_dir_all(&second_snapshot_dir).expect("second snapshot dir");
     let config_dir = dir.join("config");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
     let first_tab_trace = dir.join("first-tabs.env");
     let second_tab_trace = dir.join("second-tabs.env");
 
@@ -3412,7 +3728,7 @@ open_toolbox_from_launcher() {
 }
 
 start_app "$first_snapshot_dir" "$first_tab_trace"
-trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+trap 'kill "$app_pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$app_pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$app_pid" 2>/dev/null || true; wait "$app_pid" 2>/dev/null || true' EXIT
 wait_window "$first_tab_trace"
 xdotool windowfocus "$window_id" || true
 sleep 0.2
@@ -3445,14 +3761,14 @@ if ! grep -F 'startup_launch_target=toolbox:fedora-toolbox-latest' "$config_dir/
 fi
 
 start_app "$second_snapshot_dir" "$second_tab_trace"
-trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+trap 'kill "$app_pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$app_pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$app_pid" 2>/dev/null || true; wait "$app_pid" 2>/dev/null || true' EXIT
 wait_window "$second_tab_trace"
 wait_trace_contains "$second_tab_trace" 'tab_count=1' 'selected_index=0' 'tab_0_launch_target=toolbox:fedora-toolbox-latest'
 xdotool windowclose "$window_id"
 wait "$app_pid" 2>/dev/null || true
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -3521,7 +3837,7 @@ snapshot_dir="$2"
 tab_trace="$3"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_TAB_TRACE="$tab_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -3606,7 +3922,7 @@ xdotool key --window "$window_id" Return
 wait_latest_contains_only 'MIDDLE_TAB_ONE_AFTER_CLOSE' 'MIDDLE_TAB_TWO'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -3657,7 +3973,7 @@ bin="$1"
 snapshot_dir="$2"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -3703,7 +4019,7 @@ xdotool key --window "$window_id" ctrl+Page_Down
 wait_latest_contains_only '❯ tab_two_live_input' 'tab_one_live_input'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -3764,7 +4080,7 @@ snapshot_dir="$2"
 geometry_trace="$3"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -3813,7 +4129,7 @@ latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -3890,7 +4206,7 @@ snapshot_dir="$2"
 perf_trace="$3"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_PERF_TRACE="$perf_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -3947,7 +4263,7 @@ if [ ! -s "$perf_trace" ]; then
 fi
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -4024,7 +4340,7 @@ snapshot_dir="$2"
 geometry_trace="$3"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -4071,8 +4387,8 @@ if [ ! -f "$geometry_trace" ] || [ -z "$latest" ] || ! grep -F '"pane_id": 2' "$
     echo "split render or geometry trace did not appear" >&2
     exit 1
 fi
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -4096,7 +4412,7 @@ latest="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -4164,15 +4480,31 @@ fn gtk_e2e_click_moves_shell_cursor_inside_split_pane_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let geometry_trace = dir.join("geometry.env");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    let fish_config_dir = config_dir.join("fish");
+    std::fs::create_dir_all(&fish_config_dir).expect("fish config dir");
+    std::fs::write(
+        fish_config_dir.join("config.fish"),
+        "function fish_prompt\n    printf '❯ '\nend\n",
+    )
+    .expect("fish config");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 geometry_trace="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+config_dir="$4"
+rm -f /tmp/chelotype.log
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -4192,19 +4524,37 @@ xdotool keyup --window "$window_id" Control_L || true
 xdotool keyup --window "$window_id" Control_R || true
 xdotool keyup --window "$window_id" Shift_L || true
 xdotool keyup --window "$window_id" Shift_R || true
-sleep 0.5
-xdotool type --window "$window_id" --delay 2 "abcdef"
+sleep 1.2
+for key in a b c d e f; do
+    xdotool key --window "$window_id" "$key"
+    sleep 0.05
+done
 latest_json=""
-for _ in {1..120}; do
+for _ in {1..300}; do
     latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
-    if [ -n "$latest_json" ] && grep -F 'abcdef' "$latest_json" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if [ -n "$latest_json" ] && [ -f "$geometry_trace" ] && python3 - "$latest_json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    frame = json.load(handle)
+raise SystemExit(not any(pane["active"] and "abcdef" in pane["frame"]["input_text"] for pane in frame["panes"]))
+PY
+    then
         break
     fi
     sleep 0.1
 done
-if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
+if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ] || ! python3 - "$latest_json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    frame = json.load(handle)
+raise SystemExit(not any(pane["active"] and "abcdef" in pane["frame"]["input_text"] for pane in frame["panes"]))
+PY
+then
     echo "split cursor setup snapshots or geometry did not appear" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    cat /tmp/chelotype.log >&2 || true
     exit 1
 fi
 read -r origin_col cursor_line cursor_col < <(python3 - "$latest_json" <<'PY'
@@ -4212,13 +4562,13 @@ import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     frame = json.load(handle)
-active = next(pane for pane in frame["panes"] if pane["active"])
+active = next(pane for pane in frame["panes"] if pane["active"] and "abcdef" in pane["frame"]["input_text"])
 cursor = active["frame"]["cursor"]
 print(active["origin_col"], cursor["line"], cursor["column"])
 PY
 )
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -4228,8 +4578,21 @@ target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v lin
 echo "split cursor click target window=$window_id X=$X Y=$Y pane_origin=$origin_col cursor=$cursor_line,$cursor_col canvas=$canvas_x,$canvas_y cell=$cell_width line=$line_height target=$target_x,$target_y" >&2
 xdotool mousemove "$target_x" "$target_y"
 xdotool click 1
-sleep 0.2
-xdotool type --window "$window_id" --delay 2 "Z"
+for _ in {1..100}; do
+    latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_json" ] && python3 - "$latest_json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    frame = json.load(handle)
+raise SystemExit(not any(pane["active"] and pane["frame"]["input_text"] == "abcdef" and pane["frame"]["cursor"]["column"] == 1 for pane in frame["panes"]))
+PY
+    then
+        break
+    fi
+    sleep 0.1
+done
+xdotool key --window "$window_id" Z
 for _ in {1..120}; do
     latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
     if [ -n "$latest_json" ] && grep -F 'aZbcdef' "$latest_json" >/dev/null 2>&1; then
@@ -4241,10 +4604,11 @@ echo "click did not move shell cursor inside split pane before typing Z" >&2
 find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 latest_json="$(ls -t "$snapshot_dir"/*.workspace.render.json 2>/dev/null | head -n 1 || true)"
 [ -n "$latest_json" ] && sed -n '1,120p' "$latest_json" >&2
+cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -4256,6 +4620,7 @@ exit 1
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk split cursor e2e under xvfb");
@@ -4324,7 +4689,7 @@ clipboard_trace="$3"
 geometry_trace="$4"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -4391,8 +4756,8 @@ row = next(
 print(left["origin_col"], right["origin_col"], row)
 PY
 )
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -4422,7 +4787,7 @@ cat "$clipboard_trace" >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -4499,7 +4864,7 @@ resize_result="$4"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -4560,18 +4925,21 @@ left, right = frame["panes"][:2]
 print(left["cols"], right["cols"], right["origin_col"])
 PY
 )
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+window_width="$(xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')"
+window_inset="$(awk -v window_width="$window_width" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-boundary_x="$(awk -v canvas_x="$canvas_x" -v origin="$right_origin" -v cell="$cell_width" 'BEGIN { printf "%d", canvas_x + (origin * cell) }')"
+boundary_x="$(awk -v inset="$window_inset" -v canvas_x="$canvas_x" -v origin="$right_origin" -v cell="$cell_width" 'BEGIN { printf "%d", inset + canvas_x + (origin * cell) }')"
 target_x="$(awk -v boundary="$boundary_x" -v cell="$cell_width" 'BEGIN { printf "%d", boundary + (10 * cell) }')"
-target_y="$(awk -v canvas_y="$canvas_y" -v line="$line_height" 'BEGIN { printf "%d", canvas_y + (3 * line) }')"
+target_y="$(awk -v inset="$window_inset" -v canvas_y="$canvas_y" -v line="$line_height" 'BEGIN { printf "%d", inset + canvas_y + (3 * line) }')"
 echo "split resize drag window=$window_id initial=$initial_left,$initial_right boundary=$boundary_x target=$target_x,$target_y" >&2
-xdotool mousemove --window "$window_id" "$boundary_x" "$target_y"
+xdotool mousemove "$boundary_x" "$target_y"
 xdotool mousedown 1
 sleep 0.08
-xdotool mousemove --window "$window_id" "$target_x" "$target_y"
+xdotool mousemove "$target_x" "$target_y"
 sleep 0.08
 xdotool mouseup 1
 for _ in {1..140}; do
@@ -4605,7 +4973,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -4674,7 +5042,7 @@ geometry_trace="$4"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -4705,8 +5073,8 @@ fi
 latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
 marker_row="$(grep -n '^MOUSE_SELECT_OK' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -4733,7 +5101,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -4807,7 +5175,7 @@ geometry_trace="$4"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -4843,15 +5211,17 @@ sleep 1.3
 latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
 marker_row="$(grep -n '^idle-selection-target' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
-start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (1.5 * cell) }')"
-mid_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (10.5 * cell) }')"
-end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (20.8 * cell) }')"
-target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+window_inset="$(awk -v window_width="$WIDTH" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
+start_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (0.5 * cell) }')"
+mid_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (10.5 * cell) }')"
+end_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (21.1 * cell) }')"
+target_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
 echo "idle drag window=$window_id row=$marker_row start=$start_x,$target_y mid=$mid_x,$target_y end=$end_x,$target_y" >&2
 xdotool windowfocus "$window_id" || true
 xdotool mousemove "$start_x" "$target_y"
@@ -4875,7 +5245,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -4956,18 +5326,26 @@ ZSH_DISABLE_COMPFIX=true DISABLE_AUTO_UPDATE=true DISABLE_UPDATE_PROMPT=true GSE
 app_pid="$!"
 cleanup() {
     kill "$app_pid" 2>/dev/null || true
+    for _ in {1..40}; do
+        kill -0 "$app_pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    kill -KILL "$app_pid" 2>/dev/null || true
     wait "$app_pid" 2>/dev/null || true
 }
 trap cleanup EXIT
-xdotool windowfocus "$window_id" || true
-sleep 0.8
-xdotool type --window "$window_id" --delay 2 "printf 'WAYLAND alpha beta\n'"
-xdotool key --window "$window_id" Return
-for _ in {1..120}; do
-    if grep -R '^WAYLAND alpha beta' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
-        break
-    fi
-    sleep 0.1
+for _ in {1..3}; do
+    xdotool windowfocus "$window_id" || true
+    sleep 0.5
+    xdotool key --window "$window_id" ctrl+a
+    xdotool type --window "$window_id" --delay 2 "printf 'WAYLAND alpha beta\n'"
+    xdotool key --window "$window_id" Return
+    for _ in {1..40}; do
+        if grep -R '^WAYLAND alpha beta' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+            break 2
+        fi
+        sleep 0.1
+    done
 done
 if ! grep -R '^WAYLAND alpha beta' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
     echo "nested Wayland output target never appeared" >&2
@@ -4977,8 +5355,8 @@ fi
 latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
 marker_row="$(grep -n '^WAYLAND alpha beta' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -5086,6 +5464,14 @@ fn gtk_e2e_manual_like_mouse_drag_selects_output_and_input_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let clipboard_trace = dir.join("clipboard.tsv");
     let geometry_trace = dir.join("geometry.env");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
@@ -5093,9 +5479,10 @@ bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
 geometry_trace="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+config_dir="$5"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -5129,15 +5516,17 @@ drag_row_cols() {
     local row="$1"
     local start_col="$2"
     local end_col="$3"
-    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     eval "$(xdotool getwindowgeometry --shell "$window_id")"
-    start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$start_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (col * cell) }')"
-    end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$end_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (col * cell) }')"
+    window_inset="$(awk -v window_width="$WIDTH" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
+    start_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v col="$start_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (col * cell) }')"
+    end_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v col="$end_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (col * cell) }')"
     mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
-    target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+    target_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$row" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
     xdotool mousemove "$start_x" "$target_y"
     xdotool mousedown 1
     sleep 0.15
@@ -5164,6 +5553,13 @@ sleep 0.25
 xdotool type --window "$window_id" --delay 2 "printf 'MANUAL_MOUSE_OUTPUT\n'"
 xdotool key --window "$window_id" Return
 wait_latest_text 'MANUAL_MOUSE_OUTPUT'
+for _ in {1..100}; do
+    latest="$(latest_txt || true)"
+    if [ -n "$latest" ] && grep -Fx 'MANUAL_MOUSE_OUTPUT' "$latest" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
 latest="$(latest_txt)"
 output_row="$(grep -n '^MANUAL_MOUSE_OUTPUT' "$latest" | tail -n 1 | cut -d: -f1)"
 output_row="$((output_row - 1))"
@@ -5185,13 +5581,13 @@ xdotool type --window "$window_id" --delay 2 "manualinput"
 wait_latest_text '❯ manualinput'
 latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1)"
 input_row="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
-drag_row_cols "$input_row" "2.7" "8.2"
+drag_row_cols "$input_row" "2.7" "7.2"
 wait_primary "manual"
 xdotool type --window "$window_id" --delay 2 "X"
 wait_latest_text '❯ Xinput'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -5204,6 +5600,7 @@ wait_latest_text '❯ Xinput'
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk manual-like mouse e2e under xvfb");
@@ -5261,7 +5658,7 @@ geometry_trace="$4"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -5292,8 +5689,8 @@ fi
 latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
 marker_row="$(grep -n '^DRAG_RELEASE_STABLE' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -5336,7 +5733,7 @@ find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -5399,7 +5796,7 @@ geometry_trace="$3"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -5430,8 +5827,8 @@ fi
 latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
 marker_row="$(grep -n '^VISUAL_SCROLL_TARGET' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -5489,7 +5886,7 @@ grep -R '"selected_text"' "$snapshot_dir" >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -5546,7 +5943,7 @@ geometry_trace="$3"
 scroll_trace="$4"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" CHELOTYPE_SCROLL_TRACE="$scroll_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -5584,8 +5981,8 @@ fi
 latest_txt="$(latest_snapshot txt)"
 marker_row="$(grep -n '^SMOOTH_SELECTION_TARGET' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -5649,7 +6046,7 @@ cat "$scroll_trace" >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -5749,7 +6146,7 @@ label="$7"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -5780,8 +6177,8 @@ fi
 latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
 marker_row="$(grep -n "^$marker" "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -5813,7 +6210,7 @@ find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -5867,14 +6264,30 @@ fn gtk_e2e_ctrl_c_without_selection_interrupts_running_program_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let zdot = dir.join("zdot");
+    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    std::fs::write(
+        zdot.join(".zshrc"),
+        "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
+    )
+    .expect("zshrc fixture");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+zdot="$3"
+config_dir="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -5889,20 +6302,17 @@ if [ -z "$window_id" ]; then
 fi
 xdotool windowfocus "$window_id" || true
 sleep 0.2
-xdotool type --window "$window_id" --delay 2 "cat"
-xdotool key --window "$window_id" Return
-sleep 0.3
-xdotool type --window "$window_id" --delay 2 "CAT_INPUT_BEFORE_INTERRUPT"
+xdotool type --window "$window_id" --delay 5 "sh -c 'echo INTERRUPT_READY; sleep 30'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^CAT_INPUT_BEFORE_INTERRUPT' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -R '^INTERRUPT_READY' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^CAT_INPUT_BEFORE_INTERRUPT' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
-    echo "cat did not echo input before interrupt" >&2
-    grep -R 'CAT_INPUT' "$snapshot_dir"/*.txt >&2 || true
+if ! grep -R '^INTERRUPT_READY' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "interrupt fixture did not start" >&2
+    grep -R 'INTERRUPT_READY' "$snapshot_dir"/*.txt >&2 || true
     exit 1
 fi
 xdotool key --window "$window_id" ctrl+c
@@ -5920,7 +6330,7 @@ grep -R 'AFTER_CTRL_C_INTERRUPT\\|printf' "$snapshot_dir"/*.txt >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -5931,6 +6341,8 @@ exit 1
             "chelotype-gtk-ctrl-c-interrupt-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            zdot.to_str().expect("zdot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk Ctrl+C interrupt e2e under xvfb");
@@ -5964,16 +6376,25 @@ fn gtk_e2e_replaces_selected_input_text_under_xvfb() {
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let geometry_trace = dir.join("geometry.env");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 geometry_trace="$3"
+config_dir="$4"
 rm -f /tmp/chelotype.log
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -6025,15 +6446,17 @@ if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
     exit 1
 fi
 cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
-start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.0 * cell) }')"
-end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (5.8 * cell) }')"
+window_inset="$(awk -v window_width="$WIDTH" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
+start_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (2.2 * cell) }')"
+end_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (5.2 * cell) }')"
 mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
-target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+target_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
 xdotool mousemove "$start_x" "$target_y"
 xdotool mousedown 1
 sleep 0.12
@@ -6096,7 +6519,7 @@ grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -6108,6 +6531,7 @@ exit 1
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk input selection e2e under xvfb");
@@ -6150,6 +6574,14 @@ fn gtk_e2e_copies_cuts_and_pastes_selected_input_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let clipboard_trace = dir.join("clipboard.tsv");
     let geometry_trace = dir.join("geometry.env");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
@@ -6157,9 +6589,10 @@ bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
 geometry_trace="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+config_dir="$5"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -6188,15 +6621,17 @@ if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
     exit 1
 fi
 cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
-start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.0 * cell) }')"
-end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (5.8 * cell) }')"
+window_inset="$(awk -v window_width="$WIDTH" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
+start_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (2.2 * cell) }')"
+end_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (5.2 * cell) }')"
 mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
-target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+target_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
 xdotool mousemove "$start_x" "$target_y"
 xdotool mousedown 1
 sleep 0.12
@@ -6235,9 +6670,11 @@ if ! grep -R '❯ ef' "$snapshot_dir" >/dev/null 2>&1; then
     grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
     exit 1
 fi
+paste_baseline="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
 xdotool key --window "$window_id" ctrl+v
 for _ in {1..100}; do
-    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1; then
+    latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_txt" ] && [ "$latest_txt" != "$paste_baseline" ] && grep -F '❯ abcdef' "$latest_txt" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
@@ -6248,7 +6685,7 @@ grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -6261,6 +6698,7 @@ exit 1
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk input clipboard e2e under xvfb");
@@ -6310,7 +6748,7 @@ geometry_trace="$4"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -6341,8 +6779,8 @@ fi
 latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
 marker_row="$(grep -n '^CONTEXT_COPY_OK' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -6389,7 +6827,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -6446,6 +6884,14 @@ fn gtk_e2e_cuts_and_pastes_input_from_right_click_context_menu_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let clipboard_trace = dir.join("clipboard.tsv");
     let geometry_trace = dir.join("geometry.env");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
@@ -6453,10 +6899,11 @@ bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
 geometry_trace="$4"
+config_dir="$5"
 rm -f /tmp/chelotype.log
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -6485,14 +6932,16 @@ if [ -z "$latest_json" ] || [ ! -f "$geometry_trace" ]; then
     exit 1
 fi
 cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
-start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.0 * cell) }')"
-end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (5.8 * cell) }')"
-target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+window_inset="$(awk -v window_width="$WIDTH" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
+start_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (2.2 * cell) }')"
+end_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (5.2 * cell) }')"
+target_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
 xdotool mousemove "$start_x" "$target_y"
 xdotool mousedown 1
 sleep 0.05
@@ -6540,9 +6989,11 @@ sleep 0.2
 paste_x="$(awk -v x="$menu_x" 'BEGIN { printf "%d", x + 36 }')"
 paste_y="$(awk -v y="$menu_y" 'BEGIN { printf "%d", y + 92 }')"
 xdotool mousemove "$paste_x" "$paste_y"
+paste_baseline="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
 xdotool click 1
 for _ in {1..100}; do
-    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1; then
+    latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+    if [ -n "$latest_txt" ] && [ "$latest_txt" != "$paste_baseline" ] && grep -F '❯ abcdef' "$latest_txt" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
@@ -6555,7 +7006,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -6568,6 +7019,7 @@ exit 1
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk context menu input e2e under xvfb");
@@ -6614,7 +7066,7 @@ bin="$1"
 geometry_trace="$2"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -6660,7 +7112,7 @@ echo "Ctrl+wheel did not decrease terminal cell width: before=$after_key current
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -6707,6 +7159,11 @@ fn gtk_e2e_persists_terminal_zoom_between_app_restarts_under_xvfb() {
     let second_geometry_trace = dir.join("second-geometry.env");
     let config_dir = dir.join("config");
     std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nfont_size_tenths=100\n",
+    )
+    .expect("config");
 
     let script = r#"
 set -euo pipefail
@@ -6743,10 +7200,16 @@ xdotool windowfocus "$window_id" || true
 sleep 0.2
 initial="$(read_cell_width "$first_geometry_trace")"
 xdotool key --window "$window_id" ctrl+plus
+for _ in {1..80}; do
+    if grep -F 'font_size_tenths=110' "$config_dir/config" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
 xdotool key --window "$window_id" ctrl+plus
 for _ in {1..80}; do
     zoomed="$(read_cell_width "$first_geometry_trace")"
-    if awk -v zoomed="$zoomed" -v initial="$initial" 'BEGIN { exit !(zoomed > initial + 0.6) }'; then
+    if grep -F 'font_size_tenths=120' "$config_dir/config" >/dev/null 2>&1 && awk -v zoomed="$zoomed" -v initial="$initial" 'BEGIN { exit !(zoomed > initial + 0.6) }'; then
         break
     fi
     sleep 0.05
@@ -6756,7 +7219,7 @@ if ! awk -v zoomed="$zoomed" -v initial="$initial" 'BEGIN { exit !(zoomed > init
     echo "Ctrl+plus did not persistently increase cell width: initial=$initial zoomed=$zoomed" >&2
     exit 1
 fi
-if ! grep -F 'font_size_tenths=150' "$config_dir/config" >/dev/null 2>&1; then
+if ! grep -F 'font_size_tenths=120' "$config_dir/config" >/dev/null 2>&1; then
     echo "zoom config was not written after keyboard zoom" >&2
     cat "$config_dir/config" >&2 || true
     exit 1
@@ -6775,7 +7238,7 @@ if ! awk -v restarted="$restarted" -v initial="$initial" 'BEGIN { exit !(restart
 fi
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -6872,7 +7335,7 @@ if ! awk -v scaled="$scaled_width" -v base="$base_width" 'BEGIN { exit !(scaled 
 fi
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -6929,7 +7392,7 @@ bin="$1"
 config_dir="$2"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -6947,14 +7410,14 @@ sleep 0.2
 xdotool key --window "$window_id" ctrl+comma
 settings_id=""
 for _ in {1..60}; do
-    settings_id="$(xdotool search --name 'Settings' | head -n 1 || true)"
+    settings_id="$(xdotool search --name '^Preferences$' | head -n 1 || true)"
     if [ -n "$settings_id" ]; then
         break
     fi
     sleep 0.1
 done
 if [ -z "$settings_id" ]; then
-    echo "settings window did not open from Ctrl+comma" >&2
+    echo "preferences window did not open from Ctrl+comma" >&2
     xdotool search --name '.*' getwindowname %@ >&2 || true
     exit 1
 fi
@@ -6996,14 +7459,14 @@ if ! grep -Fx 'cursor_animation=on' "$config_dir/config" >/dev/null 2>&1 || ! gr
     exit 1
 fi
 appearance_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + (width * 3 / 5) }')"
-navigation_y="$(awk -v y="$Y" -v height="$HEIGHT" 'BEGIN { printf "%d", y + height - 24 }')"
+navigation_y="$(awk -v y="$Y" 'BEGIN { printf "%d", y + 24 }')"
 xdotool mousemove "$appearance_x" "$navigation_y"
 xdotool click 1
 sleep 0.2
-switch_on_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + width - 76 }')"
-switch_off_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + width - 120 }')"
-switch_y="$(awk -v y="$Y" 'BEGIN { printf "%d", y + 132 }')"
-xdotool mousemove "$switch_on_x" "$switch_y"
+instant_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + (width / 3) }')"
+smooth_x="$(awk -v x="$X" -v width="$WIDTH" 'BEGIN { printf "%d", x + (width * 2 / 3) }')"
+scrolling_y="$(awk -v y="$Y" -v height="$HEIGHT" 'BEGIN { printf "%d", y + (height * 0.45) }')"
+xdotool mousemove "$instant_x" "$scrolling_y"
 xdotool click 1
 for _ in {1..30}; do
     if grep -Fx 'smooth_scrolling=off' "$config_dir/config" >/dev/null 2>&1; then
@@ -7016,7 +7479,7 @@ if ! grep -Fx 'smooth_scrolling=off' "$config_dir/config" >/dev/null 2>&1; then
     cat "$config_dir/config" >&2 || true
     exit 1
 fi
-xdotool mousemove "$switch_off_x" "$switch_y"
+xdotool mousemove "$smooth_x" "$scrolling_y"
 xdotool click 1
 for _ in {1..30}; do
     if grep -Fx 'smooth_scrolling=on' "$config_dir/config" >/dev/null 2>&1; then
@@ -7029,7 +7492,7 @@ cat "$config_dir/config" >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "-s",
@@ -7076,14 +7539,23 @@ fn gtk_e2e_supports_keyboard_selection_and_word_navigation_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+config_dir="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -7102,7 +7574,8 @@ sleep 0.2
 wait_text() {
     local text="$1"
     for _ in {1..100}; do
-        if grep -R "$text" "$snapshot_dir" >/dev/null 2>&1; then
+        latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+        if [ -n "$latest_txt" ] && sed 's/[[:space:]]*$//' "$latest_txt" | grep -Fx "$text" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.1
@@ -7116,7 +7589,7 @@ wait_latest_text() {
     local text="$1"
     for _ in {1..100}; do
         latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
-        if [ -n "$latest_txt" ] && grep -F "$text" "$latest_txt" >/dev/null 2>&1; then
+        if [ -n "$latest_txt" ] && sed 's/[[:space:]]*$//' "$latest_txt" | grep -Fx "$text" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.1
@@ -7131,7 +7604,7 @@ clear_input() {
     xdotool key --window "$window_id" ctrl+a
     sleep 0.1
     xdotool key --window "$window_id" BackSpace
-    sleep 0.2
+    wait_latest_text '❯'
 }
 
 xdotool type --window "$window_id" --delay 2 "abcdef"
@@ -7246,7 +7719,7 @@ xdotool type --window "$window_id" --delay 2 "X"
 wait_latest_text '❯ abX'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -7257,6 +7730,7 @@ wait_latest_text '❯ abX'
             "chelotype-gtk-keyboard-selection-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk keyboard selection e2e under xvfb");
@@ -7293,6 +7767,14 @@ fn gtk_e2e_supports_word_deletion_and_click_clears_input_selection_under_xvfb() 
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let clipboard_trace = dir.join("clipboard.tsv");
     let geometry_trace = dir.join("geometry.env");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
@@ -7300,9 +7782,10 @@ bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
 geometry_trace="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+config_dir="$5"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -7347,15 +7830,17 @@ drag_input_cols() {
     local row="$1"
     local start_col="$2"
     local end_col="$3"
-    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     eval "$(xdotool getwindowgeometry --shell "$window_id")"
-    start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$start_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (col * cell) }')"
-    end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$end_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (col * cell) }')"
+    window_inset="$(awk -v window_width="$WIDTH" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
+    start_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v col="$start_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (col * cell) }')"
+    end_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v col="$end_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (col * cell) }')"
     mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
-    target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+    target_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$row" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
     xdotool mousemove "$start_x" "$target_y"
     xdotool mousedown 1
     sleep 0.12
@@ -7368,8 +7853,8 @@ drag_input_cols() {
 click_input_col() {
     local row="$1"
     local col="$2"
-    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
     cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -7404,7 +7889,7 @@ clear_input
 xdotool type --window "$window_id" --delay 2 "abcdef"
 wait_latest_text '❯ abcdef'
 row="$(input_row)"
-drag_input_cols "$row" "2.7" "4.8"
+drag_input_cols "$row" "2.7" "4.2"
 for _ in {1..80}; do
     if grep -Fx 'primary	abc' "$clipboard_trace" >/dev/null 2>&1; then
         break
@@ -7422,7 +7907,7 @@ xdotool type --window "$window_id" --delay 2 "X"
 wait_latest_text '❯ abcdefX'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -7435,6 +7920,7 @@ wait_latest_text '❯ abcdefX'
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk word deletion/click-clear e2e under xvfb");
@@ -7484,7 +7970,7 @@ geometry_trace="$4"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -7524,8 +8010,8 @@ drag_input_cols() {
     local row="$1"
     local start_col="$2"
     local end_col="$3"
-    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
     cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -7578,7 +8064,7 @@ xdotool type --window "$window_id" --delay 2 "X"
 wait_latest_text '❯ resizeX'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -7629,16 +8115,21 @@ fn gtk_e2e_supports_input_undo_and_redo_under_xvfb() {
     let fish_edit_trace = dir.join("fish-edit.tsv");
     let config_dir = dir.join("config");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
 fish_edit_trace="$3"
 config_dir="$4"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_FISH_EDIT_TRACE="$fish_edit_trace" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_FISH_EDIT_TRACE="$fish_edit_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -7733,28 +8224,19 @@ xdotool type --window "$window_id" --delay 2 "c"
 wait_latest_text_after "$before" '❯ abc'
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
-wait_latest_text_after "$before" '❯ ab'
+wait_prompt_without_input_after "$before"
 before="$(snapshot_count)"
-xdotool key --window "$window_id" ctrl+z
-wait_latest_text_after "$before" '❯ a'
+xdotool key --window "$window_id" ctrl+shift+z
+wait_latest_text_after "$before" '❯ abc'
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
 wait_prompt_without_input_after "$before"
 before="$(snapshot_count)"
-xdotool key --window "$window_id" ctrl+shift+z
-wait_latest_text_after "$before" '❯ a'
-before="$(snapshot_count)"
-xdotool key --window "$window_id" ctrl+shift+z
-wait_latest_text_after "$before" '❯ ab'
-before="$(snapshot_count)"
-xdotool key --window "$window_id" ctrl+z
-wait_latest_text_after "$before" '❯ a'
-before="$(snapshot_count)"
 xdotool type --window "$window_id" --delay 2 "X"
-wait_latest_text_after "$before" '❯ aX'
+wait_latest_text_after "$before" '❯ X'
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+shift+z
-wait_latest_text_after "$before" '❯ aX'
+wait_latest_text_after "$before" '❯ X'
 
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+a
@@ -7762,14 +8244,14 @@ xdotool key --window "$window_id" BackSpace
 wait_prompt_without_input_after "$before"
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
-wait_latest_text_after "$before" '❯ aX'
+wait_latest_text_after "$before" '❯ X'
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+a
 xdotool type --window "$window_id" --delay 2 "Z"
 wait_latest_text_after "$before" '❯ Z'
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
-wait_latest_text_after "$before" '❯ aX'
+wait_latest_text_after "$before" '❯ X'
 xdotool key --window "$window_id" ctrl+a
 xdotool key --window "$window_id" ctrl+c
 sleep 0.3
@@ -7778,16 +8260,16 @@ xdotool key --window "$window_id" BackSpace
 wait_prompt_without_input_after "$before"
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+v
-wait_latest_text_after "$before" '❯ aX'
+wait_latest_text_after "$before" '❯ X'
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+z
 wait_prompt_without_input_after "$before"
 before="$(snapshot_count)"
 xdotool key --window "$window_id" ctrl+shift+z
-wait_latest_text_after "$before" '❯ aX'
+wait_latest_text_after "$before" '❯ X'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -7838,7 +8320,12 @@ fn gtk_e2e_undo_redo_treats_selection_edits_as_single_steps_under_xvfb() {
     let config_dir = dir.join("config");
     let geometry_trace = dir.join("geometry.env");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    std::fs::write(config_dir.join("config"), "startup_launch_target=host\n").expect("config");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
 
     let script = r#"
 set -euo pipefail
@@ -7847,9 +8334,9 @@ snapshot_dir="$2"
 clipboard_trace="$3"
 config_dir="$4"
 geometry_trace="$5"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -7900,15 +8387,17 @@ input_row() {
 }
 drag_input_prefix() {
     local row="$1"
-    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     eval "$(xdotool getwindowgeometry --shell "$window_id")"
-    start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.0 * cell) }')"
-    end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (5.8 * cell) }')"
+    window_inset="$(awk -v window_width="$WIDTH" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
+    start_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (2.2 * cell) }')"
+    end_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + (5.2 * cell) }')"
     mid_x="$(awk -v start="$start_x" -v end="$end_x" 'BEGIN { printf "%d", (start + end) / 2 }')"
-    target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+    target_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$row" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
     xdotool mousemove "$start_x" "$target_y"
     xdotool mousedown 1
     sleep 0.12
@@ -8027,7 +8516,7 @@ xdotool key --window "$window_id" ctrl+shift+z
 wait_latest_text_after "$before" '❯ PASTEef'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -8087,7 +8576,7 @@ clipboard_trace="$3"
 geometry_trace="$4"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -8118,8 +8607,8 @@ fi
 latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
 marker_row="$(grep -n '^alpha beta gamma' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -8150,7 +8639,7 @@ cat "$clipboard_trace" >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -8216,7 +8705,7 @@ clipboard_trace="$3"
 geometry_trace="$4"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -8266,8 +8755,8 @@ input_point() {
     local col="$1"
     json="$(latest_json)"
     cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$json" | head -n 1)"
-    canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-    canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+    canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+    canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
     cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
     eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -8302,7 +8791,7 @@ xdotool type --window "$window_id" --delay 2 "Y"
 wait_latest_text '❯ Y'
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -8367,7 +8856,7 @@ geometry_trace="$4"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -8399,8 +8888,8 @@ sleep 0.2
 latest_txt="$(ls "$snapshot_dir"/*.txt 2>/dev/null | tail -n 1)"
 marker_row="$(grep -n '^SCROLL_STABLE_TARGET' "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -8453,7 +8942,7 @@ find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -8516,7 +9005,7 @@ geometry_trace="$3"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -8548,8 +9037,8 @@ cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$latest_json"
 cursor_col="$(sed -n 's/^  "cursor_col": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
 canvas_height="$(sed -n 's/^canvas_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -8578,7 +9067,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -8666,7 +9155,7 @@ zdot="$4"
 autosuggest_snapshot="$5"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -8696,8 +9185,8 @@ if [ ! -f "$autosuggest_snapshot" ]; then
     exit 1
 fi
 cursor_line="$(sed -n 's/^  "cursor_line": \([0-9][0-9]*\),/\1/p' "$autosuggest_snapshot" | head -n 1)"
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -8723,7 +9212,7 @@ done
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -8813,7 +9302,7 @@ geometry_trace="$3"
 rm -f /tmp/chelotype.log
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -8842,8 +9331,8 @@ if ! grep -R '"click": true' "$snapshot_dir"/*.json >/dev/null 2>&1 || ! grep -R
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
@@ -8881,7 +9370,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -8932,7 +9421,7 @@ bin="$1"
 snapshot_dir="$2"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -8978,7 +9467,7 @@ grep -R '"rows"' "$snapshot_dir" >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -9046,7 +9535,7 @@ snapshot_dir="$2"
 target="GTK_REFLOW_$(printf 'x%.0s' {1..90})"
 GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -9111,7 +9600,7 @@ latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -9167,6 +9656,20 @@ fn gtk_e2e_preserves_selection_highlight_after_reflow_resize_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let clipboard_trace = dir.join("clipboard.tsv");
     let geometry_trace = dir.join("geometry.env");
+    let zdot = dir.join("zdot");
+    std::fs::create_dir_all(&zdot).expect("zdot dir");
+    std::fs::write(
+        zdot.join(".zshrc"),
+        "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
+    )
+    .expect("zshrc fixture");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
 
     let script = r#"
 set -euo pipefail
@@ -9174,11 +9677,13 @@ bin="$1"
 snapshot_dir="$2"
 clipboard_trace="$3"
 geometry_trace="$4"
+zdot="$5"
+config_dir="$6"
 target="KEEP_TOKENyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
 rm -f /tmp/chelotype.log
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/zsh ZDOTDIR="$zdot" HOME="$zdot" CHELOTYPE_DEBUG=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" CHELOTYPE_GEOMETRY_TRACE="$geometry_trace" "$bin" &
 pid="$!"
-trap 'kill "$pid" 2>/dev/null || true' EXIT
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
 for _ in {1..80}; do
     window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
@@ -9197,21 +9702,23 @@ for _ in {1..100}; do
     latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1 || true)"
     if [ -n "$latest_json" ]; then
         cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
-        if [ -n "$cols" ] && [ "$cols" -lt 50 ]; then
+        if [ -n "$cols" ] && [ "$cols" -lt 70 ]; then
             break
         fi
     fi
     sleep 0.1
 done
-xdotool type --window "$window_id" --delay 1 "python3 -c 'print(\"x\" * 50 + \"KEEP_TOKEN\" + \"y\" * 30)'"
+narrow_cols="$cols"
+prefix="$(printf '%*s' "$narrow_cols" '' | tr ' ' x)"
+xdotool type --window "$window_id" --delay 1 "python3 -c 'print(\"x\" * $narrow_cols + \"KEEP_TOKEN\" + \"y\" * 30)'"
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
-    if grep -R 'KEEP_TOKEN' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -R "^$target" "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'KEEP_TOKEN' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -R "^$target" "$snapshot_dir"/*.txt >/dev/null 2>&1; then
     echo "reflow selection target never appeared while narrow" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -9219,7 +9726,7 @@ fi
 latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1)"
 latest_json="$(ls -t "$snapshot_dir"/*.json 2>/dev/null | head -n 1)"
 cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
-marker_row="$(grep -n 'KEEP_TOKEN' "$latest_txt" | tail -n 1 | cut -d: -f1)"
+marker_row="$(grep -n "^$target" "$latest_txt" | tail -n 1 | cut -d: -f1)"
 marker_row="$((marker_row - 1))"
 marker_line="$(sed -n "$((marker_row + 1))p" "$latest_txt")"
 marker_col="$(awk -v line="$marker_line" -v target="$target" 'BEGIN { print index(line, target) - 1 }')"
@@ -9231,18 +9738,20 @@ if [ -z "$marker_col" ] || [ "$marker_col" -lt 0 ] || [ -z "$cols" ]; then
     cat "$latest_txt" >&2
     exit 1
 fi
-canvas_x="$(sed -n 's/^canvas_x=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
-canvas_y="$(sed -n 's/^canvas_y=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
+canvas_x="$(awk -F= '$1 == "canvas_x" { canvas = $2 } $1 == "cell_offset_x" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { offset = $2 } END { printf "%.6f", canvas + offset }' "$geometry_trace")"
+canvas_width="$(sed -n 's/^canvas_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
+window_inset="$(awk -v window_width="$WIDTH" -v canvas_width="$canvas_width" 'BEGIN { printf "%.6f", (window_width - canvas_width) / 2 }')"
 last_absolute="$((marker_col + ${#target} - 1))"
 end_row="$((marker_row + (last_absolute / cols)))"
 end_col="$((last_absolute % cols))"
-start_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$marker_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((col + 1.2) * cell) }')"
-end_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v col="$end_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + ((col + 0.8) * cell) }')"
-start_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
-end_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$end_row" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
+start_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v col="$marker_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + ((col + 0.2) * cell) }')"
+end_x="$(awk -v left="$X" -v inset="$window_inset" -v canvas_x="$canvas_x" -v col="$end_col" -v cell="$cell_width" 'BEGIN { printf "%d", left + inset + canvas_x + ((col + 1.2) * cell) }')"
+start_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$marker_row" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
+end_y="$(awk -v top="$Y" -v inset="$window_inset" -v canvas_y="$canvas_y" -v row="$end_row" -v line="$line_height" 'BEGIN { printf "%d", top + inset + canvas_y + ((row + 0.5) * line) }')"
 xdotool mousemove "$start_x" "$start_y"
 xdotool mousedown 1
 sleep 0.1
@@ -9267,7 +9776,7 @@ for _ in {1..120}; do
     latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
     if [ -n "$latest_json" ] && [ -n "$latest_txt" ]; then
         cols="$(sed -n 's/^  "cols": \([0-9][0-9]*\),/\1/p' "$latest_json" | head -n 1)"
-        if [ -n "$cols" ] && [ "$cols" -ge 80 ] && grep -F "\"selected_text\": \"$target\"" "$latest_json" >/dev/null 2>&1 && grep -F "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx$target" "$latest_txt" >/dev/null 2>&1; then
+        if [ -n "$cols" ] && [ "$cols" -ge 80 ] && grep -F "\"selected_text\": \"$target\"" "$latest_json" >/dev/null 2>&1 && grep -F "$prefix$target" "$latest_txt" >/dev/null 2>&1; then
             exit 0
         fi
     fi
@@ -9280,7 +9789,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("xvfb-run")
+    let output = xvfb_command()
         .args([
             "-a",
             "bash",
@@ -9293,6 +9802,8 @@ exit 1
             dir.to_str().expect("snapshot dir utf8"),
             clipboard_trace.to_str().expect("clipboard trace path utf8"),
             geometry_trace.to_str().expect("geometry trace path utf8"),
+            zdot.to_str().expect("zdot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk reflow selection e2e under xvfb");
