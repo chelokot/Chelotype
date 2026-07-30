@@ -57,7 +57,7 @@ modules:
         PATH: /usr/lib/sdk/rust-stable/bin:/app/bin:/usr/bin
     build-commands:
       - rm -rf .git
-      - cargo --offline build --release --locked
+      - cargo --offline build --release --locked --features libghostty-vt/link-dynamic
       - install -Dm755 target/release/chelotype /app/bin/chelotype
       - install -Dm755 "$(find target/release/build/libghostty-vt-sys-*/out/ghostty-install/lib -name libghostty-vt.so.0.1.0 -print -quit)" /app/lib/libghostty-vt.so.0.1.0
       - ln -sf libghostty-vt.so.0.1.0 /app/lib/libghostty-vt.so.0
