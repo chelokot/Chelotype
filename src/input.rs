@@ -130,6 +130,9 @@ pub fn key_to_action(key: gdk::Key, keycode: u32, state: gdk::ModifierType) -> O
     if ctrl && shift && key_matches(key, keycode, PhysicalKey::C, &['c']) {
         return Some(KeyAction::CopySelection);
     }
+    if ctrl && shift && key_matches(key, keycode, PhysicalKey::V, &['v']) {
+        return Some(KeyAction::PasteClipboard);
+    }
     if ctrl && shift && key_matches(key, keycode, PhysicalKey::T, &['t']) {
         return Some(KeyAction::NewTab);
     }
@@ -563,6 +566,13 @@ mod tests {
         );
         assert_eq!(
             key_to_action(gdk::Key::v, gdk::ModifierType::CONTROL_MASK),
+            Some(KeyAction::PasteClipboard)
+        );
+        assert_eq!(
+            key_to_action(
+                gdk::Key::v,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
             Some(KeyAction::PasteClipboard)
         );
         assert_eq!(

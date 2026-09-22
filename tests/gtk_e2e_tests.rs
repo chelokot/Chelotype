@@ -3585,6 +3585,7 @@ xdotool key --window "$window_id" Page_Up
 xdotool key --window "$window_id" Page_Down
 xdotool key --window "$window_id" shift+Tab
 xdotool key --window "$window_id" ctrl+Left
+xdotool key --window "$window_id" ctrl+shift+Up
 xdotool key --window "$window_id" ctrl+a
 xdotool key --window "$window_id" ctrl+x
 for _ in {1..100}; do
@@ -3634,7 +3635,7 @@ fi
         .join("\n");
     assert!(
         text.contains(
-            "RAW_KEYS=1b4f501b4f511b5b32347e1b5b327e1b5b357e1b5b367e1b5b5a1b5b313b35440118"
+            "RAW_KEYS=1b4f501b4f511b5b32347e1b5b327e1b5b357e1b5b367e1b5b5a1b5b313b35441b5b313b36410118"
         ),
         "unexpected alternate-screen key bytes: {text}"
     );

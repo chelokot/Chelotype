@@ -2416,7 +2416,8 @@ fn alternate_screen_key_action(
                     .expect("alternate-screen editing action must map to terminal bytes"),
             ))
         }
-        KeyAction::SelectInput
+        KeyAction::SelectCommandBlockOutput(_)
+        | KeyAction::SelectInput
         | KeyAction::CutSelection
         | KeyAction::UndoInput
         | KeyAction::RedoInput => Some(KeyAction::Write(
