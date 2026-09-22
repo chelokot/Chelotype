@@ -84,6 +84,10 @@ fn build_ui(app: &Application) {
     tab_bar.set_hexpand(true);
     tab_bar.set_halign(gtk::Align::Fill);
     tab_bar.set_view(Some(&tab_view));
+    let tab_overlay = gtk::Overlay::new();
+    tab_overlay.set_hexpand(true);
+    tab_overlay.set_child(Some(&tab_bar));
+    let rename_editor = std::rc::Rc::new(std::cell::RefCell::new(None::<gtk::EditableLabel>));
     let tab_pages = std::rc::Rc::new(std::cell::RefCell::new(TabPages::default()));
     let new_tab_button = gtk::Button::builder()
         .icon_name("tab-new-symbolic")
@@ -114,15 +118,10 @@ fn build_ui(app: &Application) {
         .tooltip_text("Main menu")
         .menu_model(&main_menu_model())
         .build();
-    let session_context_indicator = gtk::Label::builder()
-        .css_classes(["terminal-session-context"])
-        .visible(false)
-        .build();
     let header = adw::HeaderBar::new();
     header.add_css_class("terminal-header");
     header.pack_start(&launcher);
-    header.set_title_widget(Some(&tab_bar));
-    header.pack_end(&session_context_indicator);
+    header.set_title_widget(Some(&tab_overlay));
     header.pack_end(&app_menu_button);
 
     let canvas = TerminalCanvas::new();
@@ -225,8 +224,12 @@ fn build_ui(app: &Application) {
     };
 
     configure_launch_menu(&launch_menu_button, tab_context.clone(), last_size.clone());
-    install_tab_actions(&window, &tab_bar, tab_context.clone(), last_size.clone());
-    connect_native_tabs(&tab_view, tab_context.clone(), last_size.clone());
+    connect_native_tabs(
+        &tab_view,
+        tab_context.clone(),
+        rename_editor.clone(),
+        last_size.clone(),
+    );
     {
         let tabs = tab_context.clone();
         let last_size = last_size.clone();
@@ -333,7 +336,15 @@ fn build_ui(app: &Application) {
         let window = window.clone();
         let canvas = canvas.clone();
         let pending_style_refresh = pending_style_refresh.clone();
+        let rename_editor = rename_editor.clone();
         key_controller.connect_key_pressed(move |_ctrl, key, keycode, state| {
+            if rename_editor
+                .borrow()
+                .as_ref()
+                .is_some_and(gtk::EditableLabel::is_editing)
+            {
+                return glib::Propagation::Proceed;
+            }
             let alternate_screen = workspace.borrow_mut().active_alternate_screen();
             if let Some(action) = key_to_action(key, keycode, state) {
                 let action = alternate_screen
@@ -579,7 +590,19 @@ fn build_ui(app: &Application) {
             }
         });
     }
-    window.add_controller(key_controller);
+    window.add_controller(key_controller.clone());
+    install_tab_actions(
+        &window,
+        &tab_bar,
+        TabRenameControls {
+            overlay: tab_overlay.clone(),
+            key_controller: key_controller.clone(),
+            im_context: im_context.clone(),
+            editor: rename_editor.clone(),
+        },
+        tab_context.clone(),
+        last_size.clone(),
+    );
 
     let click_controller = gtk::GestureClick::new();
     click_controller.set_button(0);
@@ -1872,13 +1895,9 @@ fn build_ui(app: &Application) {
     window.present();
 
     let session_context_header = header.downgrade();
-    let session_context_indicator = session_context_indicator.downgrade();
     let last_session_context = std::cell::Cell::new(None);
     glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
         let Some(header) = session_context_header.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        let Some(indicator) = session_context_indicator.upgrade() else {
             return glib::ControlFlow::Break;
         };
         let Some(workspace) = session_context_workspace.upgrade() else {
@@ -1886,7 +1905,7 @@ fn build_ui(app: &Application) {
         };
         let context = workspace.borrow().active_session_context();
         if last_session_context.get() != Some(context) {
-            update_session_context_header(&header, &indicator, context);
+            update_session_context_header(&header, context);
             last_session_context.set(Some(context));
         }
         glib::ControlFlow::Continue
@@ -2206,9 +2225,18 @@ fn tab_menu_model() -> gio::Menu {
     menu
 }
 
+#[derive(Clone)]
+struct TabRenameControls {
+    overlay: gtk::Overlay,
+    key_controller: gtk::EventControllerKey,
+    im_context: gtk::IMMulticontext,
+    editor: std::rc::Rc<std::cell::RefCell<Option<gtk::EditableLabel>>>,
+}
+
 fn install_tab_actions(
     window: &adw::ApplicationWindow,
     tab_bar: &adw::TabBar,
+    rename_controls: TabRenameControls,
     tabs: TabContext,
     last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
 ) {
@@ -2224,10 +2252,14 @@ fn install_tab_actions(
     {
         let tabs = tabs.clone();
         let menu_target = menu_target.clone();
-        let parent = tab_bar.clone().upcast::<gtk::Widget>();
+        let tab_bar = tab_bar.clone();
+        let rename_controls = rename_controls.clone();
         rename.connect_activate(move |_action, _parameter| {
-            if let Some(id) = menu_target.get().or_else(|| active_tab_id(&tabs)) {
-                open_rename_popover(id, &parent, &tabs);
+            if let Some(id) = menu_target.get().or_else(|| active_tab_id(&tabs))
+                && let Some(page) = tabs.tab_pages.borrow().page_for_id(id)
+                && let Some(tab_widget) = find_tab_widget(&tab_bar.clone().upcast(), &page)
+            {
+                start_inline_tab_rename(id, &tab_widget, &tabs, &rename_controls);
             }
         });
     }
@@ -2289,12 +2321,20 @@ fn install_tab_actions(
     {
         let tabs = tabs.clone();
         let tab_bar = tab_bar.clone();
-        let parent = tab_bar.clone().upcast::<gtk::Widget>();
-        double_click.connect_pressed(move |_gesture, count, x, y| {
+        let rename_controls = rename_controls.clone();
+        double_click.connect_pressed(move |gesture, count, x, y| {
             if count == 2
-                && let Some(id) = tab_id_at_point(&tab_bar, &tabs, x, y)
+                && let Some(tab_widget) = tab_widget_at_point(&tab_bar, x, y)
             {
-                open_rename_popover(id, &parent, &tabs);
+                let page = tab_widget.property::<adw::TabPage>("page");
+                if let Some(id) = tabs.tab_pages.borrow().id_for_page(&page) {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    let tabs = tabs.clone();
+                    let rename_controls = rename_controls.clone();
+                    glib::idle_add_local_once(move || {
+                        start_inline_tab_rename(id, &tab_widget, &tabs, &rename_controls);
+                    });
+                }
             }
         });
     }
@@ -2330,12 +2370,17 @@ fn install_tab_actions(
 fn connect_native_tabs(
     tab_view: &adw::TabView,
     tabs: TabContext,
+    rename_editor: std::rc::Rc<std::cell::RefCell<Option<gtk::EditableLabel>>>,
     last_size: std::rc::Rc<std::cell::Cell<Option<ScreenSize>>>,
 ) {
     {
         let tabs = tabs.clone();
+        let rename_editor = rename_editor.clone();
         let last_size = last_size.clone();
         tab_view.connect_selected_page_notify(move |view| {
+            if let Some(editor) = rename_editor.borrow().clone() {
+                editor.stop_editing(true);
+            }
             let Some(page) = view.selected_page() else {
                 return;
             };
@@ -2369,7 +2414,11 @@ fn connect_native_tabs(
     }
     {
         let tabs = tabs.clone();
+        let rename_editor = rename_editor.clone();
         tab_view.connect_close_page(move |_view, page| {
+            if let Some(editor) = rename_editor.borrow().clone() {
+                editor.stop_editing(false);
+            }
             let Some(id) = tabs.tab_pages.borrow().id_for_page(page) else {
                 return glib::Propagation::Stop;
             };
@@ -2428,15 +2477,28 @@ fn alternate_screen_key_action(
     }
 }
 
-fn tab_id_at_point(tab_bar: &adw::TabBar, tabs: &TabContext, x: f64, y: f64) -> Option<TabId> {
+fn tab_widget_at_point(tab_bar: &adw::TabBar, x: f64, y: f64) -> Option<gtk::Widget> {
     let mut widget = tab_bar.pick(x, y, gtk::PickFlags::DEFAULT)?;
     loop {
         if widget.css_name() == "tab" {
-            let page = widget.property::<adw::TabPage>("page");
-            return tabs.tab_pages.borrow().id_for_page(&page);
+            return Some(widget);
         }
         widget = widget.parent()?;
     }
+}
+
+fn find_tab_widget(widget: &gtk::Widget, page: &adw::TabPage) -> Option<gtk::Widget> {
+    if widget.css_name() == "tab" && widget.property::<adw::TabPage>("page") == *page {
+        return Some(widget.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(tab) = find_tab_widget(&current, page) {
+            return Some(tab);
+        }
+        child = current.next_sibling();
+    }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -2488,39 +2550,76 @@ fn close_other_tabs(tabs: &TabContext, id: TabId, size: Option<ScreenSize>) {
     activate_workspace_tab(tabs, id, size);
 }
 
-fn open_rename_popover(id: TabId, parent: &gtk::Widget, tabs: &TabContext) {
-    let popover = gtk::Popover::new();
-    popover.set_parent(parent);
-    let entry = gtk::Entry::builder()
-        .text(
-            tabs.workspace
-                .borrow()
-                .tab_title(id)
-                .unwrap_or_else(|| "Terminal".to_string()),
-        )
-        .activates_default(true)
+fn start_inline_tab_rename(
+    id: TabId,
+    tab_widget: &gtk::Widget,
+    tabs: &TabContext,
+    controls: &TabRenameControls,
+) {
+    if let Some(editor) = controls.editor.borrow().as_ref() {
+        editor.grab_focus();
+        return;
+    }
+    let Some(page) = tabs.tab_pages.borrow().page_for_id(id) else {
+        return;
+    };
+    let title = page.title();
+    let editor = gtk::EditableLabel::builder()
+        .text(title)
+        .xalign(0.5)
         .build();
-    entry.add_css_class("terminal-rename-entry");
-    popover.set_child(Some(&entry));
+    let editor_weak = editor.downgrade();
+    let tab_weak = tab_widget.downgrade();
+    let position_handler = controls
+        .overlay
+        .connect_get_child_position(move |overlay, child| {
+            let editor = editor_weak.upgrade()?;
+            if *child != editor.clone().upcast::<gtk::Widget>() {
+                return None;
+            }
+            let tab = tab_weak.upgrade()?;
+            let bounds = tab.compute_bounds(overlay)?;
+            Some(gtk::gdk::Rectangle::new(
+                bounds.x().round() as i32 + 12,
+                bounds.y().round() as i32 + 2,
+                (bounds.width().round() as i32 - 36).max(40),
+                (bounds.height().round() as i32 - 4).max(24),
+            ))
+        });
+    let position_handler = std::rc::Rc::new(std::cell::RefCell::new(Some(position_handler)));
     {
         let tabs = tabs.clone();
-        let popover = popover.clone();
-        entry.connect_activate(move |entry| {
-            if tabs
-                .workspace
-                .borrow_mut()
-                .rename(id, entry.text().to_string())
-            {
-                tabs.tab_pages
-                    .borrow()
-                    .sync_title(&tabs.workspace.borrow(), id);
+        let controls = controls.clone();
+        let position_handler = position_handler.clone();
+        editor.connect_editing_notify(move |editor| {
+            if editor.is_editing() {
+                return;
             }
-            popover.popdown();
+            tabs.workspace
+                .borrow_mut()
+                .rename(id, editor.text().to_string());
+            tabs.tab_pages
+                .borrow()
+                .sync_title(&tabs.workspace.borrow(), id);
+            controls
+                .key_controller
+                .set_im_context(Some(&controls.im_context));
+            if let Some(handler) = position_handler.borrow_mut().take() {
+                controls.overlay.disconnect(handler);
+            }
+            controls.overlay.remove_overlay(editor);
+            controls.editor.borrow_mut().take();
         });
     }
-    popover.popup();
-    entry.grab_focus();
-    entry.select_region(0, -1);
+    page.set_title(" ");
+    controls.overlay.add_overlay(&editor);
+    *controls.editor.borrow_mut() = Some(editor.clone());
+    controls
+        .key_controller
+        .set_im_context(None::<&gtk::IMMulticontext>);
+    editor.start_editing();
+    editor.grab_focus();
+    editor.select_region(0, -1);
 }
 
 fn activate_workspace_tab(tabs: &TabContext, id: TabId, size: Option<ScreenSize>) {
@@ -5886,7 +5985,6 @@ fn trace_clipboard_export(kind: &str, text: &str) {
 
 fn update_session_context_header(
     header: &adw::HeaderBar,
-    indicator: &gtk::Label,
     context: crate::session_context::SessionContext,
 ) {
     const CONTEXT_CLASSES: [&str; 5] = [
@@ -5898,14 +5996,8 @@ fn update_session_context_header(
     ];
     for class_name in CONTEXT_CLASSES {
         header.remove_css_class(class_name);
-        indicator.remove_css_class(class_name);
     }
-    let class_name = context.header_css_class();
-    header.add_css_class(class_name);
-    indicator.add_css_class(class_name);
-    indicator.set_label(context.indicator_label().unwrap_or_default());
-    indicator.set_visible(context.indicator_label().is_some());
-    indicator.set_tooltip_text(Some(context.tooltip()));
+    header.add_css_class(context.header_css_class());
 }
 
 fn install_style(canvas: &gtk::DrawingArea, provider: &gtk::CssProvider) {
@@ -5968,31 +6060,8 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
             color: @accent_fg_color;
         }
         .terminal-header.session-context-root-ssh {
-            background-color: mix(alpha(@error_bg_color, 0.22), alpha(@accent_bg_color, 0.22), 0.5);
+            background-color: alpha(@error_bg_color, 0.22);
             color: @error_fg_color;
-        }
-        .terminal-header.session-context-unknown {
-            background-color: alpha(@warning_bg_color, 0.18);
-            color: @warning_fg_color;
-        }
-        .terminal-session-context {
-            border-radius: 0.375rem;
-            margin: 0.25rem;
-            padding: 0.125rem 0.5rem;
-            font-weight: 700;
-        }
-        .terminal-session-context.session-context-root,
-        .terminal-session-context.session-context-root-ssh {
-            background-color: @error_bg_color;
-            color: @error_fg_color;
-        }
-        .terminal-session-context.session-context-ssh {
-            background-color: @accent_bg_color;
-            color: @accent_fg_color;
-        }
-        .terminal-session-context.session-context-unknown {
-            background-color: @warning_bg_color;
-            color: @warning_fg_color;
         }
         drawingarea.term-canvas {
             background-color: transparent;
@@ -6054,10 +6123,6 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
         }
         popover.tab-menu .launch-targets-header {
             padding: 0.75rem 0.375rem 0.375rem 0.75rem;
-        }
-        .terminal-rename-entry {
-            min-width: 13rem;
-            margin: 0.5rem;
         }
         viewswitcherbar {
             background-color: @chelotype_chrome_bg;

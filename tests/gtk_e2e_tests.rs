@@ -2563,7 +2563,7 @@ exit 1
 
 #[test]
 #[serial]
-fn gtk_e2e_replays_non_latin_key_event_through_input_mapping_under_xvfb() {
+fn gtk_e2e_commits_non_latin_text_through_im_context_under_xvfb() {
     if !has_command("xvfb-run") || !has_command("xdotool") {
         eprintln!("skipping gtk non-Latin key e2e because xvfb-run or xdotool is not installed");
         return;
@@ -2644,7 +2644,9 @@ wait_render_cell() {
 xdotool type --window "$window_id" --delay 2 "read value"
 xdotool key --window "$window_id" Return
 wait_latest_text 'read value'
-xdotool key --window "$window_id" Cyrillic_ya
+xdotool key --window "$window_id" ctrl+shift+u
+xdotool type --window "$window_id" --delay 30 "044f"
+xdotool key --window "$window_id" space
 wait_latest_text 'я'
 xdotool key --window "$window_id" Return
 xdotool type --window "$window_id" --delay 2 "printf 'GTK_NON_LATIN_KEY=%s\n' \"\$value\""
@@ -3443,7 +3445,8 @@ set -euo pipefail
 bin="$1"
 tab_trace="$2"
 config_dir="$3"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/bin/sh CHELOTYPE_TAB_TRACE="$tab_trace" "$bin" &
+snapshot_dir="$(dirname "$tab_trace")"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/bin/sh CHELOTYPE_TAB_TRACE="$tab_trace" CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -3483,8 +3486,8 @@ tab_y="$((Y + tab_bar_y + tab_bar_height / 2))"
 xdotool mousemove "$tab_x" "$tab_y"
 xdotool click --repeat 2 --delay 100 1
 sleep 0.2
-xdotool type --window "$window_id" GTK_RENAMED
-xdotool key --window "$window_id" Return
+xdotool type --delay 5 GTK_RENAMED
+xdotool key Return
 for _ in {1..100}; do
     if grep -F 'tab_0_title=GTK_RENAMED' "$tab_trace" >/dev/null 2>&1; then
         break
@@ -3501,6 +3504,30 @@ if ! grep -F 'tab_1_title=My Computer' "$tab_trace" >/dev/null 2>&1; then
     cat "$tab_trace" >&2 || true
     exit 1
 fi
+sleep 0.7
+xdotool mousemove "$tab_x" "$tab_y"
+xdotool click --repeat 2 --delay 100 1
+sleep 0.2
+xdotool type --delay 5 CANCELLED_TITLE
+xdotool key Escape
+sleep 0.2
+if ! grep -F 'tab_0_title=GTK_RENAMED' "$tab_trace" >/dev/null 2>&1; then
+    echo "Escape did not preserve the tab title" >&2
+    cat "$tab_trace" >&2 || true
+    exit 1
+fi
+xdotool mousemove "$((X + tab_bar_x + 100))" "$((Y + tab_bar_y + tab_bar_height + 35))"
+xdotool click 1
+xdotool type --delay 5 "printf 'AFTER_INLINE_RENAME\\n'"
+xdotool key Return
+for _ in {1..100}; do
+    if grep -R '^AFTER_INLINE_RENAME' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.1
+done
+echo "terminal input did not resume after inline rename" >&2
+exit 1
 "#;
 
     let output = xvfb_command()

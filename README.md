@@ -25,7 +25,7 @@ It supports direct launching into containers, customization, and more.
 
 ## Terminal context
 
-The header marks the active pane when its foreground PTY process or same-session ancestry is running with effective UID 0 (`ROOT`) or is an SSH client (`SSH`). The detector reads process identity from the Linux process namespace and never infers context from prompt or command text; changing tabs, panes, or processes refreshes the marker. `ROOT` describes the local process. An SSH connection does not expose the remote account's privilege level, so remote root access is not inferred. Flatpak and other container process namespaces can restrict `/proc` visibility; when the context cannot be observed, the header shows `?` with a tooltip explaining that limitation.
+The header changes color when the active pane's foreground PTY process or same-session ancestry is running with effective UID 0 or is an SSH client. The detector reads process identity from the Linux process namespace and never infers context from prompt or command text; changing tabs, panes, or processes refreshes the color. Root describes the local process. An SSH connection does not expose the remote account's privilege level, so remote root access is not inferred. Flatpak and other container process namespaces can restrict `/proc` visibility; when the context cannot be observed, the header keeps its normal color.
 
 ## Highlights
 

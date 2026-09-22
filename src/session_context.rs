@@ -43,28 +43,6 @@ impl SessionContext {
             Self::Unknown => "session-context-unknown",
         }
     }
-
-    pub const fn indicator_label(self) -> Option<&'static str> {
-        match self {
-            Self::Normal => None,
-            Self::Root => Some("ROOT"),
-            Self::Ssh => Some("SSH"),
-            Self::RootSsh => Some("ROOT · SSH"),
-            Self::Unknown => Some("?"),
-        }
-    }
-
-    pub const fn tooltip(self) -> &'static str {
-        match self {
-            Self::Normal => "Local user session",
-            Self::Root => "Root session: the active process has effective UID 0",
-            Self::Ssh => "SSH session active; the remote process privilege level is not observable",
-            Self::RootSsh => "SSH session active with effective UID 0 in the local client process",
-            Self::Unknown => {
-                "Terminal context is unavailable in this environment or process namespace"
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
