@@ -2900,7 +2900,8 @@ wait_latest_text() {
     [ -n "$latest" ] && cat "$latest" >&2
     return 1
 }
-xdotool key --window "$window_id" --delay 120 Multi_key apostrophe
+xdotool key --window "$window_id" ctrl+shift+u
+xdotool type --window "$window_id" --delay 30 "00e9"
 wait_preedit
 preedit_painted=0
 for _ in {1..20}; do
@@ -2915,7 +2916,7 @@ if [ "$preedit_painted" -ne 1 ]; then
     echo "preedit render state did not reach the window" >&2
     exit 1
 fi
-xdotool key --window "$window_id" e
+xdotool key --window "$window_id" space
 wait_latest_text '❯ é'
 for _ in {1..100}; do
     latest="$(latest_render || true)"
