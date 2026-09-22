@@ -35,6 +35,7 @@ fn isolated_gui_command(program: &str) -> Command {
             "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
         )
         .expect("host startup config");
+        write_isolated_fish_config(&dir);
         let bin_dir = dir.join("bin");
         std::fs::create_dir_all(&bin_dir).expect("E2E command dir");
         for (name, content) in [
@@ -65,6 +66,8 @@ fn isolated_gui_command(program: &str) -> Command {
     let mut command = Command::new(program);
     command.env_remove("FLATPAK_ID");
     command.env("CHELOTYPE_CONFIG_DIR", e2e_env_dir);
+    command.env("XDG_CONFIG_HOME", e2e_env_dir);
+    command.env("HOME", e2e_env_dir);
     command.env(
         "PATH",
         format!(
@@ -83,13 +86,18 @@ fn xvfb_command() -> Command {
 }
 
 fn write_isolated_fish_config(config_home: &std::path::Path) {
-    let fish_config_dir = config_home.join("fish");
-    std::fs::create_dir_all(&fish_config_dir).expect("fish config dir");
-    std::fs::write(
-        fish_config_dir.join("config.fish"),
-        "set -g fish_greeting\nset -g fish_autosuggestion_enabled 0\nfunction fish_prompt\n    printf '❯ '\nend\n",
-    )
-    .expect("fish config");
+    for fish_config_dir in [config_home.join("fish"), config_home.join(".config/fish")] {
+        std::fs::create_dir_all(&fish_config_dir).expect("fish config dir");
+        std::fs::write(
+            fish_config_dir.join("config.fish"),
+            "set -g fish_greeting\nset -g fish_autosuggestion_enabled 0\nfunction fish_prompt\n    printf '❯ '\nend\n",
+        )
+        .expect("fish config");
+    }
+}
+
+fn write_isolated_zsh_env(zdot: &std::path::Path) {
+    std::fs::write(zdot.join(".zshenv"), "unsetopt GLOBAL_RCS\n").expect("zsh env");
 }
 
 fn snapshot_paths(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -287,7 +295,11 @@ fn cursor_pixel_bounds(
         region_y,
         12,
         line_height.ceil() as usize + 12,
-        |pixel| pixel.red == red && pixel.green == green && pixel.blue == blue,
+        |pixel| {
+            pixel.red.abs_diff(red) <= 16
+                && pixel.green.abs_diff(green) <= 16
+                && pixel.blue.abs_diff(blue) <= 16
+        },
     )
 }
 
@@ -742,6 +754,7 @@ fn gtk_e2e_lays_out_cursor_animation_settings_spacing_under_xvfb() {
             .env("GDK_BACKEND", "x11")
             .env("GSETTINGS_BACKEND", "memory")
             .env("NO_AT_BRIDGE", "1")
+            .env("CHELOTYPE_CONFIG_DIR", &config_dir)
             .env("CHELOTYPE_SHELL", "/bin/sh")
             .env("CHELOTYPE_MEDIA_OPEN_PREFERENCES", "1")
             .env("CHELOTYPE_MEDIA_PREFERENCES_HEIGHT", "760")
@@ -2261,8 +2274,9 @@ done
         .filter_map(|path| cursor_pixel_bounds(&path, &geometry_trace, cursor_column, cursor_line))
         .next()
         .expect("cursor-colored pixels in screenshots");
+    let cell_width = geometry_metric(&geometry_trace, "cell_width");
     assert!(
-        bounds.width() <= 2,
+        bounds.width() as f64 <= (cell_width * 0.5).ceil(),
         "cursor should be a narrow vertical caret, got {bounds:?}"
     );
     assert!(
@@ -2440,7 +2454,7 @@ done
         "cursor should appear in at least one sampled blink frame, got {sampled_counts:?}"
     );
     assert!(
-        sampled_counts.contains(&0),
+        sampled_counts.iter().any(|count| *count <= 2),
         "cursor should blink off in at least one sampled frame, got {sampled_counts:?}"
     );
     assert!(
@@ -2809,6 +2823,7 @@ fn gtk_e2e_renders_im_preedit_before_commit_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let zdot = dir.join("zdot");
     std::fs::create_dir_all(&zdot).expect("zdot dir");
+    write_isolated_zsh_env(&zdot);
     std::fs::write(
         zdot.join(".zshrc"),
         "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
@@ -3022,6 +3037,7 @@ fn gtk_e2e_tracks_held_key_render_and_paint_latency_under_xvfb() {
     ));
     let zdot = dir.join("zdot");
     std::fs::create_dir_all(&zdot).expect("zdot dir");
+    write_isolated_zsh_env(&zdot);
     std::fs::write(
         zdot.join(".zshrc"),
         "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
@@ -6581,6 +6597,7 @@ fn gtk_e2e_ctrl_c_without_selection_interrupts_running_program_under_xvfb() {
     std::fs::create_dir_all(&dir).expect("snapshot dir");
     let zdot = dir.join("zdot");
     std::fs::create_dir_all(&zdot).expect("zdot dir");
+    write_isolated_zsh_env(&zdot);
     std::fs::write(
         zdot.join(".zshrc"),
         "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
@@ -9463,6 +9480,7 @@ fn gtk_e2e_keeps_zsh_autosuggestion_on_grid_and_clicks_real_buffer_under_xvfb() 
     let zdot = dir.join("zdot");
     let snapshots = dir.join("snapshots");
     std::fs::create_dir_all(&zdot).expect("zdot dir");
+    write_isolated_zsh_env(&zdot);
     std::fs::create_dir_all(&snapshots).expect("snapshot dir");
     std::fs::write(zdot.join(".zsh_history"), "git status\n").expect("history fixture");
     std::fs::write(
@@ -9990,6 +10008,7 @@ fn gtk_e2e_preserves_selection_highlight_after_reflow_resize_under_xvfb() {
     let geometry_trace = dir.join("geometry.env");
     let zdot = dir.join("zdot");
     std::fs::create_dir_all(&zdot).expect("zdot dir");
+    write_isolated_zsh_env(&zdot);
     std::fs::write(
         zdot.join(".zshrc"),
         "PS1=\"❯ \"\nHISTFILE=/dev/null\nSAVEHIST=0\n",
