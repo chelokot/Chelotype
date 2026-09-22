@@ -7,6 +7,7 @@ use crate::command_blocks::{
 use crate::containers::{LaunchTarget, available_launch_targets};
 use crate::input::{
     CursorDirection, CursorUnit, KeyAction, cursor_move_terminal_bytes, key_to_action,
+    key_to_terminal_bytes,
 };
 use crate::input_selection::{
     DirectedSelectionRange, active_cursor_point, active_input_line_range,
@@ -113,10 +114,15 @@ fn build_ui(app: &Application) {
         .tooltip_text("Main menu")
         .menu_model(&main_menu_model())
         .build();
+    let session_context_indicator = gtk::Label::builder()
+        .css_classes(["terminal-session-context"])
+        .visible(false)
+        .build();
     let header = adw::HeaderBar::new();
     header.add_css_class("terminal-header");
     header.pack_start(&launcher);
     header.set_title_widget(Some(&tab_bar));
+    header.pack_end(&session_context_indicator);
     header.pack_end(&app_menu_button);
 
     let canvas = TerminalCanvas::new();
@@ -328,10 +334,24 @@ fn build_ui(app: &Application) {
         let canvas = canvas.clone();
         let pending_style_refresh = pending_style_refresh.clone();
         key_controller.connect_key_pressed(move |_ctrl, key, keycode, state| {
+            let alternate_screen = workspace.borrow_mut().active_alternate_screen();
             if let Some(action) = key_to_action(key, keycode, state) {
+                let action = alternate_screen
+                    .then(|| alternate_screen_key_action(&action, key, keycode, state))
+                    .flatten()
+                    .unwrap_or(action);
                 match action {
                     KeyAction::Write(data) => {
-                        if data.as_slice() == [0x03] && selection_text.borrow().is_some() {
+                        if alternate_screen {
+                            clear_selection(
+                                &selection,
+                                &selection_text,
+                                &selection_dirty,
+                                &keyboard_selection,
+                            );
+                            mark_pending_input_latency(&pending_input_latency);
+                            let _ = workspace.borrow_mut().write_active(&data);
+                        } else if data.as_slice() == [0x03] && selection_text.borrow().is_some() {
                             copy_selection_to_clipboard(&canvas_widget, &selection_text);
                         } else {
                             mark_pending_input_latency(&pending_input_latency);
@@ -1450,6 +1470,7 @@ fn build_ui(app: &Application) {
     let tick_last_completed_frame_timing = last_completed_frame_timing.clone();
     let tick_last_presentation_time = last_presentation_time.clone();
     let tick_last_size = last_size.clone();
+    let session_context_workspace = std::rc::Rc::downgrade(&workspace_rc);
     canvas.widget().add_tick_callback(move |_, frame_clock| {
         let tick_wall_started = std::time::Instant::now();
         if profile_updating_baseline && !started_frame_updating.replace(true) {
@@ -1850,6 +1871,27 @@ fn build_ui(app: &Application) {
 
     window.present();
 
+    let session_context_header = header.downgrade();
+    let session_context_indicator = session_context_indicator.downgrade();
+    let last_session_context = std::cell::Cell::new(None);
+    glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+        let Some(header) = session_context_header.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let Some(indicator) = session_context_indicator.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let Some(workspace) = session_context_workspace.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let context = workspace.borrow().active_session_context();
+        if last_session_context.get() != Some(context) {
+            update_session_context_header(&header, &indicator, context);
+            last_session_context.set(Some(context));
+        }
+        glib::ControlFlow::Continue
+    });
+
     if open_startup_preferences {
         let window = window.clone();
         let canvas = canvas.clone();
@@ -2242,12 +2284,15 @@ fn install_tab_actions(
 
     let double_click = gtk::GestureClick::new();
     double_click.set_button(1);
+    double_click.set_exclusive(false);
+    double_click.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
         let tabs = tabs.clone();
+        let tab_bar = tab_bar.clone();
         let parent = tab_bar.clone().upcast::<gtk::Widget>();
-        double_click.connect_released(move |_gesture, count, _x, _y| {
+        double_click.connect_pressed(move |_gesture, count, x, y| {
             if count == 2
-                && let Some(id) = active_tab_id(&tabs)
+                && let Some(id) = tab_id_at_point(&tab_bar, &tabs, x, y)
             {
                 open_rename_popover(id, &parent, &tabs);
             }
@@ -2350,6 +2395,47 @@ fn connect_native_tabs(
 fn active_tab_id(tabs: &TabContext) -> Option<TabId> {
     let page = tabs.tab_view.selected_page()?;
     tabs.tab_pages.borrow().id_for_page(&page)
+}
+
+fn alternate_screen_key_action(
+    action: &KeyAction,
+    key: gtk::gdk::Key,
+    keycode: u32,
+    state: gtk::gdk::ModifierType,
+) -> Option<KeyAction> {
+    match action {
+        KeyAction::CursorMove {
+            direction, unit, ..
+        } => Some(KeyAction::Write(
+            key_to_terminal_bytes(key, keycode, state)
+                .unwrap_or_else(|| cursor_move_terminal_bytes(*direction, *unit)),
+        )),
+        KeyAction::PasteClipboard if !state.contains(gtk::gdk::ModifierType::SHIFT_MASK) => {
+            Some(KeyAction::Write(
+                key_to_terminal_bytes(key, keycode, state)
+                    .expect("alternate-screen editing action must map to terminal bytes"),
+            ))
+        }
+        KeyAction::SelectInput
+        | KeyAction::CutSelection
+        | KeyAction::UndoInput
+        | KeyAction::RedoInput => Some(KeyAction::Write(
+            key_to_terminal_bytes(key, keycode, state)
+                .expect("alternate-screen editing action must map to terminal bytes"),
+        )),
+        _ => None,
+    }
+}
+
+fn tab_id_at_point(tab_bar: &adw::TabBar, tabs: &TabContext, x: f64, y: f64) -> Option<TabId> {
+    let mut widget = tab_bar.pick(x, y, gtk::PickFlags::DEFAULT)?;
+    loop {
+        if widget.css_name() == "tab" {
+            let page = widget.property::<adw::TabPage>("page");
+            return tabs.tab_pages.borrow().id_for_page(&page);
+        }
+        widget = widget.parent()?;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2739,7 +2825,7 @@ fn show_canvas_context_menu(
 fn install_app_accelerators(app: &Application) {
     app.set_accels_for_action("win.new-window", &["<Control><Shift>n"]);
     app.set_accels_for_action("win.preferences", &["<Control>comma"]);
-    app.set_accels_for_action("win.about", &["F1"]);
+    app.set_accels_for_action("win.about", &["<Control><Shift>F1"]);
 }
 
 fn main_menu_model() -> gio::Menu {
@@ -5797,6 +5883,30 @@ fn trace_clipboard_export(kind: &str, text: &str) {
     }
 }
 
+fn update_session_context_header(
+    header: &adw::HeaderBar,
+    indicator: &gtk::Label,
+    context: crate::session_context::SessionContext,
+) {
+    const CONTEXT_CLASSES: [&str; 5] = [
+        "session-context-normal",
+        "session-context-root",
+        "session-context-ssh",
+        "session-context-root-ssh",
+        "session-context-unknown",
+    ];
+    for class_name in CONTEXT_CLASSES {
+        header.remove_css_class(class_name);
+        indicator.remove_css_class(class_name);
+    }
+    let class_name = context.header_css_class();
+    header.add_css_class(class_name);
+    indicator.add_css_class(class_name);
+    indicator.set_label(context.indicator_label().unwrap_or_default());
+    indicator.set_visible(context.indicator_label().is_some());
+    indicator.set_tooltip_text(Some(context.tooltip()));
+}
+
 fn install_style(canvas: &gtk::DrawingArea, provider: &gtk::CssProvider) {
     refresh_style(provider);
     gtk::style_context_add_provider_for_display(
@@ -5847,6 +5957,41 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
             box-shadow: none;
             padding-top: 0;
             padding-bottom: 0;
+        }
+        .terminal-header.session-context-root {
+            background-color: alpha(@error_bg_color, 0.22);
+            color: @error_fg_color;
+        }
+        .terminal-header.session-context-ssh {
+            background-color: alpha(@accent_bg_color, 0.22);
+            color: @accent_fg_color;
+        }
+        .terminal-header.session-context-root-ssh {
+            background-color: mix(alpha(@error_bg_color, 0.22), alpha(@accent_bg_color, 0.22), 0.5);
+            color: @error_fg_color;
+        }
+        .terminal-header.session-context-unknown {
+            background-color: alpha(@warning_bg_color, 0.18);
+            color: @warning_fg_color;
+        }
+        .terminal-session-context {
+            border-radius: 0.375rem;
+            margin: 0.25rem;
+            padding: 0.125rem 0.5rem;
+            font-weight: 700;
+        }
+        .terminal-session-context.session-context-root,
+        .terminal-session-context.session-context-root-ssh {
+            background-color: @error_bg_color;
+            color: @error_fg_color;
+        }
+        .terminal-session-context.session-context-ssh {
+            background-color: @accent_bg_color;
+            color: @accent_fg_color;
+        }
+        .terminal-session-context.session-context-unknown {
+            background-color: @warning_bg_color;
+            color: @warning_fg_color;
         }
         drawingarea.term-canvas {
             background-color: transparent;

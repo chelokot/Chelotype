@@ -173,6 +173,13 @@ end
 function __chelotype_discard_pending_undo --on-event fish_preexec
     set -e __chelotype_pending_line
     set -e __chelotype_pending_cursor
+    set -e __chelotype_undo_prefixes
+    set -e __chelotype_undo_suffixes
+    set -e __chelotype_undo_old_mids
+    set -e __chelotype_undo_new_mids
+    set -e __chelotype_undo_old_cursors
+    set -e __chelotype_undo_new_cursors
+    __chelotype_clear_redo
 end
 function __chelotype_move_cursor_to_target
     set -l operation_files "$CHELOTYPE_CURSOR_TARGET_FILE".cursor-*
@@ -594,6 +601,40 @@ printf '%s\n' (count $__chelotype_undo_prefixes)
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
+    }
+
+    #[test]
+    fn fish_undo_stack_is_cleared_before_the_next_commandline() {
+        let Some(fish_path) = fish_with_noninteractive_commandline() else {
+            eprintln!("skipping fish preexec stack reset test because commandline needs a PTY");
+            return;
+        };
+
+        let output = Command::new(fish_path)
+            .args([
+                "--init-command",
+                FISH_CHELOTYPE_INIT,
+                "-ic",
+                r#"
+commandline --replace old
+commandline -C 3
+__chelotype_push_patch undo 0 0 "" old 0 3
+emit fish_preexec
+commandline --replace fresh
+commandline -C 5
+__chelotype_undo
+printf '%s %s\n' (commandline) (commandline -C)
+"#,
+            ])
+            .output()
+            .expect("run fish preexec stack reset check");
+
+        assert!(
+            output.status.success(),
+            "fish preexec stack reset check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "fresh 5\n");
     }
 
     #[test]

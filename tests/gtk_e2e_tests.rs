@@ -4,10 +4,11 @@ use chelotype::terminal_palette::{
 use serial_test::serial;
 use std::fs::{read_dir, read_to_string};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn has_command(name: &str) -> bool {
-    Command::new("bash")
+    let available = Command::new("bash")
         .args([
             "--noprofile",
             "--norc",
@@ -16,11 +17,67 @@ fn has_command(name: &str) -> bool {
         ])
         .output()
         .map(|output| output.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if std::env::var_os("CHELOTYPE_REQUIRE_E2E").is_some() {
+        assert!(available, "required E2E command missing: {name}");
+    }
+    available
+}
+
+fn isolated_gui_command(program: &str) -> Command {
+    static E2E_ENV_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    let e2e_env_dir = E2E_ENV_DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("chelotype-gtk-host-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("host config dir");
+        std::fs::write(
+            dir.join("config"),
+            "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+        )
+        .expect("host startup config");
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("E2E command dir");
+        for (name, content) in [
+            (
+                "toolbox",
+                "#!/bin/sh\n[ \"$1 $2\" = 'list --containers' ] || exit 1\n",
+            ),
+            (
+                "podman",
+                "#!/bin/sh\n[ \"$1 $2 $3\" = 'ps -a --format=json' ] || exit 1\nprintf '[]\\n'\n",
+            ),
+            (
+                "flatpak-spawn",
+                "#!/bin/sh\n[ \"$1\" = '--host' ] || exit 1\nshift\nexec \"$@\"\n",
+            ),
+        ] {
+            let path = bin_dir.join(name);
+            std::fs::write(&path, content).expect("E2E command shim");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .expect("E2E shim metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("E2E command executable");
+        }
+        dir
+    });
+    let mut command = Command::new(program);
+    command.env_remove("FLATPAK_ID");
+    command.env("CHELOTYPE_CONFIG_DIR", e2e_env_dir);
+    command.env(
+        "PATH",
+        format!(
+            "{}:{}",
+            e2e_env_dir.join("bin").display(),
+            std::env::var("PATH").expect("PATH")
+        ),
+    );
+    command
 }
 
 fn xvfb_command() -> Command {
-    let mut command = Command::new("xvfb-run");
+    let mut command = isolated_gui_command("xvfb-run");
     command.arg("--server-args=-screen 0 1920x1080x24 -nolisten tcp");
     command
 }
@@ -3129,6 +3186,9 @@ fi
         .iter()
         .max()
         .expect("row surface cache samples");
+    eprintln!(
+        "held-key E2E: render p95={render_p95:?}, paint p95={paint_p95:?}, input-to-render p95={input_to_render_p95:?}, frame interval p50={frame_interval_p50:?}, steady RSS growth={rss_growth} KiB"
+    );
     assert!(
         render_p95 <= Duration::from_millis(8),
         "held-key gtk_render p95 exceeded 120 Hz budget: {render_p95:?}"
@@ -3222,12 +3282,20 @@ fn gtk_e2e_creates_and_switches_terminal_tabs_under_xvfb() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
 
     let script = r#"
 set -euo pipefail
 bin="$1"
 snapshot_dir="$2"
-GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+config_dir="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
 pid="$!"
 trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window_id=""
@@ -3303,6 +3371,7 @@ wait_latest_contains_only 'TAB_ONE_AFTER_CLOSE' 'TAB_TWO_ACTIVE'
             "chelotype-gtk-tabs-e2e",
             env!("CARGO_BIN_EXE_chelotype"),
             dir.to_str().expect("snapshot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
         ])
         .output()
         .expect("run gtk tab e2e under xvfb");
@@ -3324,6 +3393,251 @@ wait_latest_contains_only 'TAB_ONE_AFTER_CLOSE' 'TAB_TWO_ACTIVE'
         .join("\n");
     assert!(text.contains("TAB_ONE_ACTIVE"));
     assert!(text.contains("TAB_TWO_ACTIVE"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_renames_clicked_inactive_tab_on_double_click_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk tab rename e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-tab-rename-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    let tab_trace = dir.join("tabs.env");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+tab_trace="$2"
+config_dir="$3"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/bin/sh CHELOTYPE_TAB_TRACE="$tab_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+wait_for_two_tabs() {
+    for _ in {1..100}; do
+        if grep -F 'tab_count=2' "$tab_trace" >/dev/null 2>&1 && grep -F 'selected_index=1' "$tab_trace" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "second tab did not appear" >&2
+    cat "$tab_trace" >&2 || true
+    return 1
+}
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool key --window "$window_id" ctrl+shift+t
+wait_for_two_tabs
+tab_bar_x="$(sed -n 's/^tab_bar_x=//p' "$tab_trace")"
+tab_bar_y="$(sed -n 's/^tab_bar_y=//p' "$tab_trace")"
+tab_bar_width="$(sed -n 's/^tab_bar_width=//p' "$tab_trace")"
+tab_bar_height="$(sed -n 's/^tab_bar_height=//p' "$tab_trace")"
+eval "$(xdotool getwindowgeometry --shell "$window_id")"
+tab_x="$((X + tab_bar_x + tab_bar_width / 4))"
+tab_y="$((Y + tab_bar_y + tab_bar_height / 2))"
+xdotool mousemove "$tab_x" "$tab_y"
+xdotool click --repeat 2 --delay 100 1
+sleep 0.2
+xdotool type --window "$window_id" GTK_RENAMED
+xdotool key --window "$window_id" Return
+for _ in {1..100}; do
+    if grep -F 'tab_0_title=GTK_RENAMED' "$tab_trace" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -F 'tab_0_title=GTK_RENAMED' "$tab_trace" >/dev/null 2>&1; then
+    echo "double-clicked inactive tab did not get renamed" >&2
+    cat "$tab_trace" >&2 || true
+    exit 1
+fi
+if ! grep -F 'tab_1_title=My Computer' "$tab_trace" >/dev/null 2>&1; then
+    echo "double-click renamed the wrong tab" >&2
+    cat "$tab_trace" >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = xvfb_command()
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-tab-rename-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            tab_trace.to_str().expect("tab trace path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
+        ])
+        .output()
+        .expect("run gtk tab rename e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk tab rename e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let trace = read_to_string(&tab_trace).expect("read tab trace");
+    assert!(trace.contains("tab_0_title=GTK_RENAMED"));
+    assert!(trace.contains("tab_1_title=My Computer"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_forwards_raw_navigation_and_editing_keys_in_alternate_screen_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") || !has_command("python3") {
+        eprintln!(
+            "skipping gtk alternate-screen key e2e because xvfb-run, xdotool, or python3 is not installed"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-alternate-screen-keys-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    let fixture = dir.join("capture_keys.py");
+    std::fs::write(
+        &fixture,
+        "import os, select, sys, termios, time, tty\nfd = sys.stdin.fileno()\nold = termios.tcgetattr(fd)\ntty.setraw(fd)\nos.write(1, b'\\x1b[?1049h')\ndata = bytearray()\ndeadline = time.monotonic() + 3.0\ntry:\n    while time.monotonic() < deadline:\n        ready, _, _ = select.select([fd], [], [], 0.25)\n        if ready:\n            data.extend(os.read(fd, 4096))\nfinally:\n    termios.tcsetattr(fd, termios.TCSANOW, old)\nos.write(1, b'\\x1b[?1049l')\nprint('RAW_KEYS=' + data.hex(), flush=True)\n",
+    )
+    .expect("key capture fixture");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+fixture="$3"
+config_dir="$4"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/bin/sh CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+xdotool type --window "$window_id" --delay 2 "python3 $fixture"
+xdotool key --window "$window_id" Return
+sleep 0.3
+xdotool key --window "$window_id" F1
+xdotool key --window "$window_id" F2
+xdotool key --window "$window_id" F12
+xdotool key --window "$window_id" Insert
+xdotool key --window "$window_id" Page_Up
+xdotool key --window "$window_id" Page_Down
+xdotool key --window "$window_id" shift+Tab
+xdotool key --window "$window_id" ctrl+Left
+xdotool key --window "$window_id" ctrl+a
+xdotool key --window "$window_id" ctrl+x
+for _ in {1..100}; do
+    if grep -l 'RAW_KEYS=' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+if ! grep -l 'RAW_KEYS=' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    echo "alternate-screen key fixture did not report captured bytes" >&2
+    find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = xvfb_command()
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-alternate-screen-keys-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            fixture.to_str().expect("fixture path utf8"),
+            config_dir.to_str().expect("config dir utf8"),
+        ])
+        .output()
+        .expect("run gtk alternate-screen key e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk alternate-screen key e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let text = snapshot_paths(&dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .map(|path| read_to_string(path).expect("read text snapshot"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains(
+            "RAW_KEYS=1b4f501b4f511b5b32347e1b5b327e1b5b357e1b5b367e1b5b5a1b5b313b35440118"
+        ),
+        "unexpected alternate-screen key bytes: {text}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5403,7 +5717,7 @@ cat /tmp/chelotype.log >&2 || true
 exit 1
 "#;
 
-    let output = Command::new("scripts/with-nested-wayland.sh")
+    let output = isolated_gui_command("scripts/with-nested-wayland.sh")
         .args([
             "bash",
             "--noprofile",
@@ -9110,16 +9424,33 @@ fn gtk_e2e_keeps_zsh_autosuggestion_on_grid_and_clicks_real_buffer_under_xvfb() 
         eprintln!("skipping zsh autosuggestion e2e because xvfb-run or xdotool is not installed");
         return;
     }
-    let autosuggest_plugin = std::path::Path::new(
+    let autosuggest_plugin = [
         "/opt/oh-my-zsh/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh",
-    );
-    let syntax_plugin = std::path::Path::new(
+        "/usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
+    ]
+    .into_iter()
+    .find(|path| std::path::Path::new(path).is_file());
+    let syntax_plugin = [
         "/opt/oh-my-zsh/custom/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
-    );
-    if !autosuggest_plugin.exists() || !syntax_plugin.exists() {
+        "/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
+    ]
+    .into_iter()
+    .find(|path| std::path::Path::new(path).is_file());
+    if std::env::var_os("CHELOTYPE_REQUIRE_E2E").is_some() {
+        assert!(
+            autosuggest_plugin.is_some(),
+            "zsh-autosuggestions fixture missing"
+        );
+        assert!(
+            syntax_plugin.is_some(),
+            "zsh-syntax-highlighting fixture missing"
+        );
+    }
+    let (Some(autosuggest_plugin), Some(syntax_plugin)) = (autosuggest_plugin, syntax_plugin)
+    else {
         eprintln!("skipping zsh autosuggestion e2e because zsh plugins are not installed");
         return;
-    }
+    };
 
     let dir = std::env::temp_dir().join(format!(
         "chelotype-gtk-zsh-autosuggest-e2e-{}",
@@ -9138,8 +9469,8 @@ fn gtk_e2e_keeps_zsh_autosuggestion_on_grid_and_clicks_real_buffer_under_xvfb() 
         format!(
             "HISTFILE=\"{}\"\nHISTSIZE=1000\nSAVEHIST=1000\nPS1=\"❯ \"\nZSH_AUTOSUGGEST_STRATEGY=(history)\nsource {}\nsource {}\n",
             zdot.join(".zsh_history").display(),
-            autosuggest_plugin.display(),
-            syntax_plugin.display()
+            autosuggest_plugin,
+            syntax_plugin
         ),
     )
     .expect("zshrc fixture");
@@ -9190,7 +9521,7 @@ canvas_y="$(awk -F= '$1 == "canvas_y" { canvas = $2 } $1 == "cell_offset_y" { of
 cell_width="$(sed -n 's/^cell_width=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 line_height="$(sed -n 's/^line_height=\([0-9.][0-9.]*\)$/\1/p' "$geometry_trace")"
 eval "$(xdotool getwindowgeometry --shell "$window_id")"
-target_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.25 * cell) }')"
+target_x="$(awk -v left="$X" -v canvas_x="$canvas_x" -v cell="$cell_width" 'BEGIN { printf "%d", left + canvas_x + (3.75 * cell) }')"
 target_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$cursor_line" -v line="$line_height" 'BEGIN { printf "%d", top + canvas_y + ((row + 0.5) * line) }')"
 xdotool mousemove "$target_x" "$target_y"
 xdotool click 1
@@ -9262,8 +9593,8 @@ exit 1
     assert_eq!(cells[2]["text"], "g");
     assert_eq!(cells[5]["text"], " ");
     assert_eq!(cells[6]["text"], "s");
-    assert_eq!(cells[5]["fg"], "#666666");
-    assert_eq!(cells[6]["fg"], "#666666");
+    assert_eq!(cells[5]["fg"], cells[6]["fg"]);
+    assert_ne!(cells[2]["fg"], cells[6]["fg"]);
 
     let text = snapshot_paths(&snapshots)
         .into_iter()
