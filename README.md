@@ -12,6 +12,21 @@ Chelotype is an opinionated GTK terminal for Linux desktops. It is built in Rust
 
 It supports direct launching into containers, customization, and more.
 
+## Workspace controls
+
+| Action | Shortcut or gesture |
+| --- | --- |
+| New tab | `Ctrl+Shift+T` |
+| Split the active tab | `Ctrl+Shift+E` |
+| Switch tabs | `Ctrl+PageUp` / `Ctrl+PageDown` |
+| Rename a tab | Double-click its title, or use its context menu |
+| Resize split panes | Drag the divider |
+| Preferences | `Ctrl+,` |
+
+## Terminal context
+
+The header changes color when the active pane's foreground PTY process or same-session ancestry is running with effective UID 0 or is an SSH client. The detector reads process identity from the Linux process namespace and never infers context from prompt or command text; changing tabs, panes, or processes refreshes the color. Root describes the local process. An SSH connection does not expose the remote account's privilege level, so remote root access is not inferred. Flatpak and other container process namespaces can restrict `/proc` visibility; when the context cannot be observed, the header keeps its normal color.
+
 ## Highlights
 
 - Launch tabs directly into the host, Toolbox, Distrobox, or Podman containers.
@@ -45,6 +60,14 @@ bash scripts/with-zig.sh cargo fmt -- --check
 bash scripts/with-zig.sh cargo clippy --all-targets -- -D warnings
 bash scripts/with-zig.sh cargo test -- --test-threads=1
 ```
+
+The GTK tests need Xvfb, xauth, xdotool, ImageMagick, Python 3, Fish, Zsh,
+zsh-autosuggestions, and zsh-syntax-highlighting. Application compatibility
+tests also exercise Neovim and tmux through real PTYs. Set
+`CHELOTYPE_REQUIRE_E2E=1` to fail when optional E2E dependencies are missing;
+CI uses this mode. Tests launch their own X11 displays.
+The GUI harness replaces container commands with test doubles, so it never
+starts or inspects a developer's running Toolbox.
 
 ## Packaging
 

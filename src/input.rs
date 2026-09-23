@@ -86,7 +86,7 @@ pub fn key_to_action(key: gdk::Key, keycode: u32, state: gdk::ModifierType) -> O
             selecting: shift,
         });
     }
-    if key == gdk::Key::F1 {
+    if ctrl && shift && key == gdk::Key::F1 {
         return Some(KeyAction::OpenAbout);
     }
     if ctrl && shift && matches!(key, gdk::Key::Up | gdk::Key::Down) {
@@ -129,6 +129,9 @@ pub fn key_to_action(key: gdk::Key, keycode: u32, state: gdk::ModifierType) -> O
     }
     if ctrl && shift && key_matches(key, keycode, PhysicalKey::C, &['c']) {
         return Some(KeyAction::CopySelection);
+    }
+    if ctrl && shift && key_matches(key, keycode, PhysicalKey::V, &['v']) {
+        return Some(KeyAction::PasteClipboard);
     }
     if ctrl && shift && key_matches(key, keycode, PhysicalKey::T, &['t']) {
         return Some(KeyAction::NewTab);
@@ -189,19 +192,61 @@ pub fn key_to_terminal_bytes(
             _ => {}
         }
     }
+    if let Some(bytes) = named_key_to_bytes(key, state) {
+        return Some(bytes);
+    }
     match key {
+        gdk::Key::Escape => Some(vec![0x1b]),
         gdk::Key::Return | gdk::Key::KP_Enter => Some(b"\r".to_vec()),
         gdk::Key::BackSpace => Some(vec![0x7f]),
         gdk::Key::Tab => Some(b"\t".to_vec()),
-        gdk::Key::Left => Some(b"\x1b[D".to_vec()),
-        gdk::Key::Right => Some(b"\x1b[C".to_vec()),
-        gdk::Key::Up => Some(b"\x1b[A".to_vec()),
-        gdk::Key::Down => Some(b"\x1b[B".to_vec()),
-        gdk::Key::Home => Some(b"\x1b[H".to_vec()),
-        gdk::Key::End => Some(b"\x1b[F".to_vec()),
-        gdk::Key::Delete => Some(b"\x1b[3~".to_vec()),
         _ => printable_key_to_bytes(key, keycode, state),
     }
+}
+
+fn named_key_to_bytes(key: gdk::Key, state: gdk::ModifierType) -> Option<Vec<u8>> {
+    let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+    if key == gdk::Key::ISO_Left_Tab || (key == gdk::Key::Tab && shift) {
+        return Some(b"\x1b[Z".to_vec());
+    }
+    let (number, suffix, ss3) = match key {
+        gdk::Key::Up | gdk::Key::KP_Up => (1, 'A', false),
+        gdk::Key::Down | gdk::Key::KP_Down => (1, 'B', false),
+        gdk::Key::Right | gdk::Key::KP_Right => (1, 'C', false),
+        gdk::Key::Left | gdk::Key::KP_Left => (1, 'D', false),
+        gdk::Key::Home | gdk::Key::KP_Home => (1, 'H', false),
+        gdk::Key::End | gdk::Key::KP_End => (1, 'F', false),
+        gdk::Key::Insert | gdk::Key::KP_Insert => (2, '~', false),
+        gdk::Key::Delete | gdk::Key::KP_Delete => (3, '~', false),
+        gdk::Key::Page_Up | gdk::Key::KP_Page_Up => (5, '~', false),
+        gdk::Key::Page_Down | gdk::Key::KP_Page_Down => (6, '~', false),
+        gdk::Key::F1 => (1, 'P', true),
+        gdk::Key::F2 => (1, 'Q', true),
+        gdk::Key::F3 => (1, 'R', true),
+        gdk::Key::F4 => (1, 'S', true),
+        gdk::Key::F5 => (15, '~', false),
+        gdk::Key::F6 => (17, '~', false),
+        gdk::Key::F7 => (18, '~', false),
+        gdk::Key::F8 => (19, '~', false),
+        gdk::Key::F9 => (20, '~', false),
+        gdk::Key::F10 => (21, '~', false),
+        gdk::Key::F11 => (23, '~', false),
+        gdk::Key::F12 => (24, '~', false),
+        _ => return None,
+    };
+    let alt = state.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::META_MASK);
+    let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+    let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+    let sequence = if modifier != 1 {
+        format!("\x1b[{number};{modifier}{suffix}")
+    } else if ss3 {
+        format!("\x1bO{suffix}")
+    } else if suffix == '~' {
+        format!("\x1b[{number}~")
+    } else {
+        format!("\x1b[{suffix}")
+    };
+    Some(sequence.into_bytes())
 }
 
 fn printable_key_to_bytes(
@@ -249,7 +294,16 @@ fn control_byte_for_char(ch: char) -> Option<u8> {
     if ch.is_ascii_alphabetic() {
         Some((ch.to_ascii_uppercase() as u8) & 0x1f)
     } else {
-        None
+        match ch {
+            ' ' | '@' => Some(0),
+            '[' => Some(0x1b),
+            '\\' => Some(0x1c),
+            ']' => Some(0x1d),
+            '^' => Some(0x1e),
+            '_' => Some(0x1f),
+            '?' => Some(0x7f),
+            _ => None,
+        }
     }
 }
 
@@ -515,6 +569,13 @@ mod tests {
             Some(KeyAction::PasteClipboard)
         );
         assert_eq!(
+            key_to_action(
+                gdk::Key::v,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(KeyAction::PasteClipboard)
+        );
+        assert_eq!(
             key_to_action(gdk::Key::z, gdk::ModifierType::CONTROL_MASK),
             Some(KeyAction::UndoInput)
         );
@@ -536,6 +597,84 @@ mod tests {
     }
 
     #[test]
+    fn forwards_function_and_navigation_keys_with_xterm_modifiers() {
+        let cases: [(gdk::Key, &[u8]); 18] = [
+            (gdk::Key::F1, b"\x1bOP"),
+            (gdk::Key::F2, b"\x1bOQ"),
+            (gdk::Key::F3, b"\x1bOR"),
+            (gdk::Key::F4, b"\x1bOS"),
+            (gdk::Key::F5, b"\x1b[15~"),
+            (gdk::Key::F6, b"\x1b[17~"),
+            (gdk::Key::F7, b"\x1b[18~"),
+            (gdk::Key::F8, b"\x1b[19~"),
+            (gdk::Key::F9, b"\x1b[20~"),
+            (gdk::Key::F10, b"\x1b[21~"),
+            (gdk::Key::F11, b"\x1b[23~"),
+            (gdk::Key::F12, b"\x1b[24~"),
+            (gdk::Key::Insert, b"\x1b[2~"),
+            (gdk::Key::Page_Up, b"\x1b[5~"),
+            (gdk::Key::Page_Down, b"\x1b[6~"),
+            (gdk::Key::ISO_Left_Tab, b"\x1b[Z"),
+            (gdk::Key::KP_Home, b"\x1b[H"),
+            (gdk::Key::KP_End, b"\x1b[F"),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                key_to_action(key, gdk::ModifierType::empty()),
+                Some(KeyAction::Write(expected.to_vec())),
+                "{key:?}",
+            );
+        }
+        for (key, modifiers, expected) in [
+            (gdk::Key::Tab, gdk::ModifierType::SHIFT_MASK, &b"\x1b[Z"[..]),
+            (
+                gdk::Key::F2,
+                gdk::ModifierType::CONTROL_MASK,
+                &b"\x1b[1;5Q"[..],
+            ),
+            (
+                gdk::Key::F12,
+                gdk::ModifierType::ALT_MASK,
+                &b"\x1b[24;3~"[..],
+            ),
+            (
+                gdk::Key::Left,
+                gdk::ModifierType::CONTROL_MASK,
+                &b"\x1b[1;5D"[..],
+            ),
+            (
+                gdk::Key::Up,
+                gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::ALT_MASK,
+                &b"\x1b[1;4A"[..],
+            ),
+        ] {
+            assert_eq!(
+                key_to_terminal_bytes(key, modifiers).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn forwards_control_punctuation_for_terminal_applications() {
+        for (key, expected) in [
+            (gdk::Key::space, 0),
+            (gdk::Key::at, 0),
+            (gdk::Key::bracketleft, 0x1b),
+            (gdk::Key::backslash, 0x1c),
+            (gdk::Key::bracketright, 0x1d),
+            (gdk::Key::asciicircum, 0x1e),
+            (gdk::Key::underscore, 0x1f),
+            (gdk::Key::question, 0x7f),
+        ] {
+            assert_eq!(
+                key_to_terminal_bytes(key, gdk::ModifierType::CONTROL_MASK),
+                Some(vec![expected]),
+            );
+        }
+    }
+
+    #[test]
     fn maps_settings_shortcut() {
         assert_eq!(
             key_to_action(gdk::Key::comma, gdk::ModifierType::CONTROL_MASK),
@@ -553,7 +692,10 @@ mod tests {
             Some(KeyAction::NewWindow)
         );
         assert_eq!(
-            key_to_action(gdk::Key::F1, gdk::ModifierType::empty()),
+            key_to_action(
+                gdk::Key::F1,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
             Some(KeyAction::OpenAbout)
         );
     }

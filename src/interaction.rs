@@ -1,4 +1,6 @@
-use crate::input_selection::{active_input_end_column, input_start_column};
+use crate::input_selection::{
+    active_input_end_column, input_start_column, line_has_semantic_input, line_has_semantic_prompt,
+};
 use crate::mouse::{
     MouseButton, MouseGridPosition, sgr_drag_bytes, sgr_press_bytes, sgr_release_bytes,
 };
@@ -360,10 +362,11 @@ fn semantic_prompt_editable_start(
     end: usize,
 ) -> Option<usize> {
     (start..=end).find(|row| {
-        content
-            .lines
-            .get(*row)
-            .is_some_and(|line| prompt_leader_before_input(line))
+        content.lines.get(*row).is_some_and(|line| {
+            line_has_semantic_prompt(line)
+                || line_has_semantic_input(line)
+                || prompt_leader_before_input(line)
+        })
     })
 }
 

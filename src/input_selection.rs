@@ -4,7 +4,9 @@ use crate::mouse::MouseGridPosition;
 use crate::selection::{
     GridPoint, SelectionRange, line_significant_len, viewport_range_for_display,
 };
-use crate::terminal_grid::{TerminalCell, TerminalLine, TerminalSemanticPrompt};
+use crate::terminal_grid::{
+    TerminalCell, TerminalLine, TerminalSemanticContent, TerminalSemanticPrompt,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectedSelectionRange {
@@ -22,13 +24,44 @@ impl DirectedSelectionRange {
     }
 }
 
-pub fn input_start_column(line: &[TerminalCell]) -> usize {
+pub fn input_start_column(line: &TerminalLine) -> usize {
+    if let Some(column) = semantic_input_start_column(line) {
+        return column;
+    }
     let significant = line_significant_len(line);
     line.iter()
         .take(significant)
         .position(|cell| cell.text == " ")
         .map(|column| column + 1)
         .unwrap_or(0)
+}
+
+pub(crate) fn semantic_input_start_column(line: &TerminalLine) -> Option<usize> {
+    if let Some(column) = line.iter().enumerate().find_map(|(column, _)| {
+        (line.semantic_content(column) == TerminalSemanticContent::Input).then_some(column)
+    }) {
+        return Some(column);
+    }
+    let prompt_column = line.iter().enumerate().find_map(|(column, _)| {
+        (line.semantic_content(column) == TerminalSemanticContent::Prompt).then_some(column)
+    })?;
+    Some(
+        line.iter()
+            .enumerate()
+            .skip(prompt_column + 1)
+            .find_map(|(column, _)| {
+                (line.semantic_content(column) == TerminalSemanticContent::Output).then_some(column)
+            })
+            .unwrap_or(line.len()),
+    )
+}
+
+pub(crate) fn line_has_semantic_input(line: &TerminalLine) -> bool {
+    line.has_semantic_content(TerminalSemanticContent::Input)
+}
+
+pub(crate) fn line_has_semantic_prompt(line: &TerminalLine) -> bool {
+    line.has_semantic_content(TerminalSemanticContent::Prompt)
 }
 
 pub fn active_input_line_range(content: &RenderableContentOwned) -> Option<SelectionRange> {
@@ -536,10 +569,11 @@ fn semantic_prompt_editable_start(
     end: usize,
 ) -> Option<usize> {
     (start..=end).find(|row| {
-        content
-            .lines
-            .get(*row)
-            .is_some_and(|line| prompt_leader_before_input(line))
+        content.lines.get(*row).is_some_and(|line| {
+            line_has_semantic_prompt(line)
+                || line_has_semantic_input(line)
+                || prompt_leader_before_input(line)
+        })
     })
 }
 
@@ -1002,7 +1036,9 @@ fn parse_hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal_grid::{MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata};
+    use crate::terminal_grid::{
+        MouseMode, TerminalColors, TerminalContent, TerminalLineMetadata, TerminalSemanticContent,
+    };
 
     fn content_with_cursor(text: &str, cursor_col: i32) -> TerminalContent {
         TerminalContent {
@@ -1099,6 +1135,45 @@ mod tests {
             colors: TerminalColors::default(),
             mouse: MouseMode::default(),
         }
+    }
+
+    fn semantic_line(text: &str, prompt_len: usize, input: bool) -> TerminalLine {
+        let cells = text
+            .chars()
+            .map(|ch| TerminalCell {
+                text: ch.to_string().into(),
+                ..TerminalCell::blank()
+            })
+            .collect();
+        let semantics = (0..text.chars().count())
+            .map(|column| {
+                if column < prompt_len {
+                    TerminalSemanticContent::Prompt
+                } else if input {
+                    TerminalSemanticContent::Input
+                } else {
+                    TerminalSemanticContent::Output
+                }
+            })
+            .collect();
+        TerminalLine::from_cells_with_semantics(cells, semantics)
+    }
+
+    #[test]
+    fn semantic_input_boundary_ignores_shell_metacharacters() {
+        let prompt = "~/repo on main ❯ ";
+        let command = "echo > file # $ hello";
+        let line = semantic_line(&format!("{prompt}{command}"), prompt.chars().count(), true);
+
+        assert_eq!(input_start_column(&line), prompt.chars().count());
+    }
+
+    #[test]
+    fn semantic_input_boundary_handles_empty_spaced_prompt() {
+        let prompt = "spaced prompt ";
+        let line = semantic_line(prompt, prompt.chars().count(), false);
+
+        assert_eq!(input_start_column(&line), prompt.chars().count());
     }
 
     #[test]
