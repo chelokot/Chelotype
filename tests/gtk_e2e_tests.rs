@@ -3517,7 +3517,7 @@ if ! grep -F 'tab_0_title=GTK_RENAMED' "$tab_trace" >/dev/null 2>&1; then
     cat "$tab_trace" >&2 || true
     exit 1
 fi
-xdotool mousemove "$((X + tab_bar_x + 100))" "$((Y + tab_bar_y + tab_bar_height + 35))"
+xdotool mousemove "$((X + WIDTH / 2))" "$((Y + HEIGHT / 2))"
 xdotool click 1
 xdotool type --delay 5 "printf 'AFTER_INLINE_RENAME\\n'"
 xdotool key Return
