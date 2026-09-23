@@ -3528,6 +3528,9 @@ for _ in {1..100}; do
     sleep 0.1
 done
 echo "terminal input did not resume after inline rename" >&2
+cat "$tab_trace" >&2 || true
+latest_snapshot="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+[ -n "$latest_snapshot" ] && tail -n 12 "$latest_snapshot" >&2
 exit 1
 "#;
 
