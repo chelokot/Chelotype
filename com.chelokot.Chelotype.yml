@@ -8,6 +8,7 @@ command: chelotype
 finish-args:
   - --allow=devel
   - --device=dri
+  - --filesystem=host-os:ro
   - --share=ipc
   - --share=network
   - --socket=fallback-x11
