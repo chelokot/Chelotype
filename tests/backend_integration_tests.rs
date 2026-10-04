@@ -1,4 +1,6 @@
 use chelotype::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
+use chelotype::input_selection::active_input_line_range;
+use chelotype::selection::{GridPoint, SelectionRange};
 use chelotype::terminal_palette::default_terminal_palette;
 use portable_pty::CommandBuilder;
 use serial_test::serial;
@@ -630,4 +632,30 @@ fn backend_reflows_wrapped_scrollback_after_resize() {
         "wide resize should preserve the wrapped tail after reflow: {wide_lines:?}"
     );
     let _ = backend.write(b"exit\n");
+}
+
+#[test]
+#[serial]
+fn backend_selects_only_input_after_fish_two_line_prompt_with_right_prompt() {
+    let mut command = CommandBuilder::new("/bin/sh");
+    command.args([
+        "-c",
+        "printf '\\033]133;A;click_events=1\\033\\\\\\033[J\\033[1;36m~\\033[0m via \\033[1;32mv24.18.0 \\033[0m\\033[s\\033[102G\\033[33;2mfedora-toolbox\\033[m\\033[u\\r\\n\\033[1;32m❯\\033[0m \\033]133;B\\007фыв'; sleep 5",
+    ]);
+    let mut backend = TerminalBackend::spawn_with_size(
+        command,
+        ScreenSize::new(120, 8).expect("valid terminal size"),
+    )
+    .expect("spawn fish prompt replay");
+    let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
+        snapshot_contains(snapshot, "фыв") && snapshot.cursor_col == 5
+    });
+
+    assert_eq!(
+        active_input_line_range(&snapshot),
+        Some(SelectionRange::new(
+            GridPoint { row: 1, column: 2 },
+            GridPoint { row: 1, column: 5 }
+        ))
+    );
 }

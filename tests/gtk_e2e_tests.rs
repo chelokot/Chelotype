@@ -2803,6 +2803,120 @@ wait_latest_text '❯ é'
 
 #[test]
 #[serial]
+fn gtk_e2e_select_input_skips_first_line_of_two_line_prompt_under_xvfb() {
+    if !has_command("xvfb-run") || !has_command("xdotool") {
+        eprintln!("skipping gtk two-line prompt e2e because xvfb-run or xdotool is not installed");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "chelotype-gtk-two-line-prompt-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config"),
+        "first_launch_preferences_shown=true\nstartup_launch_target=host\n",
+    )
+    .expect("config");
+    write_isolated_fish_config(&config_dir);
+    let fish_config = config_dir.join("fish/config.fish");
+    let mut fish_config_text = read_to_string(&fish_config).expect("fish config");
+    fish_config_text.push_str(
+        "function fish_prompt\n    printf '~ via v24.18.0 \\e[s\\e[60Gfedora-toolbox\\e[u\\n❯ '\nend\n",
+    );
+    std::fs::write(&fish_config, fish_config_text).expect("two-line fish prompt");
+
+    let script = r#"
+set -euo pipefail
+bin="$1"
+snapshot_dir="$2"
+config_dir="$3"
+clipboard_trace="$snapshot_dir/clipboard.trace"
+GDK_BACKEND=x11 GSETTINGS_BACKEND=memory NO_AT_BRIDGE=1 XDG_CONFIG_HOME="$config_dir" CHELOTYPE_CONFIG_DIR="$config_dir" CHELOTYPE_SHELL=/usr/bin/fish CHELOTYPE_SNAPSHOT=1 CHELOTYPE_SNAPSHOT_DIR="$snapshot_dir" CHELOTYPE_CLIPBOARD_TRACE="$clipboard_trace" "$bin" &
+pid="$!"
+trap 'kill "$pid" 2>/dev/null || true; for _ in {1..40}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+window_id=""
+for _ in {1..80}; do
+    window_id="$(xdotool search --name 'Chelotype Terminal' | head -n 1 || true)"
+    if [ -n "$window_id" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if [ -z "$window_id" ]; then
+    echo "chelotype window did not appear" >&2
+    exit 1
+fi
+xdotool windowfocus "$window_id" || true
+sleep 0.2
+
+wait_latest_text() {
+    local text="$1"
+    for _ in {1..100}; do
+        latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+        if [ -n "$latest_txt" ] && grep -F "$text" "$latest_txt" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "latest text did not become: $text" >&2
+    latest_txt="$(ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1 || true)"
+    [ -n "$latest_txt" ] && cat "$latest_txt" >&2
+    return 1
+}
+
+xdotool type --window "$window_id" --delay 2 "abc"
+wait_latest_text '❯ abc'
+xdotool key --window "$window_id" ctrl+a
+for _ in {1..100}; do
+    if [ -s "$clipboard_trace" ]; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -Fx "primary	abc" "$clipboard_trace" >/dev/null 2>&1; then
+    echo "ctrl+a did not select only the typed input" >&2
+    cat "$clipboard_trace" >&2 || true
+    exit 1
+fi
+"#;
+
+    let output = xvfb_command()
+        .args([
+            "-a",
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-lc",
+            script,
+            "chelotype-gtk-two-line-prompt-e2e",
+            env!("CARGO_BIN_EXE_chelotype"),
+            dir.to_str().expect("snapshot dir utf8"),
+            config_dir.to_str().expect("config dir utf8"),
+        ])
+        .output()
+        .expect("run gtk two-line prompt e2e under xvfb");
+
+    assert!(
+        output.status.success(),
+        "gtk two-line prompt e2e failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_clean_gtk_stderr(&stderr);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[serial]
 fn gtk_e2e_renders_im_preedit_before_commit_under_xvfb() {
     if !has_command("xvfb-run")
         || !has_command("xdotool")
