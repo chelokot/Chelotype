@@ -32,6 +32,7 @@ jobs:
         run: |
           cargo fmt --check
           scripts/check-release-metadata.sh
+          scripts/update-ghostty.sh --check
 
       - name: Test
         env:

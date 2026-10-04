@@ -32,7 +32,7 @@ jobs:
       - name: Install tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder gpg
+          sudo apt-get install -y flatpak flatpak-builder gpg jq weston
           flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
       - name: Import Flatpak signing key
@@ -47,6 +47,7 @@ jobs:
           FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
         run: |
           scripts/check-release-metadata.sh
+          scripts/update-ghostty.sh --check
           sed -i "s/^        commit: [0-9a-f]\{40\}$/        commit: ${GITHUB_SHA}/" com.chelokot.Chelotype.yml
           grep -F "        commit: ${GITHUB_SHA}" com.chelokot.Chelotype.yml
           mkdir -p public/flatpak
@@ -60,6 +61,9 @@ jobs:
             --gpg-sign="$FLATPAK_GPG_KEY_ID" \
             build-dir \
             com.chelokot.Chelotype.yml
+
+      - name: Smoke test Flatpak
+        run: scripts/smoke-flatpak.sh build-dir
           flatpak build-update-repo \
             --title=Chelotype \
             --comment="Opinionated GTK terminal" \
