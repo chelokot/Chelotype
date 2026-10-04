@@ -5763,6 +5763,16 @@ fn write_active_input_cursor_target(
     if !shell_input_bridge_active(content) {
         return Ok(false);
     }
+    let point = GridPoint {
+        row: usize::from(target.row),
+        column: usize::from(target.column),
+    };
+    if content.display_offset == 0
+        && selection_within_active_input(content, SelectionRange::new(point, point))
+        && workspace.borrow_mut().write_active_input_click(target)?
+    {
+        return Ok(true);
+    }
     let Some(offset) = input_cursor_offset_for_position(content, target) else {
         return Ok(false);
     };

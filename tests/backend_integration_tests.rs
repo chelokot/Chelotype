@@ -1,5 +1,6 @@
 use chelotype::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
 use chelotype::input_selection::active_input_line_range;
+use chelotype::mouse::MouseGridPosition;
 use chelotype::selection::{GridPoint, SelectionRange};
 use chelotype::terminal_palette::default_terminal_palette;
 use portable_pty::CommandBuilder;
@@ -107,6 +108,17 @@ fn wait_for_input_cursor_bridge(backend: &mut TerminalBackend) {
     panic!("timed out waiting for input cursor bridge");
 }
 
+fn typed_input_column(snapshot: &RenderableContentOwned) -> Option<usize> {
+    snapshot.lines[snapshot.cursor_line as usize]
+        .windows(5)
+        .position(|cells| {
+            cells
+                .iter()
+                .map(|cell| cell.text.as_ref())
+                .eq(["a", "b", "c", "d", "e"])
+        })
+}
+
 fn visible_nonblank_lines(snapshot: &RenderableContentOwned) -> Vec<String> {
     snapshot
         .lines
@@ -211,16 +223,8 @@ fn backend_fish_cursor_target_bridge_moves_commandline_cursor_directly() {
         "fish backend should expose cursor target bridge"
     );
     let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
-        let cursor_line = &snapshot.lines[snapshot.cursor_line as usize];
-        cursor_line
-            .windows(5)
-            .position(|cells| {
-                cells
-                    .iter()
-                    .map(|cell| cell.text.as_ref())
-                    .eq(["a", "b", "c", "d", "e"])
-            })
-            .is_some_and(|input_column| snapshot.cursor_col as usize == input_column + 2)
+        typed_input_column(snapshot)
+            .is_some_and(|column| snapshot.cursor_col as usize == column + 2)
     });
 
     assert_eq!(snapshot_text(&snapshot).matches("abcde").count(), 1);
@@ -266,6 +270,40 @@ fn backend_fish_cursor_target_bridge_replaces_long_wrapped_input() {
     });
 
     assert!(snapshot_text(&snapshot).contains("PASTE"));
+    let _ = backend.write(b"\x15exit\n");
+}
+
+#[test]
+#[serial]
+fn backend_fish_native_click_moves_commandline_cursor() {
+    let Some(command) = chelotype_fish_command() else {
+        eprintln!("skipping fish native click test because fish is not installed");
+        return;
+    };
+
+    let mut backend = TerminalBackend::spawn(command).expect("spawn fish");
+    wait_for_input_cursor_bridge(&mut backend);
+    backend.write(b"abcde").expect("write fish input");
+    let typed = wait_for_snapshot(&mut backend, |snapshot| {
+        typed_input_column(snapshot)
+            .is_some_and(|column| snapshot.cursor_col as usize == column + 5)
+    });
+    let input_column = typed_input_column(&typed).expect("typed input column");
+    let clicked = backend
+        .write_input_click(MouseGridPosition {
+            column: (input_column + 2) as u16,
+            row: typed.cursor_line as u16,
+        })
+        .expect("write native click");
+    if !clicked {
+        eprintln!("skipping fish native click test because this fish has no click events");
+        return;
+    }
+
+    let _ = wait_for_snapshot(&mut backend, |snapshot| {
+        typed_input_column(snapshot)
+            .is_some_and(|column| snapshot.cursor_col as usize == column + 2)
+    });
     let _ = backend.write(b"\x15exit\n");
 }
 
