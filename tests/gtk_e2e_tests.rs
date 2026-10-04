@@ -977,12 +977,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf 'SCREENSHOT_OK\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R 'SCREENSHOT_OK' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs 'SCREENSHOT_OK' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'SCREENSHOT_OK' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs 'SCREENSHOT_OK' "$snapshot_dir"; then
     echo "screenshot marker never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -1099,12 +1099,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf '\033[38;2;255;0;0mPIXEL_RED_OK\033[0m\n'; printf 'PIXEL_DONE\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R 'PIXEL_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs 'PIXEL_DONE' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'PIXEL_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs 'PIXEL_DONE' "$snapshot_dir"; then
     echo "pixel marker never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -1207,24 +1207,24 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf '\033]133;A\007CB_PROMPT\033]133;B\007\n\033]133;C\007CB_OUTPUT\nCB_DONE\n\033]133;D;0\007\033]133;A\007NEXT_PROMPT\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
-    if grep -R 'CB_DONE' "$snapshot_dir" >/dev/null 2>&1 && grep -R '"command_blocks": \\[' "$snapshot_dir"/*.render.json >/dev/null 2>&1; then
+    if grep -Rqs 'CB_DONE' "$snapshot_dir" && grep -Rqs '"command_blocks": \\[' "$snapshot_dir"/*.render.json; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'CB_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs 'CB_DONE' "$snapshot_dir"; then
     echo "command block output never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-if ! grep -R '"prompt_start_row"' "$snapshot_dir"/*.render.json >/dev/null 2>&1; then
+if ! grep -Rqs '"prompt_start_row"' "$snapshot_dir"/*.render.json; then
     echo "command block render metadata never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
 xdotool key --window "$window_id" ctrl+shift+Up
 for _ in {1..100}; do
-    if grep -F 'primary	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1 && grep -R '"selected_text": "CB_OUTPUT\nCB_DONE"' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -F 'primary	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1 && grep -Rqs '"selected_text": "CB_OUTPUT\nCB_DONE"' "$snapshot_dir"; then
         break
     fi
     sleep 0.05
@@ -1292,7 +1292,7 @@ xdotool mousedown 1
 sleep 0.08
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -F 'primary	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1 && grep -R '"selected_text": "CB_OUTPUT\nCB_DONE"' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -F 'primary	CB_OUTPUT\nCB_DONE' "$clipboard_trace" >/dev/null 2>&1 && grep -Rqs '"selected_text": "CB_OUTPUT\nCB_DONE"' "$snapshot_dir"; then
         break
     fi
     sleep 0.05
@@ -1395,8 +1395,11 @@ fi
 latest_txt() {
     ls -t "$snapshot_dir"/*.txt 2>/dev/null | head -n 1
 }
-render_snapshot_count() {
-    find "$snapshot_dir" -maxdepth 1 -name '*.render.json' 2>/dev/null | wc -l
+geometry_rows() {
+    sed -n 's/^rows=\([0-9][0-9]*\)$/\1/p' "$geometry_trace"
+}
+latest_render_rows() {
+    python3 -c 'import glob, json, os, sys; print(len(json.load(open(max(glob.glob(os.path.join(sys.argv[1], "*.render.json")), key=os.path.getmtime)))["lines"]))' "$snapshot_dir"
 }
 wait_latest_contains_wrapped_output() {
     for _ in {1..140}; do
@@ -1416,18 +1419,18 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 1 "printf '\033]133;A\007CB_PROMPT\033]133;B\007\n\033]133;C\007CB_WRAP_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_tail\n\033]133;D;0\007\033]133;A\007NEXT_PROMPT\n'"
 xdotool key --window "$window_id" Return
 wait_latest_contains_wrapped_output
-before_resize_render_count="$(render_snapshot_count)"
+before_resize_rows="$(geometry_rows)"
 xdotool windowsize "$window_id" 520 420
 for _ in {1..140}; do
     latest="$(latest_txt || true)"
-    render_count="$(render_snapshot_count)"
-    if [ "$render_count" -gt "$before_resize_render_count" ] && [ -n "$latest" ] && grep -F 'CB_WRAP_' "$latest" >/dev/null 2>&1 && grep -F '0123456789_tail' "$latest" >/dev/null 2>&1 && grep -R '"prompt_start_row"' "$snapshot_dir"/*.render.json >/dev/null 2>&1; then
+    rows="$(geometry_rows)"
+    if [ "$rows" != "$before_resize_rows" ] && [ "$(latest_render_rows)" = "$rows" ] && [ -n "$latest" ] && grep -F 'CB_WRAP_' "$latest" >/dev/null 2>&1 && grep -F '0123456789_tail' "$latest" >/dev/null 2>&1 && grep -Rqs '"prompt_start_row"' "$snapshot_dir"/*.render.json; then
         break
     fi
     sleep 0.1
 done
-if [ "$(render_snapshot_count)" -le "$before_resize_render_count" ]; then
-    echo "resize did not produce a fresh render snapshot" >&2
+if [ "$(geometry_rows)" = "$before_resize_rows" ] || [ "$(latest_render_rows)" != "$(geometry_rows)" ]; then
+    echo "resize did not produce a render snapshot at the new geometry" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
@@ -1468,7 +1471,7 @@ rail_root_y="$(awk -v top="$Y" -v canvas_y="$canvas_y" -v row="$marker_row" -v l
 xdotool mousemove "$rail_root_x" "$rail_root_y"
 xdotool click 1
 for _ in {1..120}; do
-    if grep -Fx "primary	$expected" "$clipboard_trace" >/dev/null 2>&1 && grep -R "\"selected_text\": \"$expected\"" "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Fx "primary	$expected" "$clipboard_trace" >/dev/null 2>&1 && grep -Rqs "\"selected_text\": \"$expected\"" "$snapshot_dir"; then
         break
     fi
     sleep 0.05
@@ -1593,12 +1596,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf '\033[38;2;255;0;0mA\033[0m\033[38;2;102;102;102m \033[38;2;0;255;0mB\033[0m\n'; printf 'GRID_SPACE_DONE\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^GRID_SPACE_DONE[[:space:]]*$' "$snapshot_dir"/*.txt >/dev/null 2>&1 && grep -R '^A B[[:space:]]*$' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '^GRID_SPACE_DONE[[:space:]]*$' "$snapshot_dir"/*.txt && grep -Rqs '^A B[[:space:]]*$' "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^GRID_SPACE_DONE[[:space:]]*$' "$snapshot_dir"/*.txt >/dev/null 2>&1 || ! grep -R '^A B[[:space:]]*$' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^GRID_SPACE_DONE[[:space:]]*$' "$snapshot_dir"/*.txt || ! grep -Rqs '^A B[[:space:]]*$' "$snapshot_dir"/*.txt; then
     echo "grid spacing marker never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -1734,12 +1737,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 1 "python3 -c \"for n in range(1, 61): print(f'SMOOTH_SCROLL_{n}')\""
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
-    if grep -R '^SMOOTH_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^SMOOTH_SCROLL_60' "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^SMOOTH_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^SMOOTH_SCROLL_60' "$snapshot_dir"/*.txt; then
     echo "smooth scroll output never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -1750,7 +1753,7 @@ xdotool mousemove "$((X + WIDTH / 2))" "$((Y + HEIGHT / 2))"
 xdotool click 4
 for _ in {1..120}; do
     frames="$(awk -F '\t' '$1 == "frame" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
-    if [ "$frames" -ge 3 ] && grep -q $'^idle\t0\t0.00' "$scroll_trace" 2>/dev/null && grep -R '"display_offset": [1-9]' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+    if [ "$frames" -ge 3 ] && grep -q $'^idle\t0\t0.00' "$scroll_trace" 2>/dev/null && grep -Rqs '"display_offset": [1-9]' "$snapshot_dir"/*.json; then
         exit 0
     fi
     sleep 0.05
@@ -1960,12 +1963,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 1 "printf 'SCROLL_BOTTOM_READY\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^SCROLL_BOTTOM_READY' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^SCROLL_BOTTOM_READY' "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^SCROLL_BOTTOM_READY' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^SCROLL_BOTTOM_READY' "$snapshot_dir"/*.txt; then
     echo "bottom marker never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -2074,12 +2077,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 1 "python3 -c \"for n in range(1, 61): print(f'DIRECT_SCROLL_{n}')\""
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
-    if grep -R '^DIRECT_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^DIRECT_SCROLL_60' "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^DIRECT_SCROLL_60' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^DIRECT_SCROLL_60' "$snapshot_dir"/*.txt; then
     echo "direct scroll output never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -2089,12 +2092,12 @@ xdotool mousemove "$((X + WIDTH / 2))" "$((Y + HEIGHT / 2))"
 : > "$scroll_trace"
 xdotool click 4
 for _ in {1..80}; do
-    if grep -R '"display_offset": [1-9]' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+    if grep -Rqs '"display_offset": [1-9]' "$snapshot_dir"/*.json; then
         break
     fi
     sleep 0.05
 done
-if ! grep -R '"display_offset": [1-9]' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+if ! grep -Rqs '"display_offset": [1-9]' "$snapshot_dir"/*.json; then
     echo "direct wheel scroll did not move the display offset" >&2
     grep -R '"display_offset"' "$snapshot_dir"/*.json >&2 || true
     exit 1
@@ -2199,24 +2202,24 @@ xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "abc def"
 for _ in {1..100}; do
-    if grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs 'abc def' "$snapshot_dir" && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'abc def' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs 'abc def' "$snapshot_dir"; then
     echo "cursor position snapshot never contained typed text" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
 xdotool type --window "$window_id" --delay 2 "Z"
 for _ in {1..100}; do
-    if grep -R 'abc defZ' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs 'abc defZ' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'abc defZ' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs 'abc defZ' "$snapshot_dir"; then
     echo "cursor reset snapshot never contained final typed text" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -2272,7 +2275,7 @@ done
     let bounds = std::iter::once(screenshot.clone())
         .chain((1..=5).map(|index| dir.join(format!("window_{index}.png"))))
         .filter_map(|path| cursor_pixel_bounds(&path, &geometry_trace, cursor_column, cursor_line))
-        .next()
+        .max_by_key(|bounds| bounds.count)
         .expect("cursor-colored pixels in screenshots");
     let cell_width = geometry_metric(&geometry_trace, "cell_width");
     assert!(
@@ -2515,7 +2518,7 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 'echo XDO_E2E_OK'
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R 'XDO_E2E_OK' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs 'XDO_E2E_OK' "$snapshot_dir"; then
         exit 0
     fi
     sleep 0.1
@@ -3467,12 +3470,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf 'TAB_ONE_ACTIVE\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R 'TAB_ONE_ACTIVE' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs 'TAB_ONE_ACTIVE' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'TAB_ONE_ACTIVE' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs 'TAB_ONE_ACTIVE' "$snapshot_dir"; then
     echo "first tab content never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -3636,7 +3639,7 @@ xdotool click 1
 xdotool type --delay 5 "printf 'AFTER_INLINE_RENAME\\n'"
 xdotool key Return
 for _ in {1..100}; do
-    if grep -R '^AFTER_INLINE_RENAME' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^AFTER_INLINE_RENAME' "$snapshot_dir"/*.txt; then
         exit 0
     fi
     sleep 0.1
@@ -3880,7 +3883,7 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf 'TOOLBOX_STARTUP_OK\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^TOOLBOX_STARTUP_OK' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^TOOLBOX_STARTUP_OK' "$snapshot_dir"/*.txt; then
         exit 0
     fi
     sleep 0.1
@@ -4381,7 +4384,7 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf 'MIDDLE_TAB_ONE\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R 'MIDDLE_TAB_ONE' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs 'MIDDLE_TAB_ONE' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
@@ -4573,7 +4576,7 @@ fi
 wait_contains() {
     needle="$1"
     for _ in {1..140}; do
-        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+        if grep -Rqs "$needle" "$snapshot_dir"; then
             return 0
         fi
         sleep 0.1
@@ -4699,7 +4702,7 @@ fi
 wait_contains() {
     needle="$1"
     for _ in {1..140}; do
-        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+        if grep -Rqs "$needle" "$snapshot_dir"; then
             return 0
         fi
         sleep 0.1
@@ -4833,7 +4836,7 @@ fi
 wait_contains() {
     needle="$1"
     for _ in {1..140}; do
-        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+        if grep -Rqs "$needle" "$snapshot_dir"; then
             return 0
         fi
         sleep 0.1
@@ -5182,7 +5185,7 @@ fi
 wait_contains() {
     needle="$1"
     for _ in {1..140}; do
-        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+        if grep -Rqs "$needle" "$snapshot_dir"; then
             return 0
         fi
         sleep 0.1
@@ -5252,7 +5255,7 @@ xdotool mousemove "$end_x" "$start_y"
 sleep 0.12
 xdotool mouseup 1
 for _ in {1..120}; do
-    if grep -R '"selected_text": "LEFT_SPLIT_SELECTION' "$snapshot_dir" >/dev/null 2>&1 && grep -F 'primary	LEFT_SPLIT_SELECTION' "$clipboard_trace" >/dev/null 2>&1; then
+    if grep -Rqs '"selected_text": "LEFT_SPLIT_SELECTION' "$snapshot_dir" && grep -F 'primary	LEFT_SPLIT_SELECTION' "$clipboard_trace" >/dev/null 2>&1; then
         exit 0
     fi
     sleep 0.1
@@ -5357,7 +5360,7 @@ fi
 wait_contains() {
     needle="$1"
     for _ in {1..140}; do
-        if grep -R "$needle" "$snapshot_dir" >/dev/null 2>&1; then
+        if grep -Rqs "$needle" "$snapshot_dir"; then
             return 0
         fi
         sleep 0.1
@@ -5537,12 +5540,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf 'MOUSE_SELECT_OK\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^MOUSE_SELECT_OK' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^MOUSE_SELECT_OK' "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^MOUSE_SELECT_OK' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^MOUSE_SELECT_OK' "$snapshot_dir"/*.txt; then
     echo "text for mouse selection never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -5566,7 +5569,7 @@ xdotool mousemove "$end_x" "$end_y"
 sleep 0.05
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -R '"selected_text": "MOUSE_SELECT_OK' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs '"selected_text": "MOUSE_SELECT_OK' "$snapshot_dir"; then
         exit 0
     fi
     sleep 0.1
@@ -5674,12 +5677,12 @@ sleep 0.1
 xdotool type --window "$window_id" --delay 2 "printf 'idle-selection-target\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
-    if grep -R '^idle-selection-target' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '^idle-selection-target' "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^idle-selection-target' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^idle-selection-target' "$snapshot_dir"/*.txt; then
     echo "idle selection target never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -5710,7 +5713,7 @@ xdotool mousemove "$end_x" "$target_y"
 sleep 0.2
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -F 'primary	idle-selection-target' "$clipboard_trace" >/dev/null 2>&1 && grep -R '"selected_text": "idle-selection-target' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -F 'primary	idle-selection-target' "$clipboard_trace" >/dev/null 2>&1 && grep -Rqs '"selected_text": "idle-selection-target' "$snapshot_dir"; then
         exit 0
     fi
     sleep 0.05
@@ -5818,13 +5821,13 @@ for _ in {1..3}; do
     xdotool type --window "$window_id" --delay 2 "printf 'WAYLAND alpha beta\n'"
     xdotool key --window "$window_id" Return
     for _ in {1..40}; do
-        if grep -R '^WAYLAND alpha beta' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+        if grep -Rqs '^WAYLAND alpha beta' "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
             break 2
         fi
         sleep 0.1
     done
 done
-if ! grep -R '^WAYLAND alpha beta' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^WAYLAND alpha beta' "$snapshot_dir"/*.txt; then
     echo "nested Wayland output target never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -6153,12 +6156,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf 'DRAG_RELEASE_STABLE\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^DRAG_RELEASE_STABLE' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^DRAG_RELEASE_STABLE' "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^DRAG_RELEASE_STABLE' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^DRAG_RELEASE_STABLE' "$snapshot_dir"/*.txt; then
     echo "text for drag release copy never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -6291,12 +6294,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 1 "python3 -c \"for i in range(1, 41): print(f'VISUAL_FILL_{i:02d}'); print('VISUAL_SCROLL_TARGET')\""
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
-    if grep -R '^VISUAL_SCROLL_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '^VISUAL_SCROLL_TARGET' "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^VISUAL_SCROLL_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^VISUAL_SCROLL_TARGET' "$snapshot_dir"/*.txt; then
     echo "selection scroll target never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -6319,12 +6322,12 @@ xdotool mousemove "$end_x" "$start_y"
 sleep 0.05
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -R '"selected_text": "VISUAL_SCROLL_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs '"selected_text": "VISUAL_SCROLL_TARGET' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '"selected_text": "VISUAL_SCROLL_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs '"selected_text": "VISUAL_SCROLL_TARGET' "$snapshot_dir"; then
     echo "initial target selection was not captured" >&2
     grep -R '"selected_text"' "$snapshot_dir" >&2 || true
     exit 1
@@ -6445,12 +6448,12 @@ latest_snapshot() {
 xdotool type --window "$window_id" --delay 1 "python3 -c \"for i in range(1, 80): print(f'SMOOTH_FILL_{i:02d}'); print('SMOOTH_SELECTION_TARGET')\""
 xdotool key --window "$window_id" Return
 for _ in {1..140}; do
-    if grep -R '^SMOOTH_SELECTION_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '^SMOOTH_SELECTION_TARGET' "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^SMOOTH_SELECTION_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^SMOOTH_SELECTION_TARGET' "$snapshot_dir"/*.txt; then
     echo "smooth-scroll selection target never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -6473,12 +6476,12 @@ xdotool mousemove "$end_x" "$target_y"
 sleep 0.06
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -R '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir"; then
     echo "initial smooth-scroll target selection was not captured" >&2
     grep -R '"selected_text"' "$snapshot_dir" >&2 || true
     exit 1
@@ -6512,7 +6515,7 @@ done
 for _ in {1..180}; do
     after_count="$(snapshot_count)"
     negative_scrolls="$(awk -F '\t' '$1 == "enqueue" && $2 == "-3" { count++ } END { print count + 0 }' "$scroll_trace" 2>/dev/null || echo 0)"
-    if [ "$after_count" -gt "$before_count" ] && [ "$negative_scrolls" -ge 12 ] && grep -R '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir" >/dev/null 2>&1; then
+    if [ "$after_count" -gt "$before_count" ] && [ "$negative_scrolls" -ge 12 ] && grep -Rqs '"selected_text": "SMOOTH_SELECTION_TARGET' "$snapshot_dir"; then
         exit 0
     fi
     sleep 0.05
@@ -6641,12 +6644,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf '$marker\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R "^$marker" "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs "^$marker" "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R "^$marker" "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs "^$marker" "$snapshot_dir"/*.txt; then
     echo "text for clipboard copy never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -6783,12 +6786,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 5 "sh -c 'echo INTERRUPT_READY; sleep 30'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^INTERRUPT_READY' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^INTERRUPT_READY' "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^INTERRUPT_READY' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^INTERRUPT_READY' "$snapshot_dir"/*.txt; then
     echo "interrupt fixture did not start" >&2
     grep -R 'INTERRUPT_READY' "$snapshot_dir"/*.txt >&2 || true
     exit 1
@@ -6798,7 +6801,7 @@ sleep 0.3
 xdotool type --window "$window_id" --delay 2 "printf 'AFTER_CTRL_C_INTERRUPT\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^AFTER_CTRL_C_INTERRUPT' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^AFTER_CTRL_C_INTERRUPT' "$snapshot_dir"/*.txt; then
         exit 0
     fi
     sleep 0.1
@@ -6912,7 +6915,7 @@ wait_latest_text_after() {
 }
 xdotool type --window "$window_id" --delay 2 "abcdef"
 for _ in {1..100}; do
-    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '❯ abcdef' "$snapshot_dir" && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
@@ -6958,7 +6961,7 @@ xdotool key --window "$window_id" BackSpace
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "alpha beta"
 for _ in {1..100}; do
-    if grep -R '❯ alpha beta' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs '❯ alpha beta' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
@@ -6980,7 +6983,7 @@ xdotool key --window "$window_id" BackSpace
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "alpha beta"
 for _ in {1..100}; do
-    if grep -R '❯ alpha beta' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs '❯ alpha beta' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
@@ -7087,7 +7090,7 @@ xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "abcdef"
 for _ in {1..100}; do
-    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '❯ abcdef' "$snapshot_dir" && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
@@ -7138,12 +7141,12 @@ if ! grep -F 'clipboard	abcd' "$clipboard_trace" >/dev/null 2>&1; then
 fi
 xdotool key --window "$window_id" ctrl+x
 for _ in {1..100}; do
-    if grep -R '❯ ef' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs '❯ ef' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '❯ ef' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs '❯ ef' "$snapshot_dir"; then
     echo "Ctrl+X did not cut selected input text" >&2
     grep -R '❯ ' "$snapshot_dir"/*.txt >&2 || true
     exit 1
@@ -7244,12 +7247,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf 'CONTEXT_COPY_OK\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^CONTEXT_COPY_OK' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '^CONTEXT_COPY_OK' "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^CONTEXT_COPY_OK' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^CONTEXT_COPY_OK' "$snapshot_dir"/*.txt; then
     echo "context copy target never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -7398,7 +7401,7 @@ xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "abcdef"
 for _ in {1..100}; do
-    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '❯ abcdef' "$snapshot_dir" && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
@@ -7448,12 +7451,12 @@ cut_y="$(awk -v y="$menu_y" 'BEGIN { printf "%d", y + 58 }')"
 xdotool mousemove "$cut_x" "$cut_y"
 xdotool click 1
 for _ in {1..100}; do
-    if grep -F 'clipboard	abcd' "$clipboard_trace" >/dev/null 2>&1 && grep -R '❯ ef' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -F 'clipboard	abcd' "$clipboard_trace" >/dev/null 2>&1 && grep -Rqs '❯ ef' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -F 'clipboard	abcd' "$clipboard_trace" >/dev/null 2>&1 || ! grep -R '❯ ef' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -F 'clipboard	abcd' "$clipboard_trace" >/dev/null 2>&1 || ! grep -Rqs '❯ ef' "$snapshot_dir"; then
     echo "context menu Cut did not remove selected input text" >&2
     echo "menu=$menu_x,$menu_y cut=$cut_x,$cut_y" >&2
     cat "$clipboard_trace" >&2 || true
@@ -9072,12 +9075,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "printf 'alpha beta gamma\n'"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^alpha beta gamma' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '^alpha beta gamma' "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^alpha beta gamma' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^alpha beta gamma' "$snapshot_dir"/*.txt; then
     echo "click selection target never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -9352,12 +9355,12 @@ sleep 0.2
 xdotool type --window "$window_id" --delay 2 "python3 -u -c \"import time; print('SCROLL_STABLE_TARGET', flush=True); time.sleep(5.0); [print(f'filler_{i}', flush=True) for i in range(1, 81)]\""
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '^SCROLL_STABLE_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '^SCROLL_STABLE_TARGET' "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^SCROLL_STABLE_TARGET' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^SCROLL_STABLE_TARGET' "$snapshot_dir"/*.txt; then
     echo "scroll selection target never appeared" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -9395,12 +9398,12 @@ if ! grep -F 'primary	SCROLL_STABLE_TARGET' "$clipboard_trace" >/dev/null 2>&1; 
     exit 1
 fi
 for _ in {1..120}; do
-    if grep -R '^filler_80' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs '^filler_80' "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '^filler_80' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs '^filler_80' "$snapshot_dir"/*.txt; then
     echo "delayed output did not move the viewport after selection" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -9500,7 +9503,7 @@ xdotool windowfocus "$window_id" || true
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "abcdef"
 for _ in {1..100}; do
-    if grep -R '❯ abcdef' "$snapshot_dir" >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs '❯ abcdef' "$snapshot_dir" && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
@@ -9529,7 +9532,7 @@ xdotool click 1
 sleep 0.2
 xdotool type --window "$window_id" --delay 2 "Z"
 for _ in {1..100}; do
-    if grep -R 'aZbcdef' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs 'aZbcdef' "$snapshot_dir"; then
         exit 0
     fi
     sleep 0.1
@@ -9693,7 +9696,7 @@ xdotool click 1
 sleep 0.2
 xdotool type --window "$window_id" --delay 10 "X"
 for _ in {1..120}; do
-    if grep -R '❯ gXit' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs '❯ gXit' "$snapshot_dir"; then
         exit 0
     fi
     sleep 0.1
@@ -9817,12 +9820,12 @@ cmd="stty raw -echo; printf '\033[?1000h\033[?1006h'; dd bs=1 count=9 2>/dev/nul
 xdotool type --window "$window_id" --delay 1 "$cmd"
 xdotool key --window "$window_id" Return
 for _ in {1..100}; do
-    if grep -R '"click": true' "$snapshot_dir"/*.json >/dev/null 2>&1 && grep -R '"sgr": true' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+    if grep -Rqs '"click": true' "$snapshot_dir"/*.json && grep -Rqs '"sgr": true' "$snapshot_dir"/*.json; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R '"click": true' "$snapshot_dir"/*.json >/dev/null 2>&1 || ! grep -R '"sgr": true' "$snapshot_dir"/*.json >/dev/null 2>&1; then
+if ! grep -Rqs '"click": true' "$snapshot_dir"/*.json || ! grep -Rqs '"sgr": true' "$snapshot_dir"/*.json; then
     echo "terminal mouse mode never appeared in snapshots" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -9839,17 +9842,17 @@ xdotool mousedown 1
 sleep 0.05
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -R 'MOUSE_REPORT_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -Rqs 'MOUSE_REPORT_DONE' "$snapshot_dir"; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'MOUSE_REPORT_DONE' "$snapshot_dir" >/dev/null 2>&1; then
+if ! grep -Rqs 'MOUSE_REPORT_DONE' "$snapshot_dir"; then
     echo "mouse-report command never completed" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
 fi
-if grep -R '1b 5b 3c 30 3b' "$snapshot_dir" | grep '4d' >/dev/null 2>&1; then
+if grep -Rqs '1b 5b 3c 30 3b' "$snapshot_dir" | grep '4d'; then
     exit 0
 fi
 if grep -F 'Write([27, 91, 60, 48, 59' /tmp/chelotype.log >/dev/null 2>&1; then
@@ -10066,12 +10069,12 @@ fi
 xdotool type --window "$window_id" --delay 1 "python3 -c 'print(\"GTK_REFLOW_\" + \"x\" * 90)'"
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
-    if grep -R 'GTK_REFLOW_' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+    if grep -Rqs 'GTK_REFLOW_' "$snapshot_dir"/*.txt; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R 'GTK_REFLOW_' "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs 'GTK_REFLOW_' "$snapshot_dir"/*.txt; then
     echo "reflow target never appeared while narrow" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -10210,12 +10213,12 @@ prefix="$(printf '%*s' "$narrow_cols" '' | tr ' ' x)"
 xdotool type --window "$window_id" --delay 1 "python3 -c 'print(\"x\" * $narrow_cols + \"KEEP_TOKEN\" + \"y\" * 30)'"
 xdotool key --window "$window_id" Return
 for _ in {1..120}; do
-    if grep -R "^$target" "$snapshot_dir"/*.txt >/dev/null 2>&1 && [ -f "$geometry_trace" ]; then
+    if grep -Rqs "^$target" "$snapshot_dir"/*.txt && [ -f "$geometry_trace" ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -R "^$target" "$snapshot_dir"/*.txt >/dev/null 2>&1; then
+if ! grep -Rqs "^$target" "$snapshot_dir"/*.txt; then
     echo "reflow selection target never appeared while narrow" >&2
     find "$snapshot_dir" -maxdepth 1 -type f -print >&2 || true
     exit 1
@@ -10256,7 +10259,7 @@ xdotool mousemove "$end_x" "$end_y"
 sleep 0.1
 xdotool mouseup 1
 for _ in {1..100}; do
-    if grep -F "primary	$target" "$clipboard_trace" >/dev/null 2>&1 && grep -R "\"selected_text\": \"$target\"" "$snapshot_dir" >/dev/null 2>&1; then
+    if grep -F "primary	$target" "$clipboard_trace" >/dev/null 2>&1 && grep -Rqs "\"selected_text\": \"$target\"" "$snapshot_dir"; then
         break
     fi
     sleep 0.05
