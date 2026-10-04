@@ -250,7 +250,10 @@ bind \e\[57347u __chelotype_move_cursor_to_target
 bind -M insert \e\[57347u __chelotype_move_cursor_to_target
 bind \e\[57348u __chelotype_replace_input_range
 bind -M insert \e\[57348u __chelotype_replace_input_range
-test -n "$CHELOTYPE_CURSOR_TARGET_FILE"; and test -f "$CHELOTYPE_CURSOR_TARGET_FILE"; and printf ready > "$CHELOTYPE_CURSOR_TARGET_FILE""#;
+function __chelotype_signal_ready --on-event fish_prompt
+    functions -e __chelotype_signal_ready
+    test -n "$CHELOTYPE_CURSOR_TARGET_FILE"; and test -f "$CHELOTYPE_CURSOR_TARGET_FILE"; and printf ready > "$CHELOTYPE_CURSOR_TARGET_FILE"
+end"#;
 
 pub const FISH_CHELOTYPE_INIT_FOR_TESTS: &str = FISH_CHELOTYPE_INIT;
 
@@ -517,6 +520,34 @@ printf '%s %s %s\n' (count $__chelotype_undo_prefixes) (string length -- (comman
             String::from_utf8_lossy(&output.stdout),
             "0 pending 100\n0 0 0\n"
         );
+    }
+
+    #[test]
+    fn fish_input_bridge_is_not_ready_before_the_first_prompt() {
+        let Some(fish_path) = FISH_CANDIDATES
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+        else {
+            eprintln!("skipping fish bridge readiness test because fish is not installed");
+            return;
+        };
+        let ready_path =
+            std::env::temp_dir().join(format!("chelotype-bridge-ready-{}", std::process::id()));
+        std::fs::write(&ready_path, "").expect("bridge ready file");
+        let output = Command::new(fish_path)
+            .env(INPUT_CURSOR_TARGET_FILE_ENV, &ready_path)
+            .args([
+                "--init-command",
+                FISH_CHELOTYPE_INIT,
+                "-c",
+                r#"command cat "$CHELOTYPE_CURSOR_TARGET_FILE""#,
+            ])
+            .output()
+            .expect("run fish bridge readiness check");
+        let _ = std::fs::remove_file(&ready_path);
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     }
 
     #[test]

@@ -536,7 +536,7 @@ fn headless_mode_replays_mouse_click_as_shell_cursor_movement() {
         .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
         .env(
             "CHELOTYPE_HEADLESS_EVENTS",
-            "text:abcdef|wait:abcdef|mouse:press:left:2,1|mouse:release:2,1|text:Z|key:Enter",
+            "text:abcdef|wait:abcdef|mouse:press:left:2,0|mouse:release:2,0|text:Z|key:Enter",
         )
         .env("CHELOTYPE_HEADLESS_EXPECT", "abZcdef")
         .env("CHELOTYPE_HEADLESS_STEP_MS", "120")
@@ -571,14 +571,18 @@ fn headless_mode_moves_cursor_across_soft_wrapped_input_rows() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let first_row = format!("abZ{}", "c".repeat(117));
     let output = Command::new(env!("CARGO_BIN_EXE_chelotype"))
         .env("CHELOTYPE_HEADLESS", "1")
         .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
         .env(
             "CHELOTYPE_HEADLESS_EVENTS",
-            "resize:12x6|text:abcdefghijklmnopqrstuv|wait:mnopqrstuv|mouse:press:left:2,0|mouse:release:2,0|text:Z|key:Enter",
+            format!(
+                "text:ab{}wrapped|wait:wrapped|mouse:press:left:2,0|mouse:release:2,0|text:Z|key:Enter",
+                "c".repeat(118)
+            ),
         )
-        .env("CHELOTYPE_HEADLESS_EXPECT", "abZcdefghijk|lmnopqrstuv")
+        .env("CHELOTYPE_HEADLESS_EXPECT", format!("{first_row}|cwrapped"))
         .env("CHELOTYPE_HEADLESS_STEP_MS", "160")
         .output()
         .expect("run wrapped mouse click cursor headless binary");
@@ -595,8 +599,8 @@ fn headless_mode_moves_cursor_across_soft_wrapped_input_rows() {
 
     let text_snapshot = snapshot_file_with_extension(&snapshot_paths(&dir), "txt");
     let text = read_to_string(text_snapshot).expect("read text snapshot");
-    assert!(text.contains("abZcdefghijk"), "{text}");
-    assert!(text.contains("lmnopqrstuv"), "{text}");
+    assert!(text.contains(&first_row), "{text}");
+    assert!(text.contains("cwrapped"), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
