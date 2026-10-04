@@ -95,13 +95,14 @@ fn snapshot_text(snapshot: &RenderableContentOwned) -> String {
 fn wait_for_input_cursor_bridge(backend: &mut TerminalBackend) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
+        backend.refresh_dirty();
         if backend
             .input_cursor_bridge_ready()
             .expect("input cursor bridge readiness")
         {
             return;
         }
-        sleep(Duration::from_millis(20));
+        sleep(Duration::from_millis(1));
     }
     panic!("timed out waiting for input cursor bridge");
 }
@@ -201,13 +202,8 @@ fn backend_fish_cursor_target_bridge_moves_commandline_cursor_directly() {
     };
 
     let mut backend = TerminalBackend::spawn(command).expect("spawn fish");
-    let _ = wait_for_snapshot(&mut backend, |snapshot| snapshot.cursor_visible);
     wait_for_input_cursor_bridge(&mut backend);
     backend.write(b"abcde").expect("write fish input");
-    let input_snapshot = wait_for_snapshot(&mut backend, |snapshot| {
-        snapshot_text(snapshot).contains("abcde")
-    });
-    let target_column = input_snapshot.cursor_col - 3;
     assert!(
         backend
             .write_input_cursor_target(2)
@@ -215,10 +211,19 @@ fn backend_fish_cursor_target_bridge_moves_commandline_cursor_directly() {
         "fish backend should expose cursor target bridge"
     );
     let snapshot = wait_for_snapshot(&mut backend, |snapshot| {
-        snapshot_text(snapshot).contains("abcde") && snapshot.cursor_col == target_column
+        let cursor_line = &snapshot.lines[snapshot.cursor_line as usize];
+        cursor_line
+            .windows(5)
+            .position(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| cell.text.as_ref())
+                    .eq(["a", "b", "c", "d", "e"])
+            })
+            .is_some_and(|input_column| snapshot.cursor_col as usize == input_column + 2)
     });
 
-    assert_eq!(snapshot.cursor_col, target_column);
+    assert_eq!(snapshot_text(&snapshot).matches("abcde").count(), 1);
     let _ = backend.write(b"\x15exit\n");
 }
 
