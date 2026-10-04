@@ -81,6 +81,7 @@ pub struct TerminalBackend {
     input_cursor_operation_counter: u64,
     input_replace_operation_counter: u64,
     terminal_palette_id: &'static str,
+    session_context_cache: RefCell<Option<crate::session_context::ProcessContextCache>>,
     dirty: bool,
 }
 
@@ -246,6 +247,7 @@ impl TerminalBackend {
             input_cursor_operation_counter: 0,
             input_replace_operation_counter: 0,
             terminal_palette_id: terminal_palette.id,
+            session_context_cache: RefCell::new(None),
             dirty: true,
         })
     }
@@ -299,6 +301,7 @@ impl TerminalBackend {
         }
         self.writer.take();
         self.master.take();
+        self.session_context_cache.borrow_mut().take();
         if let Some(path) = &self.input_cursor_target_file {
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_file(input_bridge_sidecar_path(path, ".cursor"));
@@ -397,6 +400,17 @@ impl TerminalBackend {
         self.terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
 
+    pub fn alternate_screen(&mut self) -> bool {
+        let _ = self.process_pending();
+        [
+            Mode::ALT_SCREEN_LEGACY,
+            Mode::ALT_SCREEN,
+            Mode::ALT_SCREEN_SAVE,
+        ]
+        .into_iter()
+        .any(|mode| self.terminal.mode(mode).unwrap_or(false))
+    }
+
     pub fn resize(&mut self, size: ScreenSize) -> std::io::Result<()> {
         self.master
             .as_ref()
@@ -423,6 +437,26 @@ impl TerminalBackend {
             .get_size()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         ScreenSize::new(size.cols, size.rows)
+    }
+
+    pub fn session_context(&self) -> crate::session_context::SessionContext {
+        #[cfg(unix)]
+        {
+            let Some(master) = self.master.as_ref() else {
+                return crate::session_context::SessionContext::Unknown;
+            };
+            let Some(fd) = master.as_raw_fd() else {
+                return crate::session_context::SessionContext::Unknown;
+            };
+            crate::session_context::detect_from_pty_cached(
+                fd,
+                &mut self.session_context_cache.borrow_mut(),
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            crate::session_context::SessionContext::Unknown
+        }
     }
 
     pub fn scroll_display(&mut self, lines: i32) -> std::io::Result<()> {

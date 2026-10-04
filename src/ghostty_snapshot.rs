@@ -1,10 +1,10 @@
 use crate::terminal_grid::{
     MouseMode, TerminalCell, TerminalColors, TerminalContent, TerminalLine, TerminalLineMetadata,
-    TerminalSemanticPrompt,
+    TerminalSemanticContent, TerminalSemanticPrompt,
 };
 use crate::terminal_palette::{TerminalPalette, default_terminal_palette};
 use libghostty_vt::render::{CellIterator, Dirty, RowIterator};
-use libghostty_vt::screen::{CellWide, RowSemanticPrompt};
+use libghostty_vt::screen::{CellSemanticContent, CellWide, RowSemanticPrompt};
 use libghostty_vt::style::{RgbColor, Underline};
 use libghostty_vt::terminal::Mode;
 use libghostty_vt::{RenderState, Terminal};
@@ -71,15 +71,19 @@ impl GhosttySnapshotter {
                 if rebuild_all || row.dirty()? {
                     let metadata = line_metadata_from_ghostty(row.raw_row()?)?;
                     let mut line = Vec::with_capacity(cols);
+                    let mut semantic_contents = Vec::with_capacity(cols);
                     let mut cell_iter = self.cell_iter.update(row)?;
                     while let Some(cell) = cell_iter.next() {
-                        line.push(terminal_cell_from_ghostty(cell, &colors)?);
+                        let (terminal_cell, semantic) = terminal_cell_from_ghostty(cell, &colors)?;
+                        line.push(terminal_cell);
+                        semantic_contents.push(semantic);
                     }
+                    let line = TerminalLine::from_cells_with_semantics(line, semantic_contents);
                     if rebuild_all {
-                        self.lines.push(line.into());
+                        self.lines.push(line);
                         self.line_metadata.push(metadata);
                     } else {
-                        self.lines[row_index] = line.into();
+                        self.lines[row_index] = line;
                         self.line_metadata[row_index] = metadata;
                     }
                     self.converted_rows += 1;
@@ -148,37 +152,45 @@ fn line_metadata_from_ghostty(
 fn terminal_cell_from_ghostty(
     cell: &libghostty_vt::render::CellIteration<'_, '_>,
     colors: &libghostty_vt::render::Colors,
-) -> libghostty_vt::error::Result<TerminalCell> {
+) -> libghostty_vt::error::Result<(TerminalCell, TerminalSemanticContent)> {
     let raw = cell.raw_cell()?;
     let wide = raw.wide()?;
+    let semantic = match raw.semantic_content()? {
+        CellSemanticContent::Output => TerminalSemanticContent::Output,
+        CellSemanticContent::Input => TerminalSemanticContent::Input,
+        CellSemanticContent::Prompt => TerminalSemanticContent::Prompt,
+    };
     if !raw.has_text()? && !raw.has_styling()? {
         let mut cell = TerminalCell::blank();
         cell.wide_spacer = matches!(wide, CellWide::SpacerTail | CellWide::SpacerHead);
-        return Ok(cell);
+        return Ok((cell, semantic));
     }
     let text = match cell.graphemes()?.into_iter().collect::<String>() {
         text if text.is_empty() => Cow::Borrowed(" "),
         text => Cow::Owned(text),
     };
     let style = cell.style()?;
-    Ok(TerminalCell {
-        text,
-        fg: cell
-            .fg_color()?
-            .map(rgb_to_hex)
-            .or_else(|| style_color_to_hex(style.fg_color, colors)),
-        bg: cell
-            .bg_color()?
-            .map(rgb_to_hex)
-            .or_else(|| style_color_to_hex(style.bg_color, colors)),
-        bold: style.bold,
-        italic: style.italic,
-        underline: style.underline != Underline::None,
-        inverse: style.inverse,
-        strikeout: style.strikethrough,
-        wide: wide == CellWide::Wide,
-        wide_spacer: matches!(wide, CellWide::SpacerTail | CellWide::SpacerHead),
-    })
+    Ok((
+        TerminalCell {
+            text,
+            fg: cell
+                .fg_color()?
+                .map(rgb_to_hex)
+                .or_else(|| style_color_to_hex(style.fg_color, colors)),
+            bg: cell
+                .bg_color()?
+                .map(rgb_to_hex)
+                .or_else(|| style_color_to_hex(style.bg_color, colors)),
+            bold: style.bold,
+            italic: style.italic,
+            underline: style.underline != Underline::None,
+            inverse: style.inverse,
+            strikeout: style.strikethrough,
+            wide: wide == CellWide::Wide,
+            wide_spacer: matches!(wide, CellWide::SpacerTail | CellWide::SpacerHead),
+        },
+        semantic,
+    ))
 }
 
 fn style_color_to_hex(
@@ -279,6 +291,46 @@ mod tests {
         let snapshot = snapshotter.snapshot(&terminal).expect("snapshot");
 
         assert_eq!(snapshot.lines[0][0].fg.as_deref(), Some("#123456"));
+    }
+
+    #[test]
+    fn snapshot_preserves_osc133_cell_semantics() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 24,
+            rows: 3,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        terminal.vt_write(b"\x1b]133;A\x07header on main \xe2\x9d\xaf \x1b]133;B\x07echo > file");
+        let mut snapshotter = GhosttySnapshotter::new().expect("snapshotter");
+        let snapshot = snapshotter.snapshot(&terminal).expect("snapshot");
+        let line = &snapshot.lines[0];
+        let input_start = line
+            .iter()
+            .enumerate()
+            .position(|(column, _)| line.semantic_content(column) == TerminalSemanticContent::Input)
+            .expect("input semantic cell");
+        assert_eq!(line[input_start].text, "e");
+        assert!(
+            (0..input_start)
+                .all(|column| { line.semantic_content(column) == TerminalSemanticContent::Prompt })
+        );
+    }
+
+    #[test]
+    fn snapshot_marks_empty_osc133_input_cells() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 24,
+            rows: 3,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+        terminal.vt_write(b"\x1b]133;A\x07spaced prompt \x1b]133;B\x07");
+        let mut snapshotter = GhosttySnapshotter::new().expect("snapshotter");
+        let snapshot = snapshotter.snapshot(&terminal).expect("snapshot");
+        let line = &snapshot.lines[0];
+        assert_eq!(line.semantic_content(13), TerminalSemanticContent::Prompt);
+        assert_eq!(line.semantic_content(14), TerminalSemanticContent::Output);
     }
 
     #[test]

@@ -55,8 +55,43 @@ impl LaunchTarget {
 }
 
 pub fn startup_launch_target() -> LaunchTarget {
+    let remembered = crate::config::read_value("startup_launch_target");
+    if let Some(target) = remembered
+        .as_deref()
+        .and_then(parse_launch_target_id)
+        .filter(launch_target_exists)
+    {
+        return target;
+    }
     let targets = available_launch_targets();
-    select_startup_launch_target(&targets, crate::config::read_value("startup_launch_target"))
+    select_startup_launch_target(&targets, remembered)
+}
+
+fn parse_launch_target_id(id: &str) -> Option<LaunchTarget> {
+    if id == "host" {
+        return Some(LaunchTarget::Host);
+    }
+    if let Some(name) = id.strip_prefix("toolbox:") {
+        return Some(LaunchTarget::Toolbox {
+            name: name.to_owned(),
+        });
+    }
+    id.strip_prefix("podman:").map(|name| LaunchTarget::Podman {
+        name: name.to_owned(),
+    })
+}
+
+fn launch_target_exists(target: &LaunchTarget) -> bool {
+    match target {
+        LaunchTarget::Host => true,
+        LaunchTarget::Distrobox { .. } => false,
+        LaunchTarget::Toolbox { name } | LaunchTarget::Podman { name } => {
+            crate::host::command("podman")
+                .args(["container", "exists", name])
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+    }
 }
 
 pub fn remember_startup_launch_target(target: &LaunchTarget) {
@@ -281,6 +316,37 @@ fn parse_podman_targets(output: &str) -> Vec<LaunchTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_remembered_targets_that_need_no_enumeration() {
+        assert_eq!(parse_launch_target_id("host"), Some(LaunchTarget::Host));
+        assert_eq!(
+            parse_launch_target_id("toolbox:fedora-toolbox"),
+            Some(LaunchTarget::Toolbox {
+                name: "fedora-toolbox".to_owned()
+            })
+        );
+        assert_eq!(
+            parse_launch_target_id("podman:dev"),
+            Some(LaunchTarget::Podman {
+                name: "dev".to_owned()
+            })
+        );
+        assert_eq!(parse_launch_target_id("distrobox:box"), None);
+        assert_eq!(parse_launch_target_id("unknown"), None);
+    }
+
+    #[test]
+    fn parsed_targets_round_trip_through_their_ids() {
+        for id in ["host", "toolbox:fedora-toolbox", "podman:dev"] {
+            assert_eq!(
+                parse_launch_target_id(id)
+                    .map(|target| target.id())
+                    .as_deref(),
+                Some(id)
+            );
+        }
+    }
 
     #[test]
     fn parses_toolbox_table_names() {

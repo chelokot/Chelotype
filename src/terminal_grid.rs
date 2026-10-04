@@ -35,27 +35,27 @@ impl TerminalCell {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TerminalSemanticContent {
+    #[default]
+    Output,
+    Input,
+    Prompt,
+}
+
 #[derive(Clone, Debug)]
 pub struct TerminalLine {
     cells: Arc<[TerminalCell]>,
     character_offsets: Option<Arc<[usize]>>,
+    semantic_contents: Arc<[TerminalSemanticContent]>,
 }
 
 impl TerminalLine {
-    pub fn uses_visual_character_offsets(&self) -> bool {
-        self.character_offsets.is_none()
-    }
-
-    pub fn character_offset(&self, column: usize) -> usize {
-        self.character_offsets
-            .as_ref()
-            .map(|offsets| offsets[column.min(self.cells.len())])
-            .unwrap_or_else(|| column.min(self.cells.len()))
-    }
-}
-
-impl From<Vec<TerminalCell>> for TerminalLine {
-    fn from(cells: Vec<TerminalCell>) -> Self {
+    pub(crate) fn from_cells_with_semantics(
+        cells: Vec<TerminalCell>,
+        semantic_contents: Vec<TerminalSemanticContent>,
+    ) -> Self {
+        assert_eq!(cells.len(), semantic_contents.len());
         let visual_offsets = cells
             .iter()
             .all(|cell| !cell.wide_spacer && cell.text.len() == 1 && cell.text.is_ascii());
@@ -76,7 +76,37 @@ impl From<Vec<TerminalCell>> for TerminalLine {
         Self {
             cells: cells.into(),
             character_offsets,
+            semantic_contents: semantic_contents.into(),
         }
+    }
+
+    pub fn uses_visual_character_offsets(&self) -> bool {
+        self.character_offsets.is_none()
+    }
+
+    pub fn semantic_content(&self, column: usize) -> TerminalSemanticContent {
+        self.semantic_contents
+            .get(column)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn has_semantic_content(&self, semantic: TerminalSemanticContent) -> bool {
+        self.semantic_contents.contains(&semantic)
+    }
+
+    pub fn character_offset(&self, column: usize) -> usize {
+        self.character_offsets
+            .as_ref()
+            .map(|offsets| offsets[column.min(self.cells.len())])
+            .unwrap_or_else(|| column.min(self.cells.len()))
+    }
+}
+
+impl From<Vec<TerminalCell>> for TerminalLine {
+    fn from(cells: Vec<TerminalCell>) -> Self {
+        let semantic_contents = vec![TerminalSemanticContent::Output; cells.len()];
+        Self::from_cells_with_semantics(cells, semantic_contents)
     }
 }
 
@@ -102,7 +132,7 @@ impl AsRef<[TerminalCell]> for TerminalLine {
 
 impl PartialEq for TerminalLine {
     fn eq(&self, other: &Self) -> bool {
-        self.cells == other.cells
+        self.cells == other.cells && self.semantic_contents == other.semantic_contents
     }
 }
 

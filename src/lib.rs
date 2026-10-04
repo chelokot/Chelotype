@@ -19,6 +19,7 @@ pub mod perf_trace;
 pub mod process_metrics;
 pub mod render;
 pub mod selection;
+pub mod session_context;
 pub mod shell;
 pub mod smooth_scroll;
 pub mod snapshot;

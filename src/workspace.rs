@@ -141,6 +141,10 @@ impl TerminalWorkspace {
         self.active_tab().active_pane
     }
 
+    pub fn active_session_context(&self) -> crate::session_context::SessionContext {
+        self.active_pane().session_context()
+    }
+
     pub fn add_tab_with(&mut self, command: CommandBuilder) -> io::Result<TabId> {
         self.add_titled_tab_with("Chelotype", command)
     }
@@ -441,6 +445,10 @@ impl TerminalWorkspace {
 
     pub fn active_bracketed_paste_mode(&mut self) -> bool {
         self.active_pane_mut().bracketed_paste_mode()
+    }
+
+    pub fn active_alternate_screen(&mut self) -> bool {
+        self.active_pane_mut().alternate_screen()
     }
 
     pub fn resize_active(&mut self, size: ScreenSize) -> io::Result<()> {

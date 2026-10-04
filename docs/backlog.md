@@ -9,6 +9,7 @@ Chelotype has an internal cursor-target bridge for moving the shell input cursor
 Current state:
 
 - Fish is supported through `commandline -C`.
+- Fish input edits are isolated per command: the bridge clears its undo and redo state at `fish_preexec`.
 - Host, Distrobox, Toolbox, and Podman launch targets can carry the Fish bridge.
 - Unsupported shells fall back to regular terminal arrow sequences.
 
@@ -19,4 +20,3 @@ Backlog:
 - Keep the public Chelotype API shell-agnostic: callers should ask for `write_input_cursor_target(offset)`, while shell-specific modules decide whether they can handle it.
 - Add diagnostics that show whether the active pane is using a cursor bridge or fallback arrows.
 - Add an end-to-end regression for wrapped long input in a container launch target.
-
