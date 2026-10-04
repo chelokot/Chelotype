@@ -568,13 +568,19 @@ fn semantic_prompt_editable_start(
     start: usize,
     end: usize,
 ) -> Option<usize> {
-    (start..=end).find(|row| {
-        content.lines.get(*row).is_some_and(|line| {
-            line_has_semantic_prompt(line)
-                || line_has_semantic_input(line)
-                || prompt_leader_before_input(line)
+    let row_matches = |row: &usize, predicate: fn(&TerminalLine) -> bool| {
+        content.lines.get(*row).is_some_and(predicate)
+    };
+    (start..=end)
+        .find(|row| row_matches(row, line_has_semantic_input))
+        .or_else(|| {
+            (start..=end)
+                .rev()
+                .find(|row| row_matches(row, line_has_semantic_prompt))
         })
-    })
+        .or_else(|| {
+            (start..=end).find(|row| row_matches(row, |line| prompt_leader_before_input(line)))
+        })
 }
 
 fn prompt_leader_before_input(line: &[TerminalCell]) -> bool {
