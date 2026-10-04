@@ -38,6 +38,7 @@ pub fn run_headless_scenario() -> std::io::Result<PathBuf> {
         return run_headless_workspace_scenario(scenario);
     }
     let mut backend = TerminalBackend::spawn_headless_shell()?;
+    wait_for_raw_input(&mut backend)?;
     let mut runtime = HeadlessRuntime::default();
     for action in &scenario.actions {
         runtime.apply(&mut backend, action)?;
@@ -639,6 +640,21 @@ fn decode_action(input: &str) -> String {
         }
     }
     output
+}
+
+fn wait_for_raw_input(backend: &mut TerminalBackend) -> std::io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        backend.refresh_dirty();
+        if backend.input_is_raw() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(5));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "headless shell did not take raw terminal input",
+    ))
 }
 
 fn wait_for_headless_content(

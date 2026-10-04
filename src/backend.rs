@@ -411,6 +411,13 @@ impl TerminalBackend {
         .any(|mode| self.terminal.mode(mode).unwrap_or(false))
     }
 
+    pub fn input_is_raw(&self) -> bool {
+        self.master
+            .as_ref()
+            .and_then(|master| master.get_termios())
+            .is_some_and(|termios| libc::termios::from(termios).c_lflag & libc::ICANON == 0)
+    }
+
     pub fn resize(&mut self, size: ScreenSize) -> std::io::Result<()> {
         self.master
             .as_ref()
