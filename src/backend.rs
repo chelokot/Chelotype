@@ -1,5 +1,6 @@
 use crate::cell_text::cells_to_text;
 use crate::ghostty_snapshot::GhosttySnapshotter;
+use crate::mouse::MouseGridPosition;
 pub use crate::terminal_grid::{MouseMode, TerminalContent as RenderableContentOwned};
 use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{Terminal, TerminalOptions};
@@ -78,6 +79,7 @@ pub struct TerminalBackend {
     pty_responses: Rc<RefCell<Vec<Vec<u8>>>>,
     input_cursor_target_file: Option<PathBuf>,
     input_cursor_bridge_ready: bool,
+    input_native_click: bool,
     input_cursor_operation_counter: u64,
     input_replace_operation_counter: u64,
     terminal_palette_id: &'static str,
@@ -244,6 +246,7 @@ impl TerminalBackend {
             pty_responses,
             input_cursor_target_file,
             input_cursor_bridge_ready: false,
+            input_native_click: false,
             input_cursor_operation_counter: 0,
             input_replace_operation_counter: 0,
             terminal_palette_id: terminal_palette.id,
@@ -384,8 +387,19 @@ impl TerminalBackend {
         let Some(path) = &self.input_cursor_target_file else {
             return Ok(false);
         };
-        self.input_cursor_bridge_ready = std::fs::read_to_string(path)? == "ready";
+        let state = std::fs::read_to_string(path)?;
+        let mut capabilities = state.split_whitespace();
+        self.input_cursor_bridge_ready = capabilities.next() == Some("ready");
+        self.input_native_click = capabilities.any(|capability| capability == "native-click");
         Ok(self.input_cursor_bridge_ready)
+    }
+
+    pub fn write_input_click(&mut self, position: MouseGridPosition) -> std::io::Result<bool> {
+        if !self.input_cursor_bridge_ready()? || !self.input_native_click {
+            return Ok(false);
+        }
+        self.write(format!("\x1b[<0;{};{}M", position.column + 1, position.row + 1).as_bytes())?;
+        Ok(true)
     }
 
     pub fn shell_input_ready(&mut self) -> std::io::Result<bool> {

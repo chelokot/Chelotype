@@ -252,7 +252,10 @@ bind \e\[57348u __chelotype_replace_input_range
 bind -M insert \e\[57348u __chelotype_replace_input_range
 function __chelotype_signal_ready --on-event fish_prompt
     functions -e __chelotype_signal_ready
-    test -n "$CHELOTYPE_CURSOR_TARGET_FILE"; and test -f "$CHELOTYPE_CURSOR_TARGET_FILE"; and printf ready > "$CHELOTYPE_CURSOR_TARGET_FILE"
+    test -n "$CHELOTYPE_CURSOR_TARGET_FILE"; and test -f "$CHELOTYPE_CURSOR_TARGET_FILE"; or return
+    set -l capabilities ready
+    test (string split -f1 . -- $version) -ge 4; and set -a capabilities native-click
+    string join ' ' -- $capabilities > "$CHELOTYPE_CURSOR_TARGET_FILE"
 end"#;
 
 pub const FISH_CHELOTYPE_INIT_FOR_TESTS: &str = FISH_CHELOTYPE_INIT;
@@ -548,6 +551,55 @@ printf '%s %s %s\n' (count $__chelotype_undo_prefixes) (string length -- (comman
 
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    }
+
+    #[test]
+    fn fish_input_bridge_advertises_native_clicks_from_fish_4() {
+        let Some(fish_path) = FISH_CANDIDATES
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+        else {
+            eprintln!("skipping fish bridge capability test because fish is not installed");
+            return;
+        };
+        let version = Command::new(fish_path)
+            .arg("--version")
+            .output()
+            .expect("run fish --version");
+        let major_version = String::from_utf8_lossy(&version.stdout)
+            .trim()
+            .rsplit(' ')
+            .next()
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse::<u32>().ok())
+            .expect("fish major version");
+        let ready_path = std::env::temp_dir().join(format!(
+            "chelotype-bridge-capabilities-{}",
+            std::process::id()
+        ));
+        std::fs::write(&ready_path, "").expect("bridge ready file");
+        let status = Command::new(fish_path)
+            .env(INPUT_CURSOR_TARGET_FILE_ENV, &ready_path)
+            .args([
+                "--init-command",
+                FISH_CHELOTYPE_INIT,
+                "-c",
+                "emit fish_prompt",
+            ])
+            .status()
+            .expect("run fish bridge capability check");
+        let capabilities = std::fs::read_to_string(&ready_path).expect("bridge ready file");
+        let _ = std::fs::remove_file(&ready_path);
+
+        assert!(status.success());
+        assert_eq!(
+            capabilities,
+            if major_version >= 4 {
+                "ready native-click\n"
+            } else {
+                "ready\n"
+            }
+        );
     }
 
     #[test]

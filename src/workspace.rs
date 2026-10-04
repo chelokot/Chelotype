@@ -1,5 +1,6 @@
 use crate::backend::{RenderableContentOwned, ScreenSize, TerminalBackend};
 use crate::containers::LaunchTarget;
+use crate::mouse::MouseGridPosition;
 use portable_pty::CommandBuilder;
 use std::io;
 
@@ -431,6 +432,10 @@ impl TerminalWorkspace {
         let pane = self.active_pane_mut();
         pane.scroll_to_bottom()?;
         pane.write_input_cursor_target(offset)
+    }
+
+    pub fn write_active_input_click(&mut self, position: MouseGridPosition) -> io::Result<bool> {
+        self.active_pane_mut().write_input_click(position)
     }
 
     pub fn write_active_input_replace_range(
