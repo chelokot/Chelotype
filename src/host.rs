@@ -171,4 +171,13 @@ mod tests {
         );
         assert_eq!(host_path("fish"), None);
     }
+
+    #[test]
+    fn flatpak_manifest_exposes_host_os_under_host_root() {
+        assert!(
+            include_str!("../com.chelokot.Chelotype.yml")
+                .lines()
+                .any(|line| line.trim() == "- --filesystem=host-os:ro")
+        );
+    }
 }
