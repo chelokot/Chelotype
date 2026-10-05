@@ -27,7 +27,8 @@ use crate::selection::{
     selected_text_with_metadata, viewport_range_for_display, word_range_at,
 };
 use crate::snapshot::{
-    write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
+    write_canvas_pixels, write_render_frame_snapshot, write_snapshot_with_selection,
+    write_workspace_render_snapshot,
 };
 use crate::terminal_font::metrics_for_widget;
 use crate::terminal_grid::TerminalSemanticPrompt;
@@ -1728,7 +1729,7 @@ fn build_ui(app: &Application) {
                 if let Some(rendered) = &rendered_snapshot {
                     let _ = write_workspace_render_snapshot(rendered, "gtk_e2e_workspace");
                 }
-                app_for_tick.quit();
+                quit_after_painted_pixels(&app_for_tick, tick_canvas.widget());
                 record_tick_work(tick_wall_started);
                 return glib::ControlFlow::Break;
             }
@@ -1843,7 +1844,7 @@ fn build_ui(app: &Application) {
                         let _ = write_render_frame_snapshot(rendered, "gtk_e2e_render");
                     }
                     let _ = write_snapshot_with_selection(content, "gtk_e2e", visible_selection);
-                    app_for_tick.quit();
+                    quit_after_painted_pixels(&app_for_tick, tick_canvas.widget());
                     record_tick_work(tick_wall_started);
                     return glib::ControlFlow::Break;
                 }
@@ -2688,6 +2689,15 @@ impl UiE2eScenario {
             timeout,
         })
     }
+}
+
+fn quit_after_painted_pixels(app: &Application, widget: &gtk::DrawingArea) {
+    let app = app.clone();
+    widget.add_tick_callback(move |widget, _| {
+        write_canvas_pixels(widget);
+        app.quit();
+        glib::ControlFlow::Break
+    });
 }
 
 fn copy_selection_to_primary(

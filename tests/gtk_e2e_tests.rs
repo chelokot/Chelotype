@@ -593,6 +593,190 @@ fn gtk_e2e_renders_real_window_to_snapshot_under_xvfb() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+struct Pixels {
+    width: usize,
+    rgba: Vec<u8>,
+}
+
+impl Pixels {
+    fn read(path: &std::path::Path) -> Self {
+        let bytes = std::fs::read(path).expect("read pixel dump");
+        let header_end = bytes
+            .windows(7)
+            .position(|window| window == b"ENDHDR\n")
+            .expect("pam header")
+            + 7;
+        let header = String::from_utf8_lossy(&bytes[..header_end]);
+        let width = header
+            .lines()
+            .find_map(|line| line.strip_prefix("WIDTH "))
+            .and_then(|width| width.parse().ok())
+            .expect("pam width");
+        Self {
+            width,
+            rgba: bytes[header_end..].to_vec(),
+        }
+    }
+
+    fn luminance(&self, x: usize, y: usize) -> f64 {
+        let pixel = &self.rgba[(y * self.width + x) * 4..][..3];
+        0.299 * f64::from(pixel[0]) + 0.587 * f64::from(pixel[1]) + 0.114 * f64::from(pixel[2])
+    }
+
+    fn horizontal_stroke_sharpness(
+        &self,
+        x: std::ops::Range<usize>,
+        y: std::ops::Range<usize>,
+    ) -> f64 {
+        let luminances = y
+            .clone()
+            .flat_map(|row| x.clone().map(move |column| (column, row)))
+            .map(|(column, row)| self.luminance(column, row))
+            .collect::<Vec<_>>();
+        let contrast = luminances.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            - luminances.iter().copied().fold(f64::INFINITY, f64::min);
+        let steps = (y.start..y.end - 1)
+            .flat_map(|row| x.clone().map(move |column| (column, row)))
+            .map(|(column, row)| {
+                (self.luminance(column, row + 1) - self.luminance(column, row)).abs()
+            })
+            .collect::<Vec<_>>();
+        let edges = steps.iter().filter(|step| **step > 0.1 * contrast).count();
+        let sharp_edges = steps.iter().filter(|step| **step > 0.6 * contrast).count();
+        sharp_edges as f64 / edges as f64
+    }
+}
+
+fn snapshot_rows(snapshot: &serde_json::Value) -> Vec<String> {
+    snapshot["lines"]
+        .as_array()
+        .expect("snapshot lines")
+        .iter()
+        .map(|line| {
+            line["cells"]
+                .as_array()
+                .expect("snapshot cells")
+                .iter()
+                .map(|cell| cell["text"].as_str().expect("cell text"))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+#[serial]
+fn gtk_e2e_renders_history_text_as_sharp_as_input_across_scales_and_fonts_under_xvfb() {
+    if !has_command("xvfb-run") {
+        eprintln!("skipping gtk text quality e2e because xvfb-run is not installed");
+        return;
+    }
+    const PROBE: &str = "PROBE_HIMWl1x0Og";
+    const SCALES: [f64; 5] = [1.0, 1.25, 4.0 / 3.0, 1.5, 2.0];
+
+    for font_config in [
+        "use_system_font=true\nfont_size_tenths=110\n",
+        "use_system_font=false\ncustom_font=DejaVu Sans Mono 10\nfont_size_tenths=100\n",
+        "use_system_font=false\ncustom_font=Liberation Mono 13\nfont_size_tenths=130\n",
+    ] {
+        let dir = std::env::temp_dir().join(format!(
+            "chelotype-gtk-text-quality-e2e-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("snapshot dir");
+        std::fs::write(
+            dir.join("config"),
+            format!(
+                "first_launch_preferences_shown=true\nstartup_launch_target=host\n{font_config}"
+            ),
+        )
+        .expect("config");
+        let geometry_trace = dir.join("geometry.env");
+        let (probe_head, probe_tail) = PROBE.split_at(PROBE.len() / 2);
+
+        let output = xvfb_command()
+            .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
+            .env("GDK_BACKEND", "x11")
+            .env("GSETTINGS_BACKEND", "memory")
+            .env("NO_AT_BRIDGE", "1")
+            .env("CHELOTYPE_CONFIG_DIR", &dir)
+            .env("CHELOTYPE_SHELL", "/bin/sh")
+            .env("GSK_RENDERER", "gl")
+            .env("CHELOTYPE_UI_E2E", "1")
+            .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+            .env("CHELOTYPE_GEOMETRY_TRACE", &geometry_trace)
+            .env(
+                "CHELOTYPE_PIXEL_SCALES",
+                SCALES.map(|scale| scale.to_string()).join(","),
+            )
+            .env(
+                "CHELOTYPE_UI_E2E_INPUT",
+                format!("printf '%s%s=\\n' {probe_head} {probe_tail}\n: {PROBE}#"),
+            )
+            .env("CHELOTYPE_UI_E2E_EXPECT", format!("{PROBE}=|{PROBE}#"))
+            .output()
+            .expect("run gtk text quality e2e under xvfb");
+        assert!(
+            output.status.success(),
+            "gtk text quality e2e failed for {font_config:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_clean_gtk_stderr(&String::from_utf8_lossy(&output.stderr));
+
+        let rows = snapshot_rows(
+            json_snapshots(&dir)
+                .last()
+                .expect("final terminal snapshot"),
+        );
+        let probe_cell = |marker: &str| {
+            rows.iter()
+                .enumerate()
+                .find_map(|(row, text)| {
+                    text.find(&format!("{PROBE}{marker}"))
+                        .map(|column| (row, column))
+                })
+                .unwrap_or_else(|| panic!("no {PROBE}{marker} row in {rows:?}"))
+        };
+        let history = probe_cell("=");
+        let input = probe_cell("#");
+        let cell_width = geometry_metric(&geometry_trace, "cell_width");
+        let line_height = geometry_metric(&geometry_trace, "line_height");
+        let offset_x = geometry_metric(&geometry_trace, "cell_offset_x");
+        let offset_y = geometry_metric(&geometry_trace, "cell_offset_y");
+
+        for scale in SCALES {
+            let pixels_path = snapshot_paths(&dir)
+                .into_iter()
+                .find(|path| {
+                    path.to_string_lossy()
+                        .ends_with(&format!(".scale{}.pam", (scale * 1000.0).round()))
+                })
+                .unwrap_or_else(|| panic!("no pixel dump at scale {scale}"));
+            let pixels = Pixels::read(&pixels_path);
+            let probe_sharpness = |(row, column): (usize, usize)| {
+                let left = offset_x + column as f64 * cell_width;
+                let top = offset_y + row as f64 * line_height;
+                pixels.horizontal_stroke_sharpness(
+                    (left * scale).floor() as usize
+                        ..((left + PROBE.len() as f64 * cell_width) * scale).ceil() as usize,
+                    (top * scale).floor() as usize..((top + line_height) * scale).ceil() as usize,
+                )
+            };
+            let ratio = probe_sharpness(history) / probe_sharpness(input);
+            assert!(
+                (0.85..=1.35).contains(&ratio),
+                "history and input text differ in sharpness for {font_config:?} at scale {scale}: \
+                 ratio {ratio:.3}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[test]
 #[serial]
 fn gtk_e2e_exports_colored_cells_under_xvfb() {
@@ -1896,7 +2080,6 @@ exit 1
     let paint_rows = perf_counters(&perf_trace, "gtk_paint_rows");
     let layout_hits = perf_counters(&perf_trace, "gtk_layout_cache_hits");
     let history_layout_misses = perf_counters(&perf_trace, "gtk_history_layout_cache_misses");
-    let row_surface_hits = perf_counters(&perf_trace, "gtk_row_surface_hits");
     assert!(
         paint_rows.len() >= min_scroll_frames,
         "smooth scroll produced too few paint-row samples: {}",
@@ -1908,8 +2091,8 @@ exit 1
         "smooth scroll painted beyond the visible viewport: p95={paint_rows_p95}"
     );
     assert!(
-        layout_hits.iter().any(|hits| *hits > 0) || row_surface_hits.iter().any(|hits| *hits > 0),
-        "smooth scroll never reused cached layouts or row surfaces"
+        layout_hits.iter().any(|hits| *hits > 0),
+        "smooth scroll never reused cached layouts"
     );
     let layout_misses_p95 = percentile_counter(history_layout_misses, 95);
     assert!(
@@ -3248,7 +3431,6 @@ fi
     let render_allocs = perf_counters(&perf_trace, "gtk_render_allocs");
     let render_alloc_bytes = perf_counters(&perf_trace, "gtk_render_alloc_bytes");
     let rss_kib = perf_counters(&perf_trace, "process_rss_kib");
-    let row_surface_cache_bytes = perf_counters(&perf_trace, "gtk_row_surface_cache_bytes");
     assert!(
         render.len() >= 80,
         "held-key produced too few render samples: {}",
@@ -3318,10 +3500,6 @@ fi
     let rss_min = *steady_rss.iter().min().expect("steady RSS samples");
     let rss_max = *steady_rss.iter().max().expect("steady RSS samples");
     let rss_growth = rss_max.saturating_sub(rss_min);
-    let row_surface_cache_max = *row_surface_cache_bytes
-        .iter()
-        .max()
-        .expect("row surface cache samples");
     eprintln!(
         "held-key E2E: render p95={render_p95:?}, paint p95={paint_p95:?}, input-to-render p95={input_to_render_p95:?}, frame interval p50={frame_interval_p50:?}, steady RSS growth={rss_growth} KiB"
     );
@@ -3393,10 +3571,6 @@ fi
     assert!(
         rss_growth <= 32 * 1024,
         "held-key steady process RSS growth too high: min={rss_min} KiB max={rss_max} KiB growth={rss_growth} KiB"
-    );
-    assert!(
-        row_surface_cache_max <= 2 * 1024 * 1024,
-        "held-key row surface cache retained transient input frames: {row_surface_cache_max} bytes"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
