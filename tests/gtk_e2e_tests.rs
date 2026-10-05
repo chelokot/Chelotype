@@ -623,7 +623,7 @@ impl Pixels {
         0.299 * f64::from(pixel[0]) + 0.587 * f64::from(pixel[1]) + 0.114 * f64::from(pixel[2])
     }
 
-    fn horizontal_stroke_sharpness(
+    fn horizontal_edge_steepness(
         &self,
         x: std::ops::Range<usize>,
         y: std::ops::Range<usize>,
@@ -635,15 +635,15 @@ impl Pixels {
             .collect::<Vec<_>>();
         let contrast = luminances.iter().copied().fold(f64::NEG_INFINITY, f64::max)
             - luminances.iter().copied().fold(f64::INFINITY, f64::min);
-        let steps = (y.start..y.end - 1)
+        let mut steps = (y.start..y.end - 1)
             .flat_map(|row| x.clone().map(move |column| (column, row)))
             .map(|(column, row)| {
                 (self.luminance(column, row + 1) - self.luminance(column, row)).abs()
             })
             .collect::<Vec<_>>();
-        let edges = steps.iter().filter(|step| **step > 0.1 * contrast).count();
-        let sharp_edges = steps.iter().filter(|step| **step > 0.6 * contrast).count();
-        sharp_edges as f64 / edges as f64
+        steps.sort_by(|left, right| right.total_cmp(left));
+        let steepest = &steps[..steps.len() / 10];
+        steepest.iter().sum::<f64>() / steepest.len() as f64 / contrast
     }
 }
 
@@ -678,102 +678,97 @@ fn gtk_e2e_renders_history_text_as_sharp_as_input_across_scales_and_fonts_under_
         "use_system_font=false\ncustom_font=DejaVu Sans Mono 10\nfont_size_tenths=100\n",
         "use_system_font=false\ncustom_font=Liberation Mono 13\nfont_size_tenths=130\n",
     ] {
-        let dir = std::env::temp_dir().join(format!(
-            "chelotype-gtk-text-quality-e2e-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("snapshot dir");
-        std::fs::write(
-            dir.join("config"),
-            format!(
-                "first_launch_preferences_shown=true\nstartup_launch_target=host\n{font_config}"
-            ),
-        )
-        .expect("config");
-        let geometry_trace = dir.join("geometry.env");
-        let (probe_head, probe_tail) = PROBE.split_at(PROBE.len() / 2);
-
-        let output = xvfb_command()
-            .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
-            .env("GDK_BACKEND", "x11")
-            .env("GSETTINGS_BACKEND", "memory")
-            .env("NO_AT_BRIDGE", "1")
-            .env("CHELOTYPE_CONFIG_DIR", &dir)
-            .env("CHELOTYPE_SHELL", "/bin/sh")
-            .env("GSK_RENDERER", "gl")
-            .env("CHELOTYPE_UI_E2E", "1")
-            .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
-            .env("CHELOTYPE_GEOMETRY_TRACE", &geometry_trace)
-            .env(
-                "CHELOTYPE_PIXEL_SCALES",
-                SCALES.map(|scale| scale.to_string()).join(","),
-            )
-            .env(
-                "CHELOTYPE_UI_E2E_INPUT",
-                format!("printf '%s%s=\\n' {probe_head} {probe_tail}\n: {PROBE}#"),
-            )
-            .env("CHELOTYPE_UI_E2E_EXPECT", format!("{PROBE}=|{PROBE}#"))
-            .output()
-            .expect("run gtk text quality e2e under xvfb");
-        assert!(
-            output.status.success(),
-            "gtk text quality e2e failed for {font_config:?}\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_clean_gtk_stderr(&String::from_utf8_lossy(&output.stderr));
-
-        let rows = snapshot_rows(
-            json_snapshots(&dir)
-                .last()
-                .expect("final terminal snapshot"),
-        );
-        let probe_cell = |marker: &str| {
-            rows.iter()
-                .enumerate()
-                .find_map(|(row, text)| {
-                    text.find(&format!("{PROBE}{marker}"))
-                        .map(|column| (row, column))
-                })
-                .unwrap_or_else(|| panic!("no {PROBE}{marker} row in {rows:?}"))
-        };
-        let history = probe_cell("=");
-        let input = probe_cell("#");
-        let cell_width = geometry_metric(&geometry_trace, "cell_width");
-        let line_height = geometry_metric(&geometry_trace, "line_height");
-        let offset_x = geometry_metric(&geometry_trace, "cell_offset_x");
-        let offset_y = geometry_metric(&geometry_trace, "cell_offset_y");
-
         for scale in SCALES {
-            let pixels_path = snapshot_paths(&dir)
-                .into_iter()
-                .find(|path| {
-                    path.to_string_lossy()
-                        .ends_with(&format!(".scale{}.pam", (scale * 1000.0).round()))
-                })
-                .unwrap_or_else(|| panic!("no pixel dump at scale {scale}"));
-            let pixels = Pixels::read(&pixels_path);
+            let dir = std::env::temp_dir().join(format!(
+                "chelotype-gtk-text-quality-e2e-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).expect("snapshot dir");
+            std::fs::write(
+                dir.join("config"),
+                format!(
+                    "first_launch_preferences_shown=true\nstartup_launch_target=host\n{font_config}"
+                ),
+            )
+            .expect("config");
+            let geometry_trace = dir.join("geometry.env");
+            let (probe_head, probe_tail) = PROBE.split_at(PROBE.len() / 2);
+
+            let output = xvfb_command()
+                .args(["-a", env!("CARGO_BIN_EXE_chelotype")])
+                .env("GDK_BACKEND", "x11")
+                .env("GSETTINGS_BACKEND", "memory")
+                .env("NO_AT_BRIDGE", "1")
+                .env("GSK_RENDERER", "gl")
+                .env("CHELOTYPE_CONFIG_DIR", &dir)
+                .env("CHELOTYPE_SHELL", "/bin/sh")
+                .env("CHELOTYPE_UI_E2E", "1")
+                .env("CHELOTYPE_SNAPSHOT_DIR", &dir)
+                .env("CHELOTYPE_GEOMETRY_TRACE", &geometry_trace)
+                .env("CHELOTYPE_DEVICE_SCALE", scale.to_string())
+                .env("CHELOTYPE_PIXEL_DUMP", "1")
+                .env(
+                    "CHELOTYPE_UI_E2E_INPUT",
+                    format!("printf '%s%s=\\n' {probe_head} {probe_tail}\n: {PROBE}#"),
+                )
+                .env("CHELOTYPE_UI_E2E_EXPECT", format!("{PROBE}=|{PROBE}#"))
+                .output()
+                .expect("run gtk text quality e2e under xvfb");
+            assert!(
+                output.status.success(),
+                "gtk text quality e2e failed for {font_config:?} at scale {scale}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_clean_gtk_stderr(&String::from_utf8_lossy(&output.stderr));
+
+            let rows = snapshot_rows(
+                json_snapshots(&dir)
+                    .last()
+                    .expect("final terminal snapshot"),
+            );
+            let probe_cell = |marker: &str| {
+                rows.iter()
+                    .enumerate()
+                    .find_map(|(row, text)| {
+                        text.find(&format!("{PROBE}{marker}"))
+                            .map(|column| (row, column))
+                    })
+                    .unwrap_or_else(|| panic!("no {PROBE}{marker} row in {rows:?}"))
+            };
+            let pixels = Pixels::read(
+                &snapshot_paths(&dir)
+                    .into_iter()
+                    .find(|path| path.extension().is_some_and(|extension| extension == "pam"))
+                    .expect("pixel dump"),
+            );
+            let cell_width = geometry_metric(&geometry_trace, "cell_width");
+            let line_height = geometry_metric(&geometry_trace, "line_height");
+            let origin_x = geometry_metric(&geometry_trace, "surface_x")
+                + geometry_metric(&geometry_trace, "cell_offset_x");
+            let origin_y = geometry_metric(&geometry_trace, "surface_y")
+                + geometry_metric(&geometry_trace, "cell_offset_y");
             let probe_sharpness = |(row, column): (usize, usize)| {
-                let left = offset_x + column as f64 * cell_width;
-                let top = offset_y + row as f64 * line_height;
-                pixels.horizontal_stroke_sharpness(
+                let left = origin_x + column as f64 * cell_width;
+                let top = origin_y + row as f64 * line_height;
+                pixels.horizontal_edge_steepness(
                     (left * scale).floor() as usize
                         ..((left + PROBE.len() as f64 * cell_width) * scale).ceil() as usize,
                     (top * scale).floor() as usize..((top + line_height) * scale).ceil() as usize,
                 )
             };
-            let ratio = probe_sharpness(history) / probe_sharpness(input);
+            let ratio = probe_sharpness(probe_cell("=")) / probe_sharpness(probe_cell("#"));
             assert!(
-                (0.85..=1.35).contains(&ratio),
+                ratio.min(ratio.recip()) >= 0.85,
                 "history and input text differ in sharpness for {font_config:?} at scale {scale}: \
                  ratio {ratio:.3}"
             );
-        }
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
 

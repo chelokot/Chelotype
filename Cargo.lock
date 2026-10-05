@@ -109,6 +109,7 @@ name = "chelotype"
 version = "0.1.15"
 dependencies = [
  "criterion",
+ "gdk4",
  "gtk4",
  "libadwaita",
  "libc",

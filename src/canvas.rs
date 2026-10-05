@@ -37,11 +37,26 @@ impl TerminalCanvasPadding {
     }
 }
 
+pub fn canvas_surface_origin(widget: &gtk::DrawingArea) -> (f64, f64) {
+    widget
+        .native()
+        .and_then(|native| {
+            let (surface_x, surface_y) = native.surface_transform();
+            widget
+                .translate_coordinates(&native, 0.0, 0.0)
+                .map(|(x, y)| (x + surface_x, y + surface_y))
+        })
+        .unwrap_or((0.0, 0.0))
+}
+
 pub fn terminal_canvas_padding(widget: &gtk::DrawingArea) -> TerminalCanvasPadding {
-    let _ = widget;
+    let scale = crate::terminal_font::device_scale(widget);
+    let (origin_x, origin_y) = canvas_surface_origin(widget);
+    let device_aligned =
+        |origin: f64| ((origin + TERMINAL_CANVAS_PADDING_PX) * scale).round() / scale - origin;
     TerminalCanvasPadding {
-        left: TERMINAL_CANVAS_PADDING_PX,
-        top: TERMINAL_CANVAS_PADDING_PX,
+        left: device_aligned(origin_x),
+        top: device_aligned(origin_y),
         right: TERMINAL_CANVAS_PADDING_PX,
         bottom: TERMINAL_CANVAS_PADDING_PX,
     }
@@ -1116,6 +1131,7 @@ struct TextLayoutCacheSignature {
     text_scale_micros: u32,
     line_spacing_tenths: u32,
     column_spacing_tenths: u32,
+    device_scale_micros: u32,
 }
 
 #[derive(Default)]
@@ -1260,6 +1276,8 @@ impl TextLayoutCacheSignature {
                 .round() as u32,
             line_spacing_tenths: (crate::config::line_spacing() * 10.0).round() as u32,
             column_spacing_tenths: (crate::config::column_spacing() * 10.0).round() as u32,
+            device_scale_micros: (crate::terminal_font::device_scale(widget) * 1_000_000.0).round()
+                as u32,
         }
     }
 }

@@ -28,53 +28,49 @@ fn snapshot_base(label: &str) -> Option<PathBuf> {
 }
 
 pub fn write_canvas_pixels(widget: &gtk::DrawingArea) {
-    let Ok(scales) = std::env::var("CHELOTYPE_PIXEL_SCALES") else {
+    if std::env::var_os("CHELOTYPE_PIXEL_DUMP").is_none() {
+        return;
+    }
+    let Some(native) = widget.native() else {
         return;
     };
-    let Some(renderer) = widget.native().and_then(|native| native.renderer()) else {
+    let Some(renderer) = native.renderer() else {
         return;
     };
     let Some(base) = snapshot_base("canvas") else {
         return;
     };
-    let paintable = gtk::WidgetPaintable::new(Some(widget));
-    let width = f64::from(widget.width());
-    let height = f64::from(widget.height());
-    for scale in scales
-        .split(',')
-        .filter_map(|scale| scale.parse::<f64>().ok())
-    {
-        let snapshot = gtk::Snapshot::new();
-        snapshot.scale(scale as f32, scale as f32);
-        paintable.snapshot(&snapshot, width, height);
-        let Some(node) = snapshot.to_node() else {
-            continue;
-        };
-        let viewport = gtk::graphene::Rect::new(
-            0.0,
-            0.0,
-            (width * scale).ceil() as f32,
-            (height * scale).ceil() as f32,
-        );
-        let texture = renderer.render_texture(node, Some(&viewport));
-        let (texture_width, texture_height) = (texture.width() as usize, texture.height() as usize);
-        let mut bgra = vec![0; texture_width * texture_height * 4];
-        texture.download(&mut bgra, texture_width * 4);
-        let mut pam = format!(
-            "P7\nWIDTH {texture_width}\nHEIGHT {texture_height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
-        )
-        .into_bytes();
-        pam.extend(
-            bgra.as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|[blue, green, red, alpha]| [*red, *green, *blue, *alpha]),
-        );
-        let _ = write_file(
-            base.with_extension(format!("scale{}.pam", (scale * 1000.0).round())),
-            pam,
-        );
-    }
+    let window = native.upcast_ref::<gtk::Widget>();
+    let scale = crate::terminal_font::device_scale(widget);
+    let width = f64::from(window.width());
+    let height = f64::from(window.height());
+    let snapshot = gtk::Snapshot::new();
+    snapshot.scale(scale as f32, scale as f32);
+    gtk::WidgetPaintable::new(Some(window)).snapshot(&snapshot, width, height);
+    let Some(node) = snapshot.to_node() else {
+        return;
+    };
+    let viewport = gtk::graphene::Rect::new(
+        0.0,
+        0.0,
+        (width * scale).ceil() as f32,
+        (height * scale).ceil() as f32,
+    );
+    let texture = renderer.render_texture(node, Some(&viewport));
+    let (texture_width, texture_height) = (texture.width() as usize, texture.height() as usize);
+    let mut bgra = vec![0; texture_width * texture_height * 4];
+    texture.download(&mut bgra, texture_width * 4);
+    let mut pam = format!(
+        "P7\nWIDTH {texture_width}\nHEIGHT {texture_height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+    )
+    .into_bytes();
+    pam.extend(
+        bgra.as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|[blue, green, red, alpha]| [*red, *green, *blue, *alpha]),
+    );
+    let _ = write_file(base.with_extension("pam"), pam);
 }
 
 #[derive(Serialize)]
