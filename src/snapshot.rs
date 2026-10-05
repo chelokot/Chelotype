@@ -5,11 +5,73 @@ use crate::selection::{SelectionRange, selected_text_with_metadata};
 use crate::terminal_grid::{TerminalCell, TerminalLineMetadata, TerminalSemanticPrompt};
 use crate::terminal_palette::default_terminal_palette;
 use crate::workspace_render::WorkspaceRenderFrame;
+use gtk::prelude::*;
 use serde::Serialize;
 use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn snapshot_base(label: &str) -> Option<PathBuf> {
+    let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
+        .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let base = Path::new(&dir).join(format!("{label}_{ts}"));
+    if let Err(err) = create_dir_all(&dir) {
+        eprintln!("snapshot dir error: {err}");
+        return None;
+    }
+    Some(base)
+}
+
+pub fn write_canvas_pixels(widget: &gtk::DrawingArea) {
+    if std::env::var_os("CHELOTYPE_PIXEL_DUMP").is_none() {
+        return;
+    }
+    let Some(native) = widget.native() else {
+        return;
+    };
+    let Some(renderer) = native.renderer() else {
+        return;
+    };
+    let Some(base) = snapshot_base("canvas") else {
+        return;
+    };
+    let window = native.upcast_ref::<gtk::Widget>();
+    let scale = crate::terminal_font::device_scale(widget);
+    let width = f64::from(window.width());
+    let height = f64::from(window.height());
+    let snapshot = gtk::Snapshot::new();
+    snapshot.scale(scale as f32, scale as f32);
+    gtk::WidgetPaintable::new(Some(window)).snapshot(&snapshot, width, height);
+    let Some(node) = snapshot.to_node() else {
+        return;
+    };
+    let viewport = gtk::graphene::Rect::new(
+        0.0,
+        0.0,
+        (width * scale).ceil() as f32,
+        (height * scale).ceil() as f32,
+    );
+    let texture = renderer.render_texture(node, Some(&viewport));
+    let (texture_width, texture_height) = (texture.width() as usize, texture.height() as usize);
+    let mut bgra = vec![0; texture_width * texture_height * 4];
+    texture.download(&mut bgra, texture_width * 4);
+    let mut pam = format!(
+        "P7\nWIDTH {texture_width}\nHEIGHT {texture_height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+    )
+    .into_bytes();
+    pam.extend(
+        bgra.as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|[blue, green, red, alpha]| [*red, *green, *blue, *alpha]),
+    );
+    let _ = write_file(base.with_extension("pam"), pam);
+}
 
 #[derive(Serialize)]
 struct CellJson {
@@ -66,17 +128,7 @@ pub fn write_snapshot_with_selection(
     selection: Option<SelectionRange>,
 ) -> Option<PathBuf> {
     crate::logging::debug_log(&format!("write snapshot selection {selection:?}"));
-    let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
-        .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let base = Path::new(&dir).join(format!("{label}_{ts}"));
-    if let Err(err) = create_dir_all(base.parent().unwrap_or(Path::new("/"))) {
-        eprintln!("snapshot dir error: {err}");
-        return None;
-    }
+    let base = snapshot_base(label)?;
     let lines_json = snapshot
         .lines
         .iter()
@@ -155,17 +207,7 @@ pub fn write_workspace_render_snapshot(
     snapshot: &WorkspaceRenderFrame,
     label: &str,
 ) -> Option<PathBuf> {
-    let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
-        .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let base = Path::new(&dir).join(format!("{label}_{ts}"));
-    if let Err(err) = create_dir_all(base.parent().unwrap_or(Path::new("/"))) {
-        eprintln!("snapshot dir error: {err}");
-        return None;
-    }
+    let base = snapshot_base(label)?;
     let _ = write_file(
         base.with_extension("workspace.render.json"),
         serde_json::to_vec_pretty(snapshot).unwrap_or_default(),
@@ -178,17 +220,7 @@ pub fn write_workspace_render_snapshot(
 }
 
 pub fn write_render_frame_snapshot(snapshot: &RenderFrame, label: &str) -> Option<PathBuf> {
-    let dir = std::env::var("CHELOTYPE_SNAPSHOT_DIR")
-        .unwrap_or_else(|_| "/tmp/chelotype_snapshots".to_string());
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let base = Path::new(&dir).join(format!("{label}_{ts}"));
-    if let Err(err) = create_dir_all(base.parent().unwrap_or(Path::new("/"))) {
-        eprintln!("render snapshot dir error: {err}");
-        return None;
-    }
+    let base = snapshot_base(label)?;
     let _ = write_file(
         base.with_extension("render.json"),
         serde_json::to_vec_pretty(snapshot).unwrap_or_default(),

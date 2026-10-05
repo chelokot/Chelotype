@@ -23,10 +23,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fish libadwaita-1-dev libgtk-4-dev zsh \
             xvfb xauth xdotool imagemagick dbus-x11 python3 \
-            zsh-autosuggestions zsh-syntax-highlighting tmux neovim weston
+            zsh-autosuggestions zsh-syntax-highlighting tmux neovim weston \
+            fonts-dejavu-core fonts-liberation libgl1-mesa-dri
+
+      - name: Fingerprint CPU features for native Zig objects
+        id: cpu
+        run: echo "features=$(grep -m1 '^flags' /proc/cpuinfo | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
+        with:
+          key: cpu-${{ steps.cpu.outputs.features }}
 
       - name: Check formatting and release metadata
         run: |

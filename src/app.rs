@@ -27,7 +27,8 @@ use crate::selection::{
     selected_text_with_metadata, viewport_range_for_display, word_range_at,
 };
 use crate::snapshot::{
-    write_render_frame_snapshot, write_snapshot_with_selection, write_workspace_render_snapshot,
+    write_canvas_pixels, write_render_frame_snapshot, write_snapshot_with_selection,
+    write_workspace_render_snapshot,
 };
 use crate::terminal_font::metrics_for_widget;
 use crate::terminal_grid::TerminalSemanticPrompt;
@@ -1728,7 +1729,7 @@ fn build_ui(app: &Application) {
                 if let Some(rendered) = &rendered_snapshot {
                     let _ = write_workspace_render_snapshot(rendered, "gtk_e2e_workspace");
                 }
-                app_for_tick.quit();
+                quit_after_painted_pixels(&app_for_tick, tick_canvas.widget());
                 record_tick_work(tick_wall_started);
                 return glib::ControlFlow::Break;
             }
@@ -1843,7 +1844,7 @@ fn build_ui(app: &Application) {
                         let _ = write_render_frame_snapshot(rendered, "gtk_e2e_render");
                     }
                     let _ = write_snapshot_with_selection(content, "gtk_e2e", visible_selection);
-                    app_for_tick.quit();
+                    quit_after_painted_pixels(&app_for_tick, tick_canvas.widget());
                     record_tick_work(tick_wall_started);
                     return glib::ControlFlow::Break;
                 }
@@ -2688,6 +2689,15 @@ impl UiE2eScenario {
             timeout,
         })
     }
+}
+
+fn quit_after_painted_pixels(app: &Application, widget: &gtk::DrawingArea) {
+    let app = app.clone();
+    widget.add_tick_callback(move |widget, _| {
+        write_canvas_pixels(widget);
+        app.quit();
+        glib::ControlFlow::Break
+    });
 }
 
 fn copy_selection_to_primary(
@@ -6175,8 +6185,9 @@ fn app_style_css(palette: &crate::terminal_palette::TerminalPalette) -> String {
 }
 
 fn trace_geometry(path: &std::path::Path, widget: &gtk::DrawingArea, metrics: TerminalMetrics) {
+    let (surface_x, surface_y) = crate::canvas::canvas_surface_origin(widget);
     let content = format!(
-        "canvas_x={}\ncanvas_y={}\ncanvas_width={}\ncanvas_height={}\ncell_offset_x={:.6}\ncell_offset_y={:.6}\ncell_width={:.6}\nline_height={:.6}\ncols={}\nrows={}",
+        "canvas_x={}\ncanvas_y={}\nsurface_x={surface_x:.6}\nsurface_y={surface_y:.6}\ncanvas_width={}\ncanvas_height={}\ncell_offset_x={:.6}\ncell_offset_y={:.6}\ncell_width={:.6}\nline_height={:.6}\ncols={}\nrows={}",
         widget.allocation().x(),
         widget.allocation().y(),
         widget.allocated_width(),
@@ -6706,12 +6717,15 @@ struct TerminalMetrics {
 struct CachedTerminalMetrics {
     allocation_width: i32,
     allocation_height: i32,
+    device_scale: f64,
     metrics: TerminalMetrics,
 }
 
 impl CachedTerminalMetrics {
-    fn matches(self, allocation_width: i32, allocation_height: i32) -> bool {
-        self.allocation_width == allocation_width && self.allocation_height == allocation_height
+    fn matches(self, allocation_width: i32, allocation_height: i32, device_scale: f64) -> bool {
+        self.allocation_width == allocation_width
+            && self.allocation_height == allocation_height
+            && self.device_scale == device_scale
     }
 }
 
@@ -6795,13 +6809,14 @@ fn terminal_metrics_for_widget_cached(
 ) -> Option<TerminalMetrics> {
     let width = widget.allocated_width();
     let height = widget.allocated_height();
+    let device_scale = crate::terminal_font::device_scale(widget);
     if width <= 0 || height <= 0 {
         cache.set(None);
         return None;
     }
     if !force_refresh
         && let Some(cached) = cache.get()
-        && cached.matches(width, height)
+        && cached.matches(width, height, device_scale)
     {
         return Some(cached.metrics);
     }
@@ -6811,6 +6826,7 @@ fn terminal_metrics_for_widget_cached(
     cache.set(Some(CachedTerminalMetrics {
         allocation_width: width,
         allocation_height: height,
+        device_scale,
         metrics,
     }));
     Some(metrics)
@@ -6995,12 +7011,14 @@ mod tests {
         let cached = CachedTerminalMetrics {
             allocation_width: 800,
             allocation_height: 480,
+            device_scale: 1.25,
             metrics,
         };
 
-        assert!(cached.matches(800, 480));
-        assert!(!cached.matches(801, 480));
-        assert!(!cached.matches(800, 481));
+        assert!(cached.matches(800, 480, 1.25));
+        assert!(!cached.matches(801, 480, 1.25));
+        assert!(!cached.matches(800, 481, 1.25));
+        assert!(!cached.matches(800, 480, 1.5));
     }
 
     #[test]

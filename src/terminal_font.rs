@@ -161,18 +161,38 @@ pub fn metrics_for_widget_size(
     font_size_pt: f64,
 ) -> Option<TerminalFontMetrics> {
     let metrics = base_metrics_for_widget_size(widget, font_size_pt)?;
+    let scale = device_scale(widget);
+    let snap_to_device_pixels = |length: f64| (length * scale - 1e-6).ceil() / scale;
     Some(TerminalFontMetrics {
-        cell_width: metrics.cell_width * crate::config::column_spacing(),
-        line_height: metrics.line_height * crate::config::line_spacing(),
+        cell_width: snap_to_device_pixels(metrics.cell_width * crate::config::column_spacing()),
+        line_height: snap_to_device_pixels(metrics.line_height * crate::config::line_spacing()),
     })
 }
 
 pub fn letter_spacing_for_widget_size(widget: &gtk::DrawingArea, font_size_pt: f64) -> i32 {
-    let Some(metrics) = base_metrics_for_widget_size(widget, font_size_pt) else {
+    let (Some(base), Some(metrics)) = (
+        base_metrics_for_widget_size(widget, font_size_pt),
+        metrics_for_widget_size(widget, font_size_pt),
+    ) else {
         return 0;
     };
-    (metrics.cell_width * (crate::config::column_spacing() - 1.0) * pango::SCALE as f64).round()
-        as i32
+    ((metrics.cell_width - base.cell_width) * pango::SCALE as f64).round() as i32
+}
+
+pub fn device_scale(widget: &gtk::DrawingArea) -> f64 {
+    static DEVICE_SCALE_OVERRIDE: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    DEVICE_SCALE_OVERRIDE
+        .get_or_init(|| {
+            std::env::var("CHELOTYPE_DEVICE_SCALE")
+                .ok()
+                .and_then(|scale| scale.parse().ok())
+        })
+        .unwrap_or_else(|| {
+            widget
+                .native()
+                .and_then(|native| native.surface())
+                .map_or(1.0, |surface| surface.scale())
+        })
 }
 
 fn base_metrics_for_widget_size(

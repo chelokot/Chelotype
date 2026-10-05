@@ -6,16 +6,16 @@ use crate::terminal_font::{TerminalFontMetrics, layout_for_size, metrics_for_wid
 use crate::terminal_palette::default_terminal_palette;
 use crate::workspace_render::WorkspaceRenderFrame;
 use gtk::prelude::*;
-use gtk::{cairo, pango};
+use gtk::subclass::prelude::*;
+use gtk::{gdk, glib, graphene, gsk, pango};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const PALETTE_TRANSITION_DURATION: Duration = Duration::from_millis(300);
 const MAX_TEXT_LAYOUT_CACHE_ENTRIES: usize = 4096;
 const MAX_INPUT_LAYOUT_PANES: usize = 16;
-const MAX_ROW_SURFACE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const TERMINAL_CANVAS_PADDING_PX: f64 = 6.0;
 const TERMINAL_PREVIEW_RADIUS_PX: f64 = 6.0;
 
@@ -37,19 +37,79 @@ impl TerminalCanvasPadding {
     }
 }
 
+pub fn canvas_surface_origin(widget: &gtk::DrawingArea) -> (f64, f64) {
+    widget
+        .native()
+        .and_then(|native| {
+            let (surface_x, surface_y) = native.surface_transform();
+            widget
+                .translate_coordinates(&native, 0.0, 0.0)
+                .map(|(x, y)| (x + surface_x, y + surface_y))
+        })
+        .unwrap_or((0.0, 0.0))
+}
+
 pub fn terminal_canvas_padding(widget: &gtk::DrawingArea) -> TerminalCanvasPadding {
-    let _ = widget;
+    let scale = crate::terminal_font::device_scale(widget);
+    let (origin_x, origin_y) = canvas_surface_origin(widget);
+    let device_aligned =
+        |origin: f64| ((origin + TERMINAL_CANVAS_PADDING_PX) * scale).round() / scale - origin;
     TerminalCanvasPadding {
-        left: TERMINAL_CANVAS_PADDING_PX,
-        top: TERMINAL_CANVAS_PADDING_PX,
+        left: device_aligned(origin_x),
+        top: device_aligned(origin_y),
         right: TERMINAL_CANVAS_PADDING_PX,
         bottom: TERMINAL_CANVAS_PADDING_PX,
     }
 }
 
+glib::wrapper! {
+    pub struct TerminalArea(ObjectSubclass<imp::TerminalArea>)
+        @extends gtk::DrawingArea, gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+impl TerminalArea {
+    fn set_paint(&self, paint: impl Fn(&gtk::DrawingArea, &gtk::Snapshot) + 'static) {
+        self.imp().paint.replace(Some(Box::new(paint)));
+    }
+}
+
+mod imp {
+    use gtk::glib;
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+    use std::cell::RefCell;
+
+    type Paint = Box<dyn Fn(&gtk::DrawingArea, &gtk::Snapshot)>;
+
+    #[derive(Default)]
+    pub struct TerminalArea {
+        pub(super) paint: RefCell<Option<Paint>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for TerminalArea {
+        const NAME: &'static str = "ChelotypeTerminalArea";
+        type Type = super::TerminalArea;
+        type ParentType = gtk::DrawingArea;
+    }
+
+    impl ObjectImpl for TerminalArea {}
+
+    impl WidgetImpl for TerminalArea {
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            if let Some(paint) = self.paint.borrow().as_ref() {
+                paint(self.obj().upcast_ref(), snapshot);
+            }
+        }
+    }
+
+    impl DrawingAreaImpl for TerminalArea {}
+}
+
 #[derive(Clone)]
 pub struct TerminalCanvas {
-    area: gtk::DrawingArea,
+    area: TerminalArea,
     render: Rc<RefCell<Option<CanvasRenderFrame>>>,
     scroll_underlay: Rc<RefCell<Option<CanvasRenderFrame>>>,
     palette_transition: Rc<RefCell<Option<CanvasFrameTransition>>>,
@@ -67,7 +127,7 @@ pub struct TerminalCanvas {
 
 impl TerminalCanvas {
     pub fn new() -> Self {
-        let area = gtk::DrawingArea::new();
+        let area = glib::Object::new::<TerminalArea>();
         area.set_focusable(true);
         area.set_hexpand(true);
         area.set_vexpand(true);
@@ -88,7 +148,6 @@ impl TerminalCanvas {
         let font_size_override = Rc::new(Cell::new(None::<f64>));
         let scroll_visual_offset_px = Rc::new(Cell::new(0.0));
         let text_layout_cache = Rc::new(RefCell::new(TextLayoutCache::default()));
-        let row_surface_cache = Rc::new(RefCell::new(RowSurfaceCache::default()));
         let last_paint_started = Rc::new(Cell::new(None::<Instant>));
         let draw_render = render.clone();
         let draw_scroll_underlay = scroll_underlay.clone();
@@ -100,9 +159,9 @@ impl TerminalCanvas {
         let draw_font_size_override = font_size_override.clone();
         let draw_scroll_visual_offset_px = scroll_visual_offset_px.clone();
         let draw_text_layout_cache = text_layout_cache.clone();
-        let draw_row_surface_cache = row_surface_cache.clone();
         let draw_last_paint_started = last_paint_started.clone();
-        area.set_draw_func(move |widget, context, width, height| {
+        area.set_paint(move |widget, snapshot| {
+            let (width, height) = (widget.width(), widget.height());
             let started = Instant::now();
             if let Some(previous) = draw_last_paint_started.replace(Some(started)) {
                 crate::perf_trace::record_duration(
@@ -114,10 +173,8 @@ impl TerminalCanvas {
             let render = draw_render.borrow();
             if let Some(render) = render.as_ref() {
                 let mut text_layout_cache = draw_text_layout_cache.borrow_mut();
-                let mut row_surface_cache = draw_row_surface_cache.borrow_mut();
                 let mut paint_resources = PaintResources {
                     text_layout_cache: &mut text_layout_cache,
-                    row_surface_cache: &mut row_surface_cache,
                     stats: PaintStats::default(),
                 };
                 let paint = CanvasPaint {
@@ -145,7 +202,7 @@ impl TerminalCanvas {
                     let progress = ease_out_progress(progress);
                     draw_canvas_render_layer(
                         widget,
-                        context,
+                        snapshot,
                         &transition.from,
                         None,
                         &mut paint_resources,
@@ -158,7 +215,7 @@ impl TerminalCanvas {
                     );
                     draw_canvas_render_layer(
                         widget,
-                        context,
+                        snapshot,
                         render,
                         draw_scroll_underlay.borrow().as_ref(),
                         &mut paint_resources,
@@ -177,7 +234,7 @@ impl TerminalCanvas {
                 } else {
                     draw_canvas_render_layer(
                         widget,
-                        context,
+                        snapshot,
                         render,
                         draw_scroll_underlay.borrow().as_ref(),
                         &mut paint_resources,
@@ -189,9 +246,7 @@ impl TerminalCanvas {
                         },
                     );
                 }
-                paint_resources
-                    .stats
-                    .record(paint_resources.row_surface_cache.bytes);
+                paint_resources.stats.record();
             }
             crate::perf_trace::record_duration("gtk_paint", started.elapsed());
         });
@@ -215,7 +270,7 @@ impl TerminalCanvas {
     }
 
     pub fn widget(&self) -> &gtk::DrawingArea {
-        &self.area
+        self.area.upcast_ref()
     }
 
     pub fn begin_palette_transition(&self) {
@@ -513,56 +568,24 @@ impl Default for TerminalCanvas {
     }
 }
 
-fn draw_background(context: &cairo::Context, width: i32, height: i32, color: Option<&str>) {
+fn draw_background(snapshot: &gtk::Snapshot, width: i32, height: i32, color: Option<&str>) {
     let Some(color) = color.and_then(parse_hex_color) else {
         return;
     };
-    context.set_source_rgb(color.red, color.green, color.blue);
-    context.rectangle(0.0, 0.0, width as f64, height as f64);
-    let _ = context.fill();
+    snapshot.append_color(&color, &rect(0.0, 0.0, f64::from(width), f64::from(height)));
 }
 
-fn draw_rounded_rectangle(
-    context: &cairo::Context,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    radius: f64,
-) {
+fn rect(x: f64, y: f64, width: f64, height: f64) -> graphene::Rect {
+    graphene::Rect::new(x as f32, y as f32, width as f32, height as f32)
+}
+
+fn point(x: f64, y: f64) -> graphene::Point {
+    graphene::Point::new(x as f32, y as f32)
+}
+
+fn rounded_rect(x: f64, y: f64, width: f64, height: f64, radius: f64) -> gsk::RoundedRect {
     let radius = radius.min(width / 2.0).min(height / 2.0);
-    let right = x + width;
-    let bottom = y + height;
-    context.new_sub_path();
-    context.arc(
-        right - radius,
-        y + radius,
-        radius,
-        -std::f64::consts::FRAC_PI_2,
-        0.0,
-    );
-    context.arc(
-        right - radius,
-        bottom - radius,
-        radius,
-        0.0,
-        std::f64::consts::FRAC_PI_2,
-    );
-    context.arc(
-        x + radius,
-        bottom - radius,
-        radius,
-        std::f64::consts::FRAC_PI_2,
-        std::f64::consts::PI,
-    );
-    context.arc(
-        x + radius,
-        y + radius,
-        radius,
-        std::f64::consts::PI,
-        std::f64::consts::PI * 1.5,
-    );
-    context.close_path();
+    gsk::RoundedRect::from_rect(rect(x, y, width, height), radius as f32)
 }
 
 fn ease_out_progress(progress: f64) -> f64 {
@@ -579,7 +602,7 @@ fn request_palette_animation_frame(widget: &gtk::DrawingArea) {
 
 fn draw_canvas_render_layer(
     widget: &gtk::DrawingArea,
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     render: &CanvasRenderFrame,
     scroll_underlay: Option<&CanvasRenderFrame>,
     paint_resources: &mut PaintResources<'_>,
@@ -595,40 +618,39 @@ fn draw_canvas_render_layer(
         return;
     }
     let alpha = alpha.min(1.0);
-    let _ = context.save();
-    if widget.has_css_class("term-preview-canvas") {
-        draw_rounded_rectangle(
-            context,
+    let preview = widget.has_css_class("term-preview-canvas");
+    if preview {
+        snapshot.push_rounded_clip(&rounded_rect(
             0.0,
             0.0,
-            width as f64,
-            height as f64,
+            f64::from(width),
+            f64::from(height),
             TERMINAL_PREVIEW_RADIUS_PX,
-        );
-        context.clip();
+        ));
     }
     if alpha < 1.0 {
-        context.push_group();
+        snapshot.push_opacity(alpha);
     }
-    draw_background(context, width, height, render.background());
+    draw_background(snapshot, width, height, render.background());
     draw_canvas_render(
         widget,
-        context,
+        snapshot,
         render,
         scroll_underlay,
         paint_resources,
         paint,
     );
     if alpha < 1.0 {
-        let _ = context.pop_group_to_source();
-        let _ = context.paint_with_alpha(alpha);
+        snapshot.pop();
     }
-    let _ = context.restore();
+    if preview {
+        snapshot.pop();
+    }
 }
 
 fn draw_canvas_render(
     widget: &gtk::DrawingArea,
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     render: &CanvasRenderFrame,
     scroll_underlay: Option<&CanvasRenderFrame>,
     paint_resources: &mut PaintResources<'_>,
@@ -655,29 +677,33 @@ fn draw_canvas_render(
         options: paint.cursor_options,
         now: paint.now,
     };
-    let _ = context.save();
-    context.rectangle(padding.left, padding.top, content_width, content_height);
-    context.clip();
-    context.translate(padding.left, padding.top);
+    snapshot.push_clip(&rect(
+        padding.left,
+        padding.top,
+        content_width,
+        content_height,
+    ));
+    snapshot.save();
+    snapshot.translate(&point(padding.left, padding.top));
     match render {
         CanvasRenderFrame::Single(render) => {
             draw_render_frame(
                 widget,
-                context,
+                snapshot,
                 render,
                 cursor_paint,
                 metrics,
                 paint_resources,
                 PaintViewport {
                     scroll_visual_offset_px: paint.scroll_visual_offset_px,
-                    width: content_width,
+                    visible: (0.0, content_height),
                     input_cache_key: 0,
                 },
             );
             if let Some(CanvasRenderFrame::Single(underlay)) = scroll_underlay {
                 draw_scroll_underlay_frame_in_rect(
                     widget,
-                    context,
+                    snapshot,
                     underlay,
                     metrics,
                     paint_resources,
@@ -693,7 +719,7 @@ fn draw_canvas_render(
         CanvasRenderFrame::Workspace(render) => {
             draw_workspace_render(
                 widget,
-                context,
+                snapshot,
                 render,
                 cursor_paint,
                 metrics,
@@ -703,7 +729,7 @@ fn draw_canvas_render(
             if let Some(CanvasRenderFrame::Workspace(underlay)) = scroll_underlay {
                 draw_workspace_scroll_underlay(
                     widget,
-                    context,
+                    snapshot,
                     render,
                     underlay,
                     metrics,
@@ -713,12 +739,13 @@ fn draw_canvas_render(
             }
         }
     }
-    let _ = context.restore();
+    snapshot.restore();
+    snapshot.pop();
 }
 
 fn draw_workspace_scroll_underlay(
     widget: &gtk::DrawingArea,
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     render: &WorkspaceRenderFrame,
     underlay: &WorkspaceRenderFrame,
     metrics: TerminalFontMetrics,
@@ -744,13 +771,12 @@ fn draw_workspace_scroll_underlay(
     let top = active_pane.origin_row as f64 * line_height;
     let width = active_pane.cols as f64 * cell_width;
     let height = active_pane.rows as f64 * line_height;
-    let _ = context.save();
-    context.rectangle(left, top, width, height);
-    context.clip();
-    context.translate(left, top);
+    snapshot.push_clip(&rect(left, top, width, height));
+    snapshot.save();
+    snapshot.translate(&point(left, top));
     draw_scroll_underlay_frame_in_rect(
         widget,
-        context,
+        snapshot,
         &underlay_pane.frame,
         metrics,
         paint_resources,
@@ -761,12 +787,13 @@ fn draw_workspace_scroll_underlay(
             input_cache_key: underlay_pane.pane_id,
         },
     );
-    let _ = context.restore();
+    snapshot.restore();
+    snapshot.pop();
 }
 
 fn draw_scroll_underlay_frame_in_rect(
     widget: &gtk::DrawingArea,
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     render: &RenderFrame,
     metrics: TerminalFontMetrics,
     paint_resources: &mut PaintResources<'_>,
@@ -781,23 +808,26 @@ fn draw_scroll_underlay_frame_in_rect(
     else {
         return;
     };
-    let _ = context.save();
-    context.rectangle(0.0, underlay.clip_y, rect.width, underlay.clip_height);
-    context.clip();
+    snapshot.push_clip(&self::rect(
+        0.0,
+        underlay.clip_y,
+        rect.width,
+        underlay.clip_height,
+    ));
     draw_render_frame(
         widget,
-        context,
+        snapshot,
         render,
         CursorPaintState::hidden(),
         metrics,
         paint_resources,
         PaintViewport {
             scroll_visual_offset_px: underlay.scroll_visual_offset_px,
-            width: rect.width,
+            visible: (underlay.clip_y, underlay.clip_y + underlay.clip_height),
             input_cache_key: rect.input_cache_key,
         },
     );
-    let _ = context.restore();
+    snapshot.pop();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -833,7 +863,7 @@ fn scroll_underlay_paint(
 
 fn draw_render_frame(
     widget: &gtk::DrawingArea,
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     render: &RenderFrame,
     cursor_paint: CursorPaintState,
     metrics: TerminalFontMetrics,
@@ -842,37 +872,35 @@ fn draw_render_frame(
 ) {
     let cell_width = metrics.cell_width;
     let line_height = metrics.line_height;
-    let _ = context.save();
-    context.translate(0.0, viewport.scroll_visual_offset_px);
-    let vertical_clip = context
-        .clip_extents()
-        .ok()
-        .map(|(_, top, _, bottom)| (top, bottom));
+    snapshot.save();
+    snapshot.translate(&point(0.0, viewport.scroll_visual_offset_px));
+    let (clip_top, clip_bottom) = (
+        viewport.visible.0 - viewport.scroll_visual_offset_px,
+        viewport.visible.1 - viewport.scroll_visual_offset_px,
+    );
     paint_resources.text_layout_cache.sync_signature(widget);
     paint_resources
         .text_layout_cache
         .prepare_visible_input_lines(
             viewport.input_cache_key,
             &render.lines,
-            vertical_clip,
+            Some((clip_top, clip_bottom)),
             line_height,
         );
     for line in &render.lines {
         let top = line.row as f64 * line_height;
-        if vertical_clip.is_some_and(|(clip_top, clip_bottom)| {
-            !row_intersects_clip(top, line_height, clip_top, clip_bottom)
-        }) {
+        if !row_intersects_clip(top, line_height, clip_top, clip_bottom) {
             continue;
         }
         paint_resources.stats.rows += 1;
         draw_render_line(
             widget,
-            context,
+            snapshot,
             line,
             metrics,
-            paint_resources,
+            paint_resources.text_layout_cache,
+            &mut paint_resources.stats,
             top,
-            viewport.width,
         );
     }
 
@@ -881,7 +909,7 @@ fn draw_render_frame(
         if let Some(preedit) = &render.preedit {
             draw_preedit(
                 widget,
-                context,
+                snapshot,
                 render,
                 preedit,
                 line_height,
@@ -890,7 +918,7 @@ fn draw_render_frame(
             );
         } else {
             draw_cursor(
-                context,
+                snapshot,
                 render,
                 CursorPaintState {
                     opacity,
@@ -902,7 +930,7 @@ fn draw_render_frame(
     } else if let Some(preedit) = &render.preedit {
         draw_preedit(
             widget,
-            context,
+            snapshot,
             render,
             preedit,
             line_height,
@@ -910,7 +938,7 @@ fn draw_render_frame(
             paint_resources.text_layout_cache.font_size_pt,
         );
     }
-    let _ = context.restore();
+    snapshot.restore();
 }
 
 fn row_intersects_clip(row_top: f64, line_height: f64, clip_top: f64, clip_bottom: f64) -> bool {
@@ -920,32 +948,7 @@ fn row_intersects_clip(row_top: f64, line_height: f64, clip_top: f64, clip_botto
 
 fn draw_render_line(
     widget: &gtk::DrawingArea,
-    context: &cairo::Context,
-    line: &crate::render::RenderLine,
-    metrics: TerminalFontMetrics,
-    paint_resources: &mut PaintResources<'_>,
-    top: f64,
-    frame_width: f64,
-) {
-    if let Some(surface) = paint_resources.row_surface_for(widget, line, metrics, frame_width) {
-        let _ = context.set_source_surface(surface, 0.0, top);
-        let _ = context.paint();
-    } else {
-        draw_render_line_direct(
-            widget,
-            context,
-            line,
-            metrics,
-            paint_resources.text_layout_cache,
-            &mut paint_resources.stats,
-            top,
-        );
-    }
-}
-
-fn draw_render_line_direct(
-    widget: &gtk::DrawingArea,
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     line: &crate::render::RenderLine,
     metrics: TerminalFontMetrics,
     text_layout_cache: &mut TextLayoutCache,
@@ -955,7 +958,7 @@ fn draw_render_line_direct(
     let cell_width = metrics.cell_width;
     let line_height = metrics.line_height;
     for run in &line.runs {
-        draw_run_background(context, run, cell_width, line_height, top);
+        draw_run_background(snapshot, run, cell_width, line_height, top);
     }
     for run in &line.runs {
         if run.text.trim().is_empty() {
@@ -969,17 +972,23 @@ fn draw_render_line_direct(
             &run.markup,
             line.region == RenderRegion::Input,
         );
-        let _ = context.save();
-        context.rectangle(left, top, run.columns as f64 * cell_width, line_height);
-        context.clip();
-        gtk::render_layout(&widget.style_context(), context, left, top, &layout);
-        let _ = context.restore();
+        snapshot.push_clip(&rect(
+            left,
+            top,
+            run.columns as f64 * cell_width,
+            line_height,
+        ));
+        snapshot.save();
+        snapshot.translate(&point(left, top));
+        snapshot.append_layout(&layout, &widget.style_context().color());
+        snapshot.restore();
+        snapshot.pop();
     }
 }
 
 fn draw_workspace_render(
     widget: &gtk::DrawingArea,
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     render: &WorkspaceRenderFrame,
     cursor_paint: CursorPaintState,
     metrics: TerminalFontMetrics,
@@ -993,13 +1002,12 @@ fn draw_workspace_render(
         let top = pane.origin_row as f64 * line_height;
         let width = pane.cols as f64 * cell_width;
         let height = pane.rows as f64 * line_height;
-        let _ = context.save();
-        context.rectangle(left, top, width, height);
-        context.clip();
-        context.translate(left, top);
+        snapshot.push_clip(&rect(left, top, width, height));
+        snapshot.save();
+        snapshot.translate(&point(left, top));
         draw_render_frame(
             widget,
-            context,
+            snapshot,
             &pane.frame,
             cursor_paint.for_pane(pane.pane_id, pane.active),
             metrics,
@@ -1010,21 +1018,23 @@ fn draw_workspace_render(
                 } else {
                     0.0
                 },
-                width,
+                visible: (0.0, height),
                 input_cache_key: pane.pane_id,
             },
         );
-        let _ = context.restore();
+        snapshot.restore();
+        snapshot.pop();
         if pane.index > 0 {
-            draw_pane_separator(context, left, top, height);
+            draw_pane_separator(snapshot, left, top, height);
         }
     }
 }
 
-fn draw_pane_separator(context: &cairo::Context, left: f64, top: f64, height: f64) {
-    context.set_source_rgb(48.0 / 255.0, 51.0 / 255.0, 58.0 / 255.0);
-    context.rectangle(left.round() - 1.0, top, 1.0, height);
-    let _ = context.fill();
+fn draw_pane_separator(snapshot: &gtk::Snapshot, left: f64, top: f64, height: f64) {
+    snapshot.append_color(
+        &gdk::RGBA::new(48.0 / 255.0, 51.0 / 255.0, 58.0 / 255.0, 1.0),
+        &rect(left.round() - 1.0, top, 1.0, height),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -1064,7 +1074,7 @@ struct PaintRect {
 #[derive(Clone, Copy)]
 struct PaintViewport {
     scroll_visual_offset_px: f64,
-    width: f64,
+    visible: (f64, f64),
     input_cache_key: u64,
 }
 
@@ -1074,13 +1084,10 @@ struct PaintStats {
     layout_hits: u64,
     layout_misses: u64,
     history_layout_misses: u64,
-    row_surface_hits: u64,
-    row_surface_misses: u64,
-    row_surface_evictions: u64,
 }
 
 impl PaintStats {
-    fn record(&self, row_surface_cache_bytes: usize) {
+    fn record(&self) {
         crate::perf_trace::record_counter("gtk_paint_rows", self.rows);
         crate::perf_trace::record_counter("gtk_layout_cache_hits", self.layout_hits);
         crate::perf_trace::record_counter("gtk_layout_cache_misses", self.layout_misses);
@@ -1088,39 +1095,12 @@ impl PaintStats {
             "gtk_history_layout_cache_misses",
             self.history_layout_misses,
         );
-        crate::perf_trace::record_counter("gtk_row_surface_hits", self.row_surface_hits);
-        crate::perf_trace::record_counter("gtk_row_surface_misses", self.row_surface_misses);
-        crate::perf_trace::record_counter("gtk_row_surface_evictions", self.row_surface_evictions);
-        crate::perf_trace::record_counter(
-            "gtk_row_surface_cache_bytes",
-            row_surface_cache_bytes as u64,
-        );
     }
 }
 
 struct PaintResources<'a> {
     text_layout_cache: &'a mut TextLayoutCache,
-    row_surface_cache: &'a mut RowSurfaceCache,
     stats: PaintStats,
-}
-
-impl PaintResources<'_> {
-    fn row_surface_for(
-        &mut self,
-        widget: &gtk::DrawingArea,
-        line: &crate::render::RenderLine,
-        metrics: TerminalFontMetrics,
-        frame_width: f64,
-    ) -> Option<cairo::ImageSurface> {
-        self.row_surface_cache.surface_for(
-            widget,
-            line,
-            metrics,
-            frame_width,
-            self.text_layout_cache,
-            &mut self.stats,
-        )
-    }
 }
 
 fn layout_for_paint(
@@ -1145,185 +1125,13 @@ fn layout_for_paint(
     }
 }
 
-#[derive(Default)]
-struct RowSurfaceCache {
-    surfaces: HashMap<RowSurfaceBucketKey, Vec<RowSurfaceEntry>>,
-    order: VecDeque<RowSurfaceOrderKey>,
-    bytes: usize,
-    next_id: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RowSurfaceOrderKey {
-    bucket: RowSurfaceBucketKey,
-    id: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct RowSurfaceBucketKey {
-    signature: TextLayoutCacheSignature,
-    width_px: i32,
-    height_px: i32,
-    line_paint_key: u64,
-}
-
-struct RowSurfaceEntry {
-    id: u64,
-    line: RowSurfaceLineKey,
-    surface: cairo::ImageSurface,
-    bytes: usize,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RowSurfaceLineKey {
-    region: RenderRegion,
-    text: String,
-    runs: Vec<RenderRun>,
-}
-
-impl RowSurfaceCache {
-    fn surface_for(
-        &mut self,
-        widget: &gtk::DrawingArea,
-        line: &crate::render::RenderLine,
-        metrics: TerminalFontMetrics,
-        frame_width: f64,
-        text_layout_cache: &mut TextLayoutCache,
-        stats: &mut PaintStats,
-    ) -> Option<cairo::ImageSurface> {
-        if line.region == RenderRegion::Input {
-            return None;
-        }
-        let spec = RowSurfaceSpec {
-            width_px: frame_width.ceil() as i32,
-            height_px: metrics.line_height.ceil() as i32,
-            metrics,
-        };
-        if spec.width_px <= 0 || spec.height_px <= 0 {
-            return None;
-        }
-        let bucket = RowSurfaceBucketKey {
-            signature: TextLayoutCacheSignature::for_widget(widget, text_layout_cache.font_size_pt),
-            width_px: spec.width_px,
-            height_px: spec.height_px,
-            line_paint_key: line.paint_key,
-        };
-        if let Some((surface, id)) = self
-            .surfaces
-            .get(&bucket)
-            .and_then(|entries| entries.iter().find(|entry| entry.line.matches(line)))
-            .map(|entry| (entry.surface.clone(), entry.id))
-        {
-            let key = RowSurfaceOrderKey { bucket, id };
-            if let Some(index) = self.order.iter().position(|cached| cached == &key) {
-                self.order.remove(index);
-            }
-            self.order.push_back(key);
-            stats.row_surface_hits += 1;
-            return Some(surface);
-        }
-        let surface = self.render_surface(widget, line, spec, text_layout_cache, stats)?;
-        let surface_bytes = surface.stride() as usize * surface.height() as usize;
-        while self.bytes.saturating_add(surface_bytes) > MAX_ROW_SURFACE_CACHE_BYTES
-            && let Some(evicted) = self.order.pop_front()
-        {
-            self.remove(&evicted);
-            stats.row_surface_evictions += 1;
-        }
-        if surface_bytes > MAX_ROW_SURFACE_CACHE_BYTES {
-            stats.row_surface_misses += 1;
-            return Some(surface);
-        }
-        let line_key = RowSurfaceLineKey::from(line);
-        let id = self.next_id;
-        self.next_id += 1;
-        let key = RowSurfaceOrderKey { bucket, id };
-        self.order.push_back(key);
-        self.surfaces
-            .entry(bucket)
-            .or_default()
-            .push(RowSurfaceEntry {
-                id,
-                line: line_key,
-                surface: surface.clone(),
-                bytes: surface_bytes,
-            });
-        self.bytes += surface_bytes;
-        stats.row_surface_misses += 1;
-        Some(surface)
-    }
-
-    fn remove(&mut self, key: &RowSurfaceOrderKey) {
-        let Some(entries) = self.surfaces.get_mut(&key.bucket) else {
-            return;
-        };
-        if let Some(index) = entries.iter().position(|entry| entry.id == key.id) {
-            let entry = entries.remove(index);
-            self.bytes = self.bytes.saturating_sub(entry.bytes);
-        }
-        if entries.is_empty() {
-            self.surfaces.remove(&key.bucket);
-        }
-    }
-
-    fn render_surface(
-        &self,
-        widget: &gtk::DrawingArea,
-        line: &crate::render::RenderLine,
-        spec: RowSurfaceSpec,
-        text_layout_cache: &mut TextLayoutCache,
-        stats: &mut PaintStats,
-    ) -> Option<cairo::ImageSurface> {
-        let surface =
-            cairo::ImageSurface::create(cairo::Format::ARgb32, spec.width_px, spec.height_px)
-                .ok()?;
-        let context = cairo::Context::new(&surface).ok()?;
-        context.set_operator(cairo::Operator::Clear);
-        let _ = context.paint();
-        context.set_operator(cairo::Operator::Over);
-        draw_render_line_direct(
-            widget,
-            &context,
-            line,
-            spec.metrics,
-            text_layout_cache,
-            stats,
-            0.0,
-        );
-        surface.flush();
-        Some(surface)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RowSurfaceSpec {
-    width_px: i32,
-    height_px: i32,
-    metrics: TerminalFontMetrics,
-}
-
-impl From<&crate::render::RenderLine> for RowSurfaceLineKey {
-    fn from(line: &crate::render::RenderLine) -> Self {
-        Self {
-            region: line.region,
-            text: line.text.clone(),
-            runs: line.runs.clone(),
-        }
-    }
-}
-
-impl RowSurfaceLineKey {
-    fn matches(&self, line: &crate::render::RenderLine) -> bool {
-        self.region == line.region && self.text == line.text && self.runs == line.runs
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TextLayoutCacheSignature {
     font_size_tenths: u32,
     text_scale_micros: u32,
     line_spacing_tenths: u32,
     column_spacing_tenths: u32,
+    device_scale_micros: u32,
 }
 
 #[derive(Default)]
@@ -1468,6 +1276,8 @@ impl TextLayoutCacheSignature {
                 .round() as u32,
             line_spacing_tenths: (crate::config::line_spacing() * 10.0).round() as u32,
             column_spacing_tenths: (crate::config::column_spacing() * 10.0).round() as u32,
+            device_scale_micros: (crate::terminal_font::device_scale(widget) * 1_000_000.0).round()
+                as u32,
         }
     }
 }
@@ -2107,26 +1917,27 @@ impl CursorIdentity {
 }
 
 fn draw_run_background(
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     run: &RenderRun,
     cell_width: f64,
     line_height: f64,
     top: f64,
 ) {
     if let Some(color) = run.style.bg.as_deref().and_then(parse_hex_color) {
-        context.set_source_rgb(color.red, color.green, color.blue);
-        context.rectangle(
-            run.start_column as f64 * cell_width,
-            top,
-            run.columns as f64 * cell_width,
-            line_height,
+        snapshot.append_color(
+            &color,
+            &rect(
+                run.start_column as f64 * cell_width,
+                top,
+                run.columns as f64 * cell_width,
+                line_height,
+            ),
         );
-        let _ = context.fill();
     }
 }
 
 fn draw_cursor(
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     render: &RenderFrame,
     paint: CursorPaintState,
     metrics: TerminalFontMetrics,
@@ -2143,7 +1954,12 @@ fn draw_cursor(
         (_, CursorShape::Block) => crate::config::DEFAULT_NEOVIDE_BLOCK_OPACITY,
         (_, CursorShape::Bar) => 1.0,
     };
-    context.set_source_rgba(color.red, color.green, color.blue, alpha * opacity);
+    let color = gdk::RGBA::new(
+        color.red(),
+        color.green(),
+        color.blue(),
+        (alpha * opacity) as f32,
+    );
     let target = CursorDrawPosition {
         pane_id: 0,
         line: f64::from(render.cursor.line.max(0)),
@@ -2151,9 +1967,10 @@ fn draw_cursor(
     };
     let path = cursor_motion.and_then(|motion| motion.path(now));
     match cursor_options.style {
-        CursorStyle::Steady => draw_caret_at(context, target, cursor_options, metrics),
+        CursorStyle::Steady => draw_caret_at(snapshot, &color, target, cursor_options, metrics),
         CursorStyle::Smooth | CursorStyle::Snappy => draw_caret_at_fractional(
-            context,
+            snapshot,
+            &color,
             path.map(|path| path.current).unwrap_or(target),
             cursor_options,
             metrics,
@@ -2163,19 +1980,15 @@ fn draw_cursor(
                 if motion.active(now) {
                     let points =
                         points_to_pixels(motion.neovide_points_grid(), line_height, cell_width);
-                    draw_neovide_points(context, points);
+                    draw_cursor_polygon(snapshot, &color, points);
                 } else {
-                    draw_caret_at(context, target, cursor_options, metrics);
+                    draw_caret_at(snapshot, &color, target, cursor_options, metrics);
                 }
             } else {
-                draw_caret_at(context, target, cursor_options, metrics);
+                draw_caret_at(snapshot, &color, target, cursor_options, metrics);
             }
         }
     }
-}
-
-fn draw_neovide_points(context: &cairo::Context, points: [CursorPoint; 4]) {
-    draw_cursor_polygon(context, points);
 }
 
 #[cfg(test)]
@@ -2423,23 +2236,52 @@ fn lerp_point(from: CursorPoint, target: CursorPoint, progress: f64) -> CursorPo
     }
 }
 
-fn draw_cursor_polygon(context: &cairo::Context, points: [CursorPoint; 4]) {
-    context.move_to(points[0].x.round(), points[0].y.round());
+fn draw_cursor_polygon(snapshot: &gtk::Snapshot, color: &gdk::RGBA, points: [CursorPoint; 4]) {
+    let points = points.map(|point| CursorPoint {
+        x: point.x.round(),
+        y: point.y.round(),
+    });
+    let left = points
+        .iter()
+        .map(|point| point.x)
+        .fold(f64::INFINITY, f64::min);
+    let top = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::INFINITY, f64::min);
+    let right = points
+        .iter()
+        .map(|point| point.x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let bottom = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let context = snapshot.append_cairo(&rect(left, top, right - left, bottom - top));
+    context.set_source_rgba(
+        f64::from(color.red()),
+        f64::from(color.green()),
+        f64::from(color.blue()),
+        f64::from(color.alpha()),
+    );
+    context.move_to(points[0].x, points[0].y);
     for point in points.iter().skip(1) {
-        context.line_to(point.x.round(), point.y.round());
+        context.line_to(point.x, point.y);
     }
     context.close_path();
     let _ = context.fill();
 }
 
 fn draw_caret_at(
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
+    color: &gdk::RGBA,
     position: CursorDrawPosition,
     options: CursorOptions,
     metrics: TerminalFontMetrics,
 ) {
     draw_caret_rect(
-        context,
+        snapshot,
+        color,
         position,
         options,
         metrics,
@@ -2448,13 +2290,15 @@ fn draw_caret_at(
 }
 
 fn draw_caret_at_fractional(
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
+    color: &gdk::RGBA,
     position: CursorDrawPosition,
     options: CursorOptions,
     metrics: TerminalFontMetrics,
 ) {
     draw_caret_rect(
-        context,
+        snapshot,
+        color,
         position,
         options,
         metrics,
@@ -2469,7 +2313,8 @@ enum CursorPixelSnap {
 }
 
 fn draw_caret_rect(
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
+    color: &gdk::RGBA,
     position: CursorDrawPosition,
     options: CursorOptions,
     metrics: TerminalFontMetrics,
@@ -2487,23 +2332,13 @@ fn draw_caret_rect(
     } = metrics;
     let (x, y) = caret_pixel_position(position, line_height, cell_width, snap);
     let (width, height) = cursor_size_with_ratio(shape, line_height, cell_width, width_ratio);
-    draw_caret_shape(context, corners, x, y, width, height);
-    let _ = context.fill();
-}
-
-fn draw_caret_shape(
-    context: &cairo::Context,
-    corners: CursorCornerStyle,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-) {
     match corners {
-        CursorCornerStyle::Square => context.rectangle(x, y, width, height),
+        CursorCornerStyle::Square => snapshot.append_color(color, &rect(x, y, width, height)),
         CursorCornerStyle::Rounded => {
             let radius = (width.min(height) * 0.45).max(1.0);
-            draw_rounded_rectangle(context, x, y, width, height, radius);
+            snapshot.push_rounded_clip(&rounded_rect(x, y, width, height, radius));
+            snapshot.append_color(color, &rect(x, y, width, height));
+            snapshot.pop();
         }
     }
 }
@@ -2529,7 +2364,7 @@ fn caret_pixel_position(
 
 fn draw_preedit(
     widget: &gtk::DrawingArea,
-    context: &cairo::Context,
+    snapshot: &gtk::Snapshot,
     render: &RenderFrame,
     preedit: &crate::render::RenderPreedit,
     line_height: f64,
@@ -2539,9 +2374,10 @@ fn draw_preedit(
     let x = preedit.column.max(0) as f64 * cell_width;
     let y = preedit.line.max(0) as f64 * line_height;
     let columns = preedit.columns.max(1);
-    context.set_source_rgb(37.0 / 255.0, 41.0 / 255.0, 48.0 / 255.0);
-    context.rectangle(x, y, columns as f64 * cell_width, line_height);
-    let _ = context.fill();
+    snapshot.append_color(
+        &gdk::RGBA::new(37.0 / 255.0, 41.0 / 255.0, 48.0 / 255.0, 1.0),
+        &rect(x, y, columns as f64 * cell_width, line_height),
+    );
 
     let style = RenderStyle {
         fg: Some(default_terminal_palette().foreground.to_string()),
@@ -2560,14 +2396,18 @@ fn draw_preedit(
         style,
     };
     let layout = layout_for_size(widget, &run.markup, font_size_pt);
-    gtk::render_layout(&widget.style_context(), context, x, y, &layout);
+    snapshot.save();
+    snapshot.translate(&point(x, y));
+    snapshot.append_layout(&layout, &widget.style_context().color());
+    snapshot.restore();
 
     if render.cursor.visible {
         let cursor_x =
             (preedit.column.max(0) as usize + preedit.cursor_columns) as f64 * cell_width;
-        context.set_source_rgb(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0);
-        context.rectangle(cursor_x.round(), y.round(), 1.25, line_height);
-        let _ = context.fill();
+        snapshot.append_color(
+            &gdk::RGBA::new(125.0 / 255.0, 211.0 / 255.0, 252.0 / 255.0, 1.0),
+            &rect(cursor_x.round(), y.round(), 1.25, line_height),
+        );
     }
 }
 
@@ -2600,13 +2440,7 @@ fn push_style_markup(span: &mut String, style: &RenderStyle) {
     }
 }
 
-struct Rgb {
-    red: f64,
-    green: f64,
-    blue: f64,
-}
-
-fn parse_hex_color(value: &str) -> Option<Rgb> {
+fn parse_hex_color(value: &str) -> Option<gdk::RGBA> {
     let value = value.strip_prefix('#')?;
     if value.len() != 6 {
         return None;
@@ -2614,11 +2448,12 @@ fn parse_hex_color(value: &str) -> Option<Rgb> {
     let red = u8::from_str_radix(&value[0..2], 16).ok()?;
     let green = u8::from_str_radix(&value[2..4], 16).ok()?;
     let blue = u8::from_str_radix(&value[4..6], 16).ok()?;
-    Some(Rgb {
-        red: f64::from(red) / 255.0,
-        green: f64::from(green) / 255.0,
-        blue: f64::from(blue) / 255.0,
-    })
+    Some(gdk::RGBA::new(
+        f32::from(red) / 255.0,
+        f32::from(green) / 255.0,
+        f32::from(blue) / 255.0,
+        1.0,
+    ))
 }
 
 fn markup_escape(ch: char) -> String {
@@ -2684,57 +2519,6 @@ mod tests {
         assert!(run.markup.contains("underline=\"single\""));
         assert!(run.markup.contains("strikethrough=\"true\""));
         assert!(run.markup.contains("&lt;&amp;&gt;"));
-    }
-
-    #[test]
-    fn row_surface_key_reuses_same_line_content_after_row_shift() {
-        let style = RenderStyle {
-            fg: Some(default_terminal_palette().foreground.to_string()),
-            bg: None,
-            bold: false,
-            italic: false,
-            underline: false,
-            strikeout: false,
-            selected: false,
-        };
-        let run = RenderRun {
-            start_column: 0,
-            columns: 5,
-            text: "hello".to_string(),
-            markup: run_markup(&style, "hello"),
-            style,
-        };
-        let first = RenderLine::new(
-            4,
-            RenderRegion::History,
-            "hello".to_string(),
-            String::new(),
-            Vec::new(),
-            vec![run.clone()],
-        );
-        let shifted = RenderLine::new(
-            3,
-            RenderRegion::History,
-            "hello".to_string(),
-            String::new(),
-            Vec::new(),
-            vec![run],
-        );
-
-        assert_eq!(first.paint_key, shifted.paint_key);
-        assert_eq!(
-            RowSurfaceLineKey::from(&first),
-            RowSurfaceLineKey::from(&shifted)
-        );
-    }
-
-    #[test]
-    fn row_surface_cache_budget_holds_multiple_4k_viewports() {
-        let row_bytes = 3840 * 24 * 4;
-
-        assert_eq!(MAX_ROW_SURFACE_CACHE_BYTES / row_bytes, 182);
-        assert!(MAX_ROW_SURFACE_CACHE_BYTES >= row_bytes * 180);
-        assert!(MAX_ROW_SURFACE_CACHE_BYTES < row_bytes * 512);
     }
 
     #[test]
