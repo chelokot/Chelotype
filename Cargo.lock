@@ -748,9 +748,9 @@ checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
 
 [[package]]
 name = "libghostty-vt"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04c77176dd05b2b5718046d807e786473f463ea6d478d56f8c0105e2fe6f71f5"
+checksum = "16c7287a8dc35c3436224b39358af81ab9ea54bafa0f7ea2e068bd2a47bdcb2d"
 dependencies = [
  "bitflags 2.11.1",
  "int-enum",
@@ -759,9 +759,9 @@ dependencies = [
 
 [[package]]
 name = "libghostty-vt-sys"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "404671567c0ac43389a69ae424eefc89390a25d3a5386a54249cdaf13e01b411"
+checksum = "df233d9b287cded4bbebba3463c6df7a8bdb516c0341ed984e870ef5594c2e6f"
 
 [[package]]
 name = "lock_api"

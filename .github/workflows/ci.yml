@@ -24,16 +24,10 @@ jobs:
           sudo apt-get install -y fish libadwaita-1-dev libgtk-4-dev zsh \
             xvfb xauth xdotool imagemagick dbus-x11 python3 \
             zsh-autosuggestions zsh-syntax-highlighting tmux neovim weston \
-            fonts-dejavu-core fonts-liberation libgl1-mesa-dri
-
-      - name: Fingerprint CPU features for native Zig objects
-        id: cpu
-        run: echo "features=$(grep -m1 '^flags' /proc/cpuinfo | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+            fonts-dejavu-core fonts-liberation libgl1-mesa-dri qemu-user
 
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
-        with:
-          key: cpu-${{ steps.cpu.outputs.features }}
 
       - name: Check formatting and release metadata
         run: |
@@ -46,6 +40,14 @@ jobs:
           CHELOTYPE_REQUIRE_E2E: "1"
           GSK_RENDERER: cairo
         run: scripts/with-zig.sh cargo test --locked -- --nocapture --test-threads=1
+
+      - name: Run on a baseline x86-64 CPU
+        run: |
+          CHELOTYPE_HEADLESS=1 \
+          CHELOTYPE_SNAPSHOT_DIR="$(mktemp -d)" \
+          CHELOTYPE_HEADLESS_ACTIONS=$'printf \'%s%s\\n\' BASELINE_ CPU_OK\n' \
+          CHELOTYPE_HEADLESS_EXPECT=BASELINE_CPU_OK \
+            qemu-x86_64 -cpu qemu64 target/debug/chelotype
 
       - name: Check Flatpak release linkage
         run: scripts/with-zig.sh cargo build --release --locked --features libghostty-vt/link-dynamic

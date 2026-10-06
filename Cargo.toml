@@ -17,7 +17,7 @@ libc = "0.2"
 portable-pty = "0.9"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-libghostty-vt = { version = "0.2.0", default-features = false }
+libghostty-vt = { version = "0.2.2", default-features = false }
 unicode-width = "0.2"
 
 [dev-dependencies]
