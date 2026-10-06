@@ -925,27 +925,27 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/libghostty-vt/libghostty-vt-0.2.0.crate",
-        "sha256": "04c77176dd05b2b5718046d807e786473f463ea6d478d56f8c0105e2fe6f71f5",
-        "dest": "cargo/vendor/libghostty-vt-0.2.0"
+        "url": "https://static.crates.io/crates/libghostty-vt/libghostty-vt-0.2.2.crate",
+        "sha256": "16c7287a8dc35c3436224b39358af81ab9ea54bafa0f7ea2e068bd2a47bdcb2d",
+        "dest": "cargo/vendor/libghostty-vt-0.2.2"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"04c77176dd05b2b5718046d807e786473f463ea6d478d56f8c0105e2fe6f71f5\", \"files\": {}}",
-        "dest": "cargo/vendor/libghostty-vt-0.2.0",
+        "contents": "{\"package\": \"16c7287a8dc35c3436224b39358af81ab9ea54bafa0f7ea2e068bd2a47bdcb2d\", \"files\": {}}",
+        "dest": "cargo/vendor/libghostty-vt-0.2.2",
         "dest-filename": ".cargo-checksum.json"
     },
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/libghostty-vt-sys/libghostty-vt-sys-0.2.0.crate",
-        "sha256": "404671567c0ac43389a69ae424eefc89390a25d3a5386a54249cdaf13e01b411",
-        "dest": "cargo/vendor/libghostty-vt-sys-0.2.0"
+        "url": "https://static.crates.io/crates/libghostty-vt-sys/libghostty-vt-sys-0.2.2.crate",
+        "sha256": "df233d9b287cded4bbebba3463c6df7a8bdb516c0341ed984e870ef5594c2e6f",
+        "dest": "cargo/vendor/libghostty-vt-sys-0.2.2"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"404671567c0ac43389a69ae424eefc89390a25d3a5386a54249cdaf13e01b411\", \"files\": {}}",
-        "dest": "cargo/vendor/libghostty-vt-sys-0.2.0",
+        "contents": "{\"package\": \"df233d9b287cded4bbebba3463c6df7a8bdb516c0341ed984e870ef5594c2e6f\", \"files\": {}}",
+        "dest": "cargo/vendor/libghostty-vt-sys-0.2.2",
         "dest-filename": ".cargo-checksum.json"
     },
     {

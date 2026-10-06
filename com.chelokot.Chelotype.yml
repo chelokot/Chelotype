@@ -74,8 +74,8 @@ modules:
       - zig-sources.json
       - type: archive
         archive-type: tar-gzip
-        url: https://codeload.github.com/ghostty-org/ghostty/tar.gz/fdbf9ff3a31d7531b691cb49c98fc465a1a503a0
-        sha256: dcc4ef2a369c7eac13038572c9ce3ab46457dc7a9dbb371710039ed480afbebc
+        url: https://codeload.github.com/ghostty-org/ghostty/tar.gz/a887df42c56f6de86c0fe6da9c4eeca37931e083
+        sha256: fb4b2f9ffa0af125983041fdbe4ef94d3fa79fb9f2d22b9c213c0e3847a866b6
         dest: ghostty-src
         strip-components: 1
       - type: git

@@ -216,7 +216,7 @@ pub fn apply_terminal_palette(
     palette: &TerminalPalette,
 ) -> libghostty_vt::error::Result<()> {
     let mut indexed = terminal.default_color_palette()?;
-    for (target, color) in indexed.iter_mut().zip(palette.indexed) {
+    for (target, color) in indexed.0.iter_mut().zip(palette.indexed) {
         *target = terminal_rgb(color);
     }
     terminal
